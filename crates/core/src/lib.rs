@@ -180,3 +180,63 @@ fn escape_id_part(part: &str) -> String {
     part.replace('/', "%2F")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{CommonDoc, DocumentKind, IngestContext, make_document_id};
+
+    #[test]
+    fn document_ids_are_stable_and_include_identity_dimensions() {
+        let id = make_document_id(
+            "nixpkgs",
+            "nixos-options",
+            "unstable",
+            "option",
+            "programs.git.enable",
+        );
+
+        assert_eq!(
+            id,
+            "nixpkgs/nixos-options/unstable/option/programs.git.enable"
+        );
+    }
+
+    #[test]
+    fn document_id_parts_escape_slashes() {
+        let id = make_document_id(
+            "my/project",
+            "options",
+            "release/25.05",
+            "option",
+            "programs.git.enable",
+        );
+
+        assert_eq!(
+            id,
+            "my%2Fproject/options/release%2F25.05/option/programs.git.enable"
+        );
+    }
+
+    #[test]
+    fn common_doc_uses_context_identity() {
+        let context = IngestContext {
+            project: "nixpkgs".into(),
+            dataset: "nixos-options".into(),
+            ref_id: "unstable".into(),
+            revision: Some("abc123".into()),
+            repo: None,
+        };
+
+        let doc = CommonDoc::new(&context, DocumentKind::Option, "programs.git.enable");
+
+        assert_eq!(doc.project, "nixpkgs");
+        assert_eq!(doc.dataset, "nixos-options");
+        assert_eq!(doc.ref_id, "unstable");
+        assert_eq!(doc.revision.as_deref(), Some("abc123"));
+        assert_eq!(doc.kind, DocumentKind::Option);
+        assert_eq!(doc.name, "programs.git.enable");
+        assert_eq!(
+            doc.id,
+            "nixpkgs/nixos-options/unstable/option/programs.git.enable"
+        );
+    }
+}
