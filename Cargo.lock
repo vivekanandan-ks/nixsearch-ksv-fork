@@ -1383,6 +1383,7 @@ dependencies = [
  "serde_json",
  "tantivy",
  "tempfile",
+ "time",
 ]
 
 [[package]]

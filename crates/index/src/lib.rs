@@ -1,11 +1,12 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _};
 use tantivy::{Index, IndexReader, IndexWriter, doc};
+use time::OffsetDateTime;
 
 use nix_search_core::{OptionDoc, PackageDoc, SearchDocument};
 
@@ -108,6 +109,15 @@ pub struct SearchHit {
     pub document: SearchDocument,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions {
+    pub query: String,
+    pub limit: usize,
+    pub project: Option<String>,
+    pub dataset: Option<String>,
+    pub ref_id: Option<String>,
+}
+
 impl SearchIndex {
     pub fn create_or_replace(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -160,16 +170,16 @@ impl SearchIndex {
         })
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    pub fn search(&self, options: SearchOptions) -> Result<Vec<SearchHit>> {
         let searcher = self.reader.searcher();
 
         let mut parser = QueryParser::for_index(
             &self.index,
             vec![
                 self.fields.name_exact,
+                self.fields.name_groups,
                 self.fields.name_text,
                 self.fields.name_root,
-                self.fields.name_groups,
                 self.fields.name_leaf,
                 self.fields.description,
                 self.fields.option_set,
@@ -184,26 +194,61 @@ impl SearchIndex {
         );
 
         parser.set_field_boost(self.fields.name_exact, 20.0);
-        parser.set_field_boost(self.fields.name_text, 10.0);
         parser.set_field_boost(self.fields.name_groups, 15.0);
+        parser.set_field_boost(self.fields.name_text, 10.0);
         parser.set_field_boost(self.fields.name_root, 8.0);
         parser.set_field_boost(self.fields.name_leaf, 6.0);
-        parser.set_field_boost(self.fields.option_set, 3.0);
-        parser.set_field_boost(self.fields.parents, 2.0);
-        parser.set_field_boost(self.fields.option_type, 1.5);
-        parser.set_field_boost(self.fields.description, 1.0);
         parser.set_field_boost(self.fields.attribute_exact, 25.0);
         parser.set_field_boost(self.fields.attribute_text, 12.0);
         parser.set_field_boost(self.fields.main_program, 20.0);
+        parser.set_field_boost(self.fields.option_set, 3.0);
+        parser.set_field_boost(self.fields.parents, 2.0);
         parser.set_field_boost(self.fields.package_set, 2.0);
+        parser.set_field_boost(self.fields.option_type, 1.5);
         parser.set_field_boost(self.fields.platforms, 1.0);
+        parser.set_field_boost(self.fields.description, 1.0);
 
-        let query = parser
-            .parse_query(query)
-            .with_context(|| format!("failed to parse query {query:?}"))?;
+        let parsed_query = parser
+            .parse_query(&options.query)
+            .with_context(|| format!("failed to parse query {:?}", options.query))?;
+
+        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
+            vec![(tantivy::query::Occur::Must, parsed_query)];
+
+        if let Some(project) = options.project {
+            clauses.push((
+                tantivy::query::Occur::Must,
+                Box::new(tantivy::query::TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.project, &project),
+                    tantivy::schema::IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        if let Some(dataset) = options.dataset {
+            clauses.push((
+                tantivy::query::Occur::Must,
+                Box::new(tantivy::query::TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.dataset, &dataset),
+                    tantivy::schema::IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        if let Some(ref_id) = options.ref_id {
+            clauses.push((
+                tantivy::query::Occur::Must,
+                Box::new(tantivy::query::TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.ref_id, &ref_id),
+                    tantivy::schema::IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        let query = tantivy::query::BooleanQuery::new(clauses);
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit).order_by_score())
+            .search(&query, &TopDocs::with_limit(options.limit).order_by_score())
             .context("search failed")?;
 
         let mut hits = Vec::with_capacity(top_docs.len());
@@ -381,13 +426,95 @@ fn build_schema() -> Schema {
     builder.build()
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexStore {
+    root: PathBuf,
+}
+
+impl IndexStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn generations_dir(&self) -> PathBuf {
+        self.root.join("generations")
+    }
+
+    pub fn current_file(&self) -> PathBuf {
+        self.root.join("CURRENT")
+    }
+
+    pub fn create_generation_path(&self) -> Result<PathBuf> {
+        fs::create_dir_all(self.generations_dir()).with_context(|| {
+            format!(
+                "failed to create generations dir {}",
+                self.generations_dir().display()
+            )
+        })?;
+
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
+        let path = self
+            .generations_dir()
+            .join(format!("generation-{timestamp}"));
+
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create generation {}", path.display()))?;
+
+        Ok(path)
+    }
+
+    pub fn publish(&self, generation_path: &Path) -> Result<()> {
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("failed to create index root {}", self.root.display()))?;
+
+        let generation_path = generation_path
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", generation_path.display()))?;
+
+        let current_tmp = self.root.join("CURRENT.tmp");
+
+        fs::write(&current_tmp, generation_path.to_string_lossy().as_bytes())
+            .with_context(|| format!("failed to write {}", current_tmp.display()))?;
+
+        fs::rename(&current_tmp, self.current_file()).with_context(|| {
+            format!(
+                "failed to publish current index {}",
+                self.current_file().display()
+            )
+        })?;
+
+        Ok(())
+    }
+
+    pub fn current_path(&self) -> Result<PathBuf> {
+        let raw = fs::read_to_string(self.current_file()).with_context(|| {
+            format!(
+                "failed to read current index file {}; run `nix-search update` first",
+                self.current_file().display()
+            )
+        })?;
+
+        let path = PathBuf::from(raw.trim());
+
+        if path.as_os_str().is_empty() {
+            anyhow::bail!("current index file is empty");
+        }
+
+        Ok(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use nix_search_core::{IngestContext, OptionDoc, SearchDocument};
 
-    use super::SearchIndex;
+    use super::{SearchIndex, SearchOptions};
 
     fn test_context() -> IngestContext {
         IngestContext {
@@ -439,7 +566,15 @@ mod tests {
 
         let index = SearchIndex::open(tempdir.path()).unwrap();
 
-        let hits = index.search("git", 10).unwrap();
+        let hits = index
+            .search(SearchOptions {
+                query: "git".to_owned(),
+                limit: 10,
+                project: None,
+                dataset: None,
+                ref_id: None,
+            })
+            .unwrap();
 
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document.name(), "programs.git.enable");
@@ -464,7 +599,15 @@ mod tests {
 
         let index = SearchIndex::open(tempdir.path()).unwrap();
 
-        let hits = index.search("programs.git.enable", 10).unwrap();
+        let hits = index
+            .search(SearchOptions {
+                query: "programs.git.enable".to_owned(),
+                limit: 10,
+                project: None,
+                dataset: None,
+                ref_id: None,
+            })
+            .unwrap();
 
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document.name(), "programs.git.enable");
@@ -489,7 +632,15 @@ mod tests {
 
         let index = SearchIndex::open(tempdir.path()).unwrap();
 
-        let hits = index.search("EFI", 10).unwrap();
+        let hits = index
+            .search(SearchOptions {
+                query: "EFI".to_owned(),
+                limit: 10,
+                project: None,
+                dataset: None,
+                ref_id: None,
+            })
+            .unwrap();
 
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document.name(), "boot.loader.systemd-boot.enable");
@@ -522,7 +673,15 @@ mod tests {
 
         let index = SearchIndex::open(tempdir.path()).unwrap();
 
-        let hits = index.search("services.tailscale", 10).unwrap();
+        let hits = index
+            .search(SearchOptions {
+                query: "services.tailscale".to_owned(),
+                limit: 10,
+                project: None,
+                dataset: None,
+                ref_id: None,
+            })
+            .unwrap();
 
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document.name(), "services.tailscale.enable");
@@ -547,9 +706,32 @@ mod tests {
 
         let index = SearchIndex::open(tempdir.path()).unwrap();
 
-        let hits = index.search("enable", 10).unwrap();
+        let hits = index
+            .search(SearchOptions {
+                query: "enable".to_owned(),
+                limit: 10,
+                project: None,
+                dataset: None,
+                ref_id: None,
+            })
+            .unwrap();
 
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document.name(), "services.tailscale.enable");
+    }
+
+    #[test]
+    fn index_store_publishes_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+
+        let generation = store.create_generation_path().unwrap();
+        assert!(generation.exists());
+
+        store.publish(&generation).unwrap();
+
+        let current = store.current_path().unwrap();
+
+        assert_eq!(current, generation.canonicalize().unwrap());
     }
 }

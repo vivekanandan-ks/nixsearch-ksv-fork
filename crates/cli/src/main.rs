@@ -1,6 +1,4 @@
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -10,7 +8,7 @@ use nix_search_config::{
     AppConfig, DatasetConfig, DatasetKind, ProducerConfig, ProjectConfig, RefConfig,
 };
 use nix_search_core::{ArtifactKind, SearchDocument};
-use nix_search_index::{SearchHit, SearchIndex};
+use nix_search_index::{IndexStore, SearchHit, SearchIndex, SearchOptions};
 use nix_search_source::{
     ChannelPackagesJsonProducer, Consumer, ExistingFileProducer, NixBuildOptionsJsonProducer,
     OptionsJsonConsumer, PackagesJsonConsumer, ProduceRequest, ProducedArtifact, Producer,
@@ -173,6 +171,14 @@ async fn update(args: SelectionArgs) -> Result<()> {
         bail!("no refs matched selection");
     }
 
+    let index_store = IndexStore::new(&config.data.index_dir);
+    let generation_path = index_store.create_generation_path()?;
+
+    let index = SearchIndex::create_or_replace(&generation_path)?;
+    let mut writer = index.writer()?;
+
+    let mut total_documents = 0usize;
+
     for target in targets {
         info!(
             project = target.project_id,
@@ -182,8 +188,29 @@ async fn update(args: SelectionArgs) -> Result<()> {
         );
 
         let produced = produce_target(&store, &target).await?;
-        build_index_for_produced_artifact(&config, &store, &target, &produced).await?;
+        let documents = consume_target(&store, &target, &produced).await?;
+
+        for document in &documents {
+            writer.add_document(document)?;
+        }
+
+        total_documents += documents.len();
+
+        println!(
+            "added {} documents: {}/{}/{}",
+            documents.len(),
+            target.project_id,
+            target.dataset_id,
+            target.ref_config.id
+        );
     }
+
+    writer.commit()?;
+    index_store.publish(&generation_path)?;
+
+    println!("published index generation");
+    println!("  generation = {}", generation_path.display());
+    println!("  documents = {total_documents}");
 
     Ok(())
 }
@@ -255,9 +282,52 @@ async fn index_build(args: SelectionArgs) -> Result<()> {
         bail!("no refs matched selection");
     }
 
+    let index_store = IndexStore::new(&config.data.index_dir);
+    let generation_path = index_store.create_generation_path()?;
+
+    let index = SearchIndex::create_or_replace(&generation_path)?;
+    let mut writer = index.writer()?;
+
+    let mut total_documents = 0usize;
+
     for target in targets {
-        build_index_for_existing_artifact(&config, &store, &target).await?;
+        let artifact_ref = latest_artifact_ref_for_target(&target);
+        let metadata = store.get_metadata(&artifact_ref).await.with_context(|| {
+                   format!(
+                       "failed to read artifact metadata for {}/{}/{}; run `nix-search artifact produce` or
+ `nix-search update` first",
+                       target.project_id, target.dataset_id, target.ref_config.id
+                   )
+               })?;
+
+        let produced = ProducedArtifact {
+            artifact_ref,
+            metadata,
+        };
+
+        let documents = consume_target(&store, &target, &produced).await?;
+
+        for document in &documents {
+            writer.add_document(document)?;
+        }
+
+        total_documents += documents.len();
+
+        println!(
+            "added {} documents: {}/{}/{}",
+            documents.len(),
+            target.project_id,
+            target.dataset_id,
+            target.ref_config.id
+        );
     }
+
+    writer.commit()?;
+    index_store.publish(&generation_path)?;
+
+    println!("published index generation");
+    println!("  generation = {}", generation_path.display());
+    println!("  documents = {total_documents}");
 
     Ok(())
 }
@@ -265,49 +335,21 @@ async fn index_build(args: SelectionArgs) -> Result<()> {
 fn search(args: SearchArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
 
-    let selection = SelectionArgs {
-        config: args.config,
+    let index_store = IndexStore::new(&config.data.index_dir);
+    let current_path = index_store.current_path()?;
+
+    let index = SearchIndex::open(&current_path)
+        .with_context(|| format!("failed to open current index {}", current_path.display()))?;
+
+    let hits = index.search(SearchOptions {
+        query: args.query,
+        limit: args.limit,
         project: args.project,
         dataset: args.dataset,
         ref_id: args.ref_id,
-    };
+    })?;
 
-    let targets = select_targets(&config, &selection)?;
-
-    if targets.is_empty() {
-        bail!("no refs matched selection");
-    }
-
-    let mut all_hits = Vec::new();
-
-    for target in targets {
-        let index_dir = index_dir_for_target(&config, &target);
-
-        if !index_dir.exists() {
-            warn!(
-                index_dir = %index_dir.display(),
-                project = target.project_id,
-                dataset = target.dataset_id,
-                ref_id = target.ref_config.id,
-                "skipping missing index"
-            );
-            continue;
-        }
-
-        let index = SearchIndex::open(&index_dir)
-            .with_context(|| format!("failed to open index {}", index_dir.display()))?;
-
-        let hits = index
-            .search(&args.query, args.limit)
-            .with_context(|| format!("failed to search index {}", index_dir.display()))?;
-
-        all_hits.extend(hits);
-    }
-
-    all_hits.sort_by(compare_hits_by_score_desc);
-    all_hits.truncate(args.limit);
-
-    for hit in all_hits {
+    for hit in hits {
         print_search_hit(hit);
     }
 
@@ -368,51 +410,6 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
     }
 }
 
-async fn build_index_for_existing_artifact(
-    config: &AppConfig,
-    store: &ArtifactStore,
-    target: &TargetRef,
-) -> Result<()> {
-    let artifact_ref = latest_artifact_ref_for_target(target);
-    let metadata = store.get_metadata(&artifact_ref).await.with_context(|| {
-        format!(
-            "failed to read artifact metadata for {}/{}/{}; run `nix-search artifact produce` or
- `nix-search update` first",
-            target.project_id, target.dataset_id, target.ref_config.id
-        )
-    })?;
-
-    let produced = ProducedArtifact {
-        artifact_ref,
-        metadata,
-    };
-
-    build_index_for_produced_artifact(config, store, target, &produced).await
-}
-
-async fn build_index_for_produced_artifact(
-    config: &AppConfig,
-    store: &ArtifactStore,
-    target: &TargetRef,
-    produced: &ProducedArtifact,
-) -> Result<()> {
-    let documents = consume_target(store, target, produced).await?;
-    let index_dir = index_dir_for_target(config, target);
-
-    write_index(&index_dir, &documents)?;
-
-    println!(
-        "indexed {} documents: {}/{}/{}",
-        documents.len(),
-        target.project_id,
-        target.dataset_id,
-        target.ref_config.id
-    );
-    println!("  index_dir = {}", index_dir.display());
-
-    Ok(())
-}
-
 async fn consume_target(
     store: &ArtifactStore,
     target: &TargetRef,
@@ -449,21 +446,6 @@ async fn consume_target(
     }
 }
 
-fn write_index(index_dir: &Path, documents: &[SearchDocument]) -> Result<()> {
-    info!(count = documents.len(), "writing index");
-
-    let index = SearchIndex::create_or_replace(index_dir)?;
-    let mut writer = index.writer()?;
-
-    for document in documents {
-        writer.add_document(document)?;
-    }
-
-    writer.commit()?;
-
-    Ok(())
-}
-
 fn load_required_config(path: &Path) -> Result<AppConfig> {
     AppConfig::load(Some(path)).with_context(|| format!("failed to load {}", path.display()))
 }
@@ -489,15 +471,6 @@ fn file_url_to_path(url: &str) -> Result<PathBuf> {
     }
 
     Ok(PathBuf::from(path))
-}
-
-fn index_dir_for_target(config: &AppConfig, target: &TargetRef) -> PathBuf {
-    config
-        .data
-        .index_dir
-        .join(&target.project_id)
-        .join(&target.dataset_id)
-        .join(&target.ref_config.id)
 }
 
 fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
@@ -594,13 +567,6 @@ fn collect_dataset_targets(
             ref_config: ref_config.clone(),
         });
     }
-}
-
-fn compare_hits_by_score_desc(left: &SearchHit, right: &SearchHit) -> Ordering {
-    right
-        .score
-        .partial_cmp(&left.score)
-        .unwrap_or(Ordering::Equal)
 }
 
 fn print_project(project_id: &str, project: &ProjectConfig) {
