@@ -38,6 +38,13 @@ impl AppConfig {
         let mut figment = Figment::from(Serialized::defaults(Self::default()));
 
         if let Some(path) = path {
+            if !path.exists() {
+                return Err(ConfigError::Validation(format!(
+                    "config file does not exist: {}",
+                    path.display()
+                )));
+            }
+
             figment = figment.merge(Toml::file(path));
         }
 
