@@ -8,6 +8,7 @@ license.workspace = true
 nix-search-core.workspace = true
 nix-search-ingest.workspace = true
 nix-search-index.workspace = true
+nix-search-config.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true

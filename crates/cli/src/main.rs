@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
+use nix_search_config::AppConfig;
 use nix_search_core::IngestContext;
 use nix_search_index::SearchIndex;
 use nix_search_ingest::parse_options_json;
@@ -48,6 +49,11 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    CheckConfig {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -74,6 +80,8 @@ fn main() -> Result<()> {
             index_dir,
             limit,
         } => search(index_dir, &query, limit),
+
+        Command::CheckConfig { config } => check_config(config),
     }
 }
 
@@ -140,6 +148,36 @@ fn search(index_dir: PathBuf, query: &str, limit: usize) -> Result<()> {
 
             if !summary.is_empty() {
                 println!("       {summary}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_config(config: Option<PathBuf>) -> Result<()> {
+    let loaded = AppConfig::load(config.as_deref()).context("configuration check failed")?;
+
+    println!("configuration is valid");
+    println!("artifact_url = {}", loaded.data.artifact_url);
+    println!("index_dir = {}", loaded.data.index_dir.display());
+    println!("listen = {}", loaded.server.listen);
+    println!("projects = {}", loaded.projects.len());
+
+    for (project_id, project) in &loaded.projects {
+        let name = project.name.as_deref().unwrap_or(project_id);
+        println!("  project {project_id}: {name}");
+
+        for dataset in &project.datasets {
+            let name = dataset.name.as_deref().unwrap_or(&dataset.id);
+            println!("    dataset {}: {} ({:?})", dataset.id, name, dataset.kind);
+
+            for ref_config in &dataset.refs {
+                println!(
+                    "      ref {}: producer={:?}",
+                    ref_config.id,
+                    ref_config.producer.kind()
+                );
             }
         }
     }

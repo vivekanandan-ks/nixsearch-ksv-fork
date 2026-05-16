@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/cli", "crates/core", "crates/index", "crates/ingest"]
+members = [
+  "crates/cli",
+  "crates/config",
+  "crates/core",
+  "crates/index",
+  "crates/ingest",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +16,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+figment = { version = "0.10", features = ["toml", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -22,3 +29,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix-search-core = { path = "crates/core" }
 nix-search-ingest = { path = "crates/ingest" }
 nix-search-index = { path = "crates/index" }
+nix-search-config = { path = "crates/config" }
