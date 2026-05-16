@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+brotli.workspace = true
 bytes.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 
 nix-search-core.workspace = true

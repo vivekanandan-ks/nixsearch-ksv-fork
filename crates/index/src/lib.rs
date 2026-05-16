@@ -7,7 +7,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _};
 use tantivy::{Index, IndexReader, IndexWriter, doc};
 
-use nix_search_core::{OptionDoc, SearchDocument};
+use nix_search_core::{OptionDoc, PackageDoc, SearchDocument};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -25,6 +25,11 @@ struct IndexFields {
     parents: Field,
     option_type: Field,
     stored_json: Field,
+    attribute_exact: Field,
+    attribute_text: Field,
+    package_set: Field,
+    platforms: Field,
+    main_program: Field,
 }
 
 impl IndexFields {
@@ -60,6 +65,21 @@ impl IndexFields {
             stored_json: schema
                 .get_field("stored_json")
                 .context("missing field stored_json")?,
+            attribute_exact: schema
+                .get_field("attribute_exact")
+                .context("missing field attribute_exact")?,
+            attribute_text: schema
+                .get_field("attribute_text")
+                .context("missing field attribute_text")?,
+            package_set: schema
+                .get_field("package_set")
+                .context("missing field package_set")?,
+            platforms: schema
+                .get_field("platforms")
+                .context("missing field platforms")?,
+            main_program: schema
+                .get_field("main_program")
+                .context("missing field main_program")?,
         })
     }
 }
@@ -140,6 +160,11 @@ impl SearchIndex {
                 self.fields.option_set,
                 self.fields.parents,
                 self.fields.option_type,
+                self.fields.attribute_exact,
+                self.fields.attribute_text,
+                self.fields.package_set,
+                self.fields.platforms,
+                self.fields.main_program,
             ],
         );
 
@@ -149,6 +174,11 @@ impl SearchIndex {
         parser.set_field_boost(self.fields.parents, 2.0);
         parser.set_field_boost(self.fields.option_type, 1.5);
         parser.set_field_boost(self.fields.description, 1.0);
+        parser.set_field_boost(self.fields.attribute_exact, 25.0);
+        parser.set_field_boost(self.fields.attribute_text, 12.0);
+        parser.set_field_boost(self.fields.main_program, 20.0);
+        parser.set_field_boost(self.fields.package_set, 2.0);
+        parser.set_field_boost(self.fields.platforms, 1.0);
 
         let query = parser
             .parse_query(query)
@@ -189,6 +219,7 @@ impl SearchIndexWriter {
     pub fn add_document(&mut self, document: &SearchDocument) -> Result<()> {
         match document {
             SearchDocument::Option(option) => self.add_option(option),
+            SearchDocument::Package(package) => self.add_package(package),
         }
     }
 
@@ -237,6 +268,47 @@ impl SearchIndexWriter {
 
         Ok(())
     }
+
+    fn add_package(&mut self, package: &PackageDoc) -> Result<()> {
+        let common = &package.common;
+        let stored_json = serde_json::to_string(&SearchDocument::Package(package.clone()))
+            .context("failed to serialize search document")?;
+
+        let mut document = doc!(
+            self.fields.id => common.id.clone(),
+            self.fields.project => common.project.clone(),
+            self.fields.dataset => common.dataset.clone(),
+            self.fields.ref_id => common.ref_id.clone(),
+            self.fields.kind => common.kind.as_str(),
+            self.fields.name_exact => common.name.clone(),
+            self.fields.name_text => common.name.clone(),
+            self.fields.attribute_exact => package.attribute.clone(),
+            self.fields.attribute_text => package.attribute.clone(),
+            self.fields.stored_json => stored_json,
+        );
+
+        if let Some(description) = &package.description {
+            document.add_text(self.fields.description, description);
+        }
+
+        if let Some(package_set) = &package.package_set {
+            document.add_text(self.fields.package_set, package_set);
+        }
+
+        if let Some(main_program) = &package.main_program {
+            document.add_text(self.fields.main_program, main_program);
+        }
+
+        for platform in &package.platforms {
+            document.add_text(self.fields.platforms, platform);
+        }
+
+        self.writer
+            .add_document(document)
+            .context("failed to add package document to index")?;
+
+        Ok(())
+    }
 }
 
 fn build_schema() -> Schema {
@@ -254,6 +326,12 @@ fn build_schema() -> Schema {
     builder.add_text_field("option_set", STRING | STORED);
     builder.add_text_field("parents", STRING | STORED);
     builder.add_text_field("option_type", TEXT | STORED);
+
+    builder.add_text_field("attribute_exact", STRING | STORED);
+    builder.add_text_field("attribute_text", TEXT | STORED);
+    builder.add_text_field("package_set", STRING | STORED);
+    builder.add_text_field("platforms", STRING | STORED);
+    builder.add_text_field("main_program", STRING | STORED);
 
     builder.add_text_field("stored_json", STORED);
 

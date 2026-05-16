@@ -12,8 +12,8 @@ use nix_search_config::{
 use nix_search_core::{ArtifactKind, SearchDocument};
 use nix_search_index::{SearchHit, SearchIndex};
 use nix_search_source::{
-    Consumer, ExistingFileProducer, NixBuildOptionsJsonProducer, OptionsJsonConsumer,
-    ProduceRequest, ProducedArtifact, Producer,
+    ChannelPackagesJsonProducer, Consumer, ExistingFileProducer, NixBuildOptionsJsonProducer,
+    OptionsJsonConsumer, PackagesJsonConsumer, ProduceRequest, ProducedArtifact, Producer,
 };
 use nix_search_store::{ArtifactRef, ArtifactStore};
 
@@ -350,6 +350,17 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
             })
         }
 
+        ProducerConfig::ChannelPackagesJson { channel, url } => {
+            let producer = ChannelPackagesJsonProducer::new(channel, url.clone());
+
+            producer.produce(store, &request).await.with_context(|| {
+                format!(
+                    "failed to produce channel packages artifact for {}/{}/{}",
+                    target.project_id, target.dataset_id, target.ref_config.id
+                )
+            })
+        }
+
         unsupported => bail!(
             "producer {:?} is configured but not implemented yet",
             unsupported.kind()
@@ -414,6 +425,17 @@ async fn consume_target(
             consumer.consume(store, produced).await.with_context(|| {
                 format!(
                     "failed to consume options artifact for {}/{}/{}",
+                    target.project_id, target.dataset_id, target.ref_config.id
+                )
+            })
+        }
+
+        (DatasetKind::Packages | DatasetKind::Mixed, ArtifactKind::PackagesJson) => {
+            let consumer = PackagesJsonConsumer;
+
+            consumer.consume(store, produced).await.with_context(|| {
+                format!(
+                    "failed to consume packages artifact for {}/{}/{}",
                     target.project_id, target.dataset_id, target.ref_config.id
                 )
             })
@@ -634,6 +656,29 @@ fn print_search_hit(hit: SearchHit) {
     match hit.document {
         SearchDocument::Option(option) => {
             if let Some(description) = option.description {
+                let summary = description.lines().next().unwrap_or("").trim();
+
+                if !summary.is_empty() {
+                    println!("       {summary}");
+                }
+            }
+        }
+        SearchDocument::Package(package) => {
+            let mut details = Vec::new();
+
+            if let Some(pname) = package.pname {
+                details.push(pname);
+            }
+
+            if let Some(version) = package.version {
+                details.push(version);
+            }
+
+            if !details.is_empty() {
+                println!("       {}", details.join(" "));
+            }
+
+            if let Some(description) = package.description {
                 let summary = description.lines().next().unwrap_or("").trim();
 
                 if !summary.is_empty() {

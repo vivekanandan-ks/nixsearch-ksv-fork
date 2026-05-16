@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -6,7 +7,7 @@ use bytes::Bytes;
 use tokio::process::Command;
 
 use nix_search_core::{ArtifactKind, IngestContext, SearchDocument};
-use nix_search_ingest::parse_options_json;
+use nix_search_ingest::{parse_options_json, parse_packages_json};
 use nix_search_store::{ArtifactMetadata, ArtifactMetadataInput, ArtifactRef, ArtifactStore};
 
 #[derive(Debug, Clone)]
@@ -231,6 +232,81 @@ fn normalize_nix_path_source(source_ref: &str) -> String {
     source_ref.to_owned()
 }
 
+#[derive(Debug, Clone)]
+pub struct ChannelPackagesJsonProducer {
+    channel: String,
+    url: Option<String>,
+    producer_name: String,
+}
+
+impl ChannelPackagesJsonProducer {
+    pub fn new(channel: impl Into<String>, url: Option<String>) -> Self {
+        Self {
+            channel: channel.into(),
+            url,
+            producer_name: "channel-packages-json".to_owned(),
+        }
+    }
+
+    fn url(&self) -> String {
+        self.url.clone().unwrap_or_else(|| {
+            format!(
+                "https://channels.nixos.org/{}/packages.json.br",
+                self.channel
+            )
+        })
+    }
+}
+
+#[async_trait]
+impl Producer for ChannelPackagesJsonProducer {
+    async fn produce(
+        &self,
+        store: &ArtifactStore,
+        request: &ProduceRequest,
+    ) -> Result<ProducedArtifact> {
+        let url = self.url();
+
+        let compressed = reqwest::get(&url)
+            .await
+            .with_context(|| format!("failed to fetch {url}"))?
+            .error_for_status()
+            .with_context(|| format!("HTTP error fetching {url}"))?
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read response body from {url}"))?;
+
+        let decompressed = decompress_brotli(&compressed)
+            .with_context(|| format!("failed to decompress Brotli response from {url}"))?;
+
+        let artifact_ref = request.artifact_ref(ArtifactKind::PackagesJson);
+
+        let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
+        metadata_input.source = Some(url);
+
+        let metadata = store
+            .put_artifact(&artifact_ref, Bytes::from(decompressed), metadata_input)
+            .await
+            .context("failed to write packages artifact to store")?;
+
+        Ok(ProducedArtifact {
+            artifact_ref,
+            metadata,
+        })
+    }
+}
+
+fn decompress_brotli(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut decompressor = brotli::Decompressor::new(bytes, 4096);
+    let mut output = Vec::new();
+
+    decompressor
+        .read_to_end(&mut output)
+        .context("Brotli decompression failed")?;
+
+    Ok(output)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct OptionsJsonConsumer;
 
@@ -265,6 +341,40 @@ impl Consumer for OptionsJsonConsumer {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct PackagesJsonConsumer;
+
+#[async_trait]
+impl Consumer for PackagesJsonConsumer {
+    async fn consume(
+        &self,
+        store: &ArtifactStore,
+        artifact: &ProducedArtifact,
+    ) -> Result<Vec<SearchDocument>> {
+        if artifact.artifact_ref.kind != ArtifactKind::PackagesJson {
+            anyhow::bail!(
+                "PackagesJsonConsumer cannot consume artifact kind {:?}",
+                artifact.artifact_ref.kind
+            );
+        }
+
+        let bytes = store
+            .get_artifact(&artifact.artifact_ref)
+            .await
+            .context("failed to read packages artifact")?;
+
+        let context = IngestContext {
+            project: artifact.metadata.project.clone(),
+            dataset: artifact.metadata.dataset.clone(),
+            ref_id: artifact.metadata.ref_id.clone(),
+            revision: artifact.metadata.revision.clone(),
+            repo: None,
+        };
+
+        parse_packages_json(bytes.as_ref(), &context).context("failed to parse packages artifact")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -272,6 +382,8 @@ mod tests {
     use nix_search_core::ArtifactKind;
     use nix_search_store::ArtifactStore;
     use tempfile::tempdir;
+
+    use crate::ChannelPackagesJsonProducer;
 
     use super::{
         Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, Producer,
@@ -377,5 +489,15 @@ mod tests {
         let source = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
 
         assert_eq!(normalize_nix_path_source(source), source);
+    }
+
+    #[test]
+    fn channel_packages_json_producer_builds_default_url() {
+        let producer = ChannelPackagesJsonProducer::new("nixos-unstable", None);
+
+        assert_eq!(
+            producer.url(),
+            "https://channels.nixos.org/nixos-unstable/packages.json.br"
+        );
     }
 }

@@ -159,16 +159,82 @@ impl OptionDoc {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct License {
+    pub name: Option<String>,
+    pub full_name: Option<String>,
+    pub spdx_id: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Maintainer {
+    pub name: Option<String>,
+    pub github: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackageDoc {
+    #[serde(flatten)]
+    pub common: CommonDoc,
+
+    pub attribute: String,
+    pub package_set: Option<String>,
+    pub pname: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub long_description: Option<String>,
+    pub homepages: Vec<String>,
+    pub platforms: Vec<String>,
+    pub licenses: Vec<License>,
+    pub maintainers: Vec<Maintainer>,
+    pub main_program: Option<String>,
+    pub position: Option<String>,
+    pub broken: Option<bool>,
+}
+
+impl PackageDoc {
+    pub fn new(context: &IngestContext, attribute: impl Into<String>) -> Self {
+        let attribute = attribute.into();
+
+        Self {
+            common: CommonDoc::new(context, DocumentKind::Package, attribute.clone()),
+            package_set: package_set_from_attribute(&attribute),
+            attribute,
+            pname: None,
+            version: None,
+            description: None,
+            long_description: None,
+            homepages: Vec::new(),
+            platforms: Vec::new(),
+            licenses: Vec::new(),
+            maintainers: Vec::new(),
+            main_program: None,
+            position: None,
+            broken: None,
+        }
+    }
+}
+
+fn package_set_from_attribute(attribute: &str) -> Option<String> {
+    attribute
+        .split_once('.')
+        .map(|(package_set, _)| package_set.to_owned())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "document_type", rename_all = "kebab-case")]
 pub enum SearchDocument {
     Option(OptionDoc),
+    Package(PackageDoc),
 }
 
 impl SearchDocument {
     pub fn common(&self) -> &CommonDoc {
         match self {
             Self::Option(doc) => &doc.common,
+            Self::Package(doc) => &doc.common,
         }
     }
 
@@ -264,5 +330,22 @@ mod tests {
             doc.id,
             "nixpkgs/nixos-options/unstable/option/programs.git.enable"
         );
+    }
+
+    #[test]
+    fn package_doc_uses_attribute_as_document_name() {
+        let context = IngestContext {
+            project: "nixpkgs".into(),
+            dataset: "packages".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+
+        let doc = super::PackageDoc::new(&context, "python3Packages.requests");
+
+        assert_eq!(doc.common.name, "python3Packages.requests");
+        assert_eq!(doc.attribute, "python3Packages.requests");
+        assert_eq!(doc.package_set.as_deref(), Some("python3Packages"));
     }
 }
