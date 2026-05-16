@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::process::Command;
 
 use nix_search_core::{ArtifactKind, IngestContext, SearchDocument};
 use nix_search_ingest::parse_options_json;
@@ -117,6 +118,119 @@ impl Producer for ExistingFileProducer {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NixBuildOptionsJsonProducer {
+    source_ref: String,
+    attribute: String,
+    import_path: String,
+    output_path: String,
+    producer_name: String,
+}
+
+impl NixBuildOptionsJsonProducer {
+    pub fn new(
+        source_ref: impl Into<String>,
+        attribute: impl Into<String>,
+        import_path: impl Into<String>,
+        output_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_ref: source_ref.into(),
+            attribute: attribute.into(),
+            import_path: import_path.into(),
+            output_path: output_path.into(),
+            producer_name: "nix-build-options-json".to_owned(),
+        }
+    }
+}
+
+#[async_trait]
+impl Producer for NixBuildOptionsJsonProducer {
+    async fn produce(
+        &self,
+        store: &ArtifactStore,
+        request: &ProduceRequest,
+    ) -> Result<ProducedArtifact> {
+        let nix_path_source = normalize_nix_path_source(&self.source_ref);
+        let expression = format!("<nixpkgs/{}>", self.import_path);
+
+        let output = Command::new("nix-build")
+            .arg("--no-build-output")
+            .arg(&expression)
+            .arg("--attr")
+            .arg(&self.attribute)
+            .arg("--no-out-link")
+            .arg("-I")
+            .arg(format!("nixpkgs={nix_path_source}"))
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to run nix-build for source ref {:?}",
+                    self.source_ref
+                )
+            })?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "nix-build failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        let result_path = String::from_utf8(output.stdout)
+            .context("nix-build stdout was not valid UTF-8")?
+            .trim()
+            .to_owned();
+
+        if result_path.is_empty() {
+            anyhow::bail!("nix-build succeeded but did not print an output path");
+        }
+
+        let artifact_path = PathBuf::from(result_path).join(&self.output_path);
+
+        let bytes = tokio::fs::read(&artifact_path).await.with_context(|| {
+            format!(
+                "failed to read generated options JSON {}",
+                artifact_path.display()
+            )
+        })?;
+
+        let artifact_ref = request.artifact_ref(ArtifactKind::OptionsJson);
+
+        let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
+        metadata_input.source = Some(self.source_ref.clone());
+
+        let metadata = store
+            .put_artifact(&artifact_ref, Bytes::from(bytes), metadata_input)
+            .await
+            .context("failed to write options artifact to store")?;
+
+        Ok(ProducedArtifact {
+            artifact_ref,
+            metadata,
+        })
+    }
+}
+
+fn normalize_nix_path_source(source_ref: &str) -> String {
+    if let Some(rest) = source_ref.strip_prefix("github:") {
+        let mut parts = rest.splitn(3, '/');
+
+        if let (Some(owner), Some(repo), Some(branch_or_ref)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            return format!(
+                "https://github.com/{owner}/{repo}/archive/refs/heads/{branch_or_ref}.tar.gz"
+            );
+        }
+    }
+
+    source_ref.to_owned()
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct OptionsJsonConsumer;
 
@@ -159,7 +273,10 @@ mod tests {
     use nix_search_store::ArtifactStore;
     use tempfile::tempdir;
 
-    use super::{Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, Producer};
+    use super::{
+        Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, Producer,
+        normalize_nix_path_source,
+    };
 
     #[tokio::test]
     async fn existing_file_producer_writes_artifact_to_store() {
@@ -243,5 +360,22 @@ mod tests {
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0].name(), "programs.git.enable");
         assert_eq!(docs[1].name(), "services.nginx.enable");
+    }
+
+    #[test]
+    fn normalizes_github_flake_ref_to_tarball_url() {
+        let normalized = normalize_nix_path_source("github:NixOS/nixpkgs/nixos-unstable");
+
+        assert_eq!(
+            normalized,
+            "https://github.com/NixOS/nixpkgs/archive/refs/heads/nixos-unstable.tar.gz"
+        );
+    }
+
+    #[test]
+    fn leaves_non_github_sources_unchanged() {
+        let source = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+
+        assert_eq!(normalize_nix_path_source(source), source);
     }
 }

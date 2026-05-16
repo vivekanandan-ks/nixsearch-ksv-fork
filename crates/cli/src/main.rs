@@ -12,7 +12,8 @@ use nix_search_config::{
 use nix_search_core::{ArtifactKind, SearchDocument};
 use nix_search_index::{SearchHit, SearchIndex};
 use nix_search_source::{
-    Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, ProducedArtifact, Producer,
+    Consumer, ExistingFileProducer, NixBuildOptionsJsonProducer, OptionsJsonConsumer,
+    ProduceRequest, ProducedArtifact, Producer,
 };
 use nix_search_store::{ArtifactRef, ArtifactStore};
 
@@ -327,6 +328,23 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
             producer.produce(store, &request).await.with_context(|| {
                 format!(
                     "failed to produce artifact for {}/{}/{}",
+                    target.project_id, target.dataset_id, target.ref_config.id
+                )
+            })
+        }
+
+        ProducerConfig::NixBuildOptionsJson {
+            source_ref,
+            attribute,
+            import_path,
+            output_path,
+        } => {
+            let producer =
+                NixBuildOptionsJsonProducer::new(source_ref, attribute, import_path, output_path);
+
+            producer.produce(store, &request).await.with_context(|| {
+                format!(
+                    "failed to produce Nix-built options artifact for {}/{}/{}",
                     target.project_id, target.dataset_id, target.ref_config.id
                 )
             })
