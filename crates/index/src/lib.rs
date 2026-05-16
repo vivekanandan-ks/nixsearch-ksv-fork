@@ -259,3 +259,118 @@ fn build_schema() -> Schema {
 
     builder.build()
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use nix_search_core::{IngestContext, OptionDoc, SearchDocument};
+
+    use super::SearchIndex;
+
+    fn test_context() -> IngestContext {
+        IngestContext {
+            project: "nixpkgs".into(),
+            dataset: "nixos-options".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        }
+    }
+
+    fn option_doc(name: &str, description: &str, loc: &[&str]) -> SearchDocument {
+        let mut doc = OptionDoc::new(&test_context(), name);
+
+        doc.description = Some(description.to_owned());
+        doc.loc = loc.iter().map(|part| (*part).to_owned()).collect();
+        doc.option_set = doc.loc.first().cloned();
+        doc.parents = (1..doc.loc.len())
+            .map(|end| doc.loc[..end].join("."))
+            .collect();
+
+        SearchDocument::Option(doc)
+    }
+
+    #[test]
+    fn indexes_and_searches_options() {
+        let tempdir = tempdir().unwrap();
+
+        let index = SearchIndex::create_or_replace(tempdir.path()).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        writer
+            .add_document(&option_doc(
+                "programs.git.enable",
+                "Whether to enable Git.",
+                &["programs", "git", "enable"],
+            ))
+            .unwrap();
+
+        writer
+            .add_document(&option_doc(
+                "services.nginx.enable",
+                "Whether to enable Nginx.",
+                &["services", "nginx", "enable"],
+            ))
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(tempdir.path()).unwrap();
+
+        let hits = index.search("git", 10).unwrap();
+
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].document.name(), "programs.git.enable");
+    }
+
+    #[test]
+    fn exact_option_name_query_finds_option() {
+        let tempdir = tempdir().unwrap();
+
+        let index = SearchIndex::create_or_replace(tempdir.path()).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        writer
+            .add_document(&option_doc(
+                "programs.git.enable",
+                "Whether to enable Git.",
+                &["programs", "git", "enable"],
+            ))
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(tempdir.path()).unwrap();
+
+        let hits = index.search("programs.git.enable", 10).unwrap();
+
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].document.name(), "programs.git.enable");
+    }
+
+    #[test]
+    fn description_query_finds_matching_option() {
+        let tempdir = tempdir().unwrap();
+
+        let index = SearchIndex::create_or_replace(tempdir.path()).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        writer
+            .add_document(&option_doc(
+                "boot.loader.systemd-boot.enable",
+                "Whether to enable the systemd-boot EFI boot manager.",
+                &["boot", "loader", "systemd-boot", "enable"],
+            ))
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(tempdir.path()).unwrap();
+
+        let hits = index.search("EFI", 10).unwrap();
+
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].document.name(), "boot.loader.systemd-boot.enable");
+    }
+}

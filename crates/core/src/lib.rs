@@ -134,7 +134,7 @@ impl OptionDoc {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "document_type", rename_all = "kebab-case")]
 pub enum SearchDocument {
     Option(OptionDoc),
 }
