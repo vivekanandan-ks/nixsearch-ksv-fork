@@ -50,3 +50,19 @@ id = "small"
 type = "existing-file"
 path = "fixtures/options-small.json"
 artifact = "options-json"
+
+[projects.eval-fixture]
+name = "Eval Modules Fixture"
+
+[[projects.eval-fixture.datasets]]
+id = "options"
+name = "Eval Modules Fixture Options"
+kind = "options"
+
+[[projects.eval-fixture.datasets.refs]]
+id = "local"
+
+[projects.eval-fixture.datasets.refs.producer]
+type = "eval-modules"
+ref = "path:./fixtures/eval-modules-flake"
+modules_attr = "nixosModules.default"

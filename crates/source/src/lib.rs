@@ -266,7 +266,8 @@ impl Producer for EvalModulesProducer {
         let tempdir = tempdir().context("failed to create temporary eval-modules directory")?;
         let expression_path = tempdir.path().join("eval-modules-options.nix");
 
-        let expression = eval_modules_expression(&self.source_ref, &self.modules_attr);
+        let source_ref = normalize_flake_ref(&self.source_ref)?;
+        let expression = eval_modules_expression(&source_ref, &self.modules_attr);
         tokio::fs::write(&expression_path, expression)
             .await
             .with_context(|| {
@@ -297,11 +298,11 @@ impl Producer for EvalModulesProducer {
         let artifact_ref = request.artifact_ref(ArtifactKind::OptionsJson);
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
-        metadata_input.source = Some(self.source_ref.clone());
+        metadata_input.source = Some(source_ref);
 
         if let Some(url_prefix) = &self.url_prefix {
             metadata_input.warnings.push(format!(
-                "url_prefix is configured but not applied yet: {url_prefix}"
+                "url_prefix is configured but source-link enrichment is not implemented yet: {url_prefix}"
             ));
         }
 
@@ -403,6 +404,26 @@ in
 
 fn nix_string(value: &str) -> String {
     serde_json::to_string(value).expect("serializing a string cannot fail")
+}
+
+fn normalize_flake_ref(source_ref: &str) -> Result<String> {
+    let Some(path) = source_ref.strip_prefix("path:") else {
+        return Ok(source_ref.to_owned());
+    };
+
+    let path = PathBuf::from(path);
+
+    if path.is_absolute() {
+        return Ok(source_ref.to_owned());
+    }
+
+    let absolute = std::env::current_dir()
+        .context("failed to get current directory while normalizing relative path flake ref")?
+        .join(path)
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize relative flake ref {source_ref:?}"))?;
+
+    Ok(format!("path:{}", absolute.display()))
 }
 
 #[derive(Debug, Clone)]
@@ -559,8 +580,8 @@ mod tests {
     use crate::ChannelPackagesJsonProducer;
 
     use super::{
-        Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, Producer,
-        eval_modules_expression, normalize_nix_path_source,
+        Consumer, EvalModulesProducer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest,
+        Producer, eval_modules_expression, normalize_nix_path_source,
     };
 
     #[tokio::test]
@@ -647,6 +668,60 @@ mod tests {
         assert_eq!(docs[1].name(), "services.nginx.enable");
     }
 
+    #[tokio::test]
+    #[ignore = "requires nix with flakes enabled"]
+    async fn eval_modules_producer_builds_fixture_options_json() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("source crate should live under crates/source");
+
+        let fixture_path = repo_root
+            .join("fixtures")
+            .join("eval-modules-flake")
+            .canonicalize()
+            .expect("eval-modules fixture should exist");
+
+        let source_ref = format!("path:{}", fixture_path.display());
+
+        let tempdir = tempdir().unwrap();
+        let store = ArtifactStore::local(tempdir.path()).unwrap();
+
+        let producer = EvalModulesProducer::new(
+            source_ref,
+            "nixosModules.default",
+            Some("https://example.com/blob/main/".to_owned()),
+        );
+
+        let request = ProduceRequest {
+            project: "fixtures".into(),
+            dataset: "eval-options".into(),
+            ref_id: "local".into(),
+        };
+
+        let produced = producer.produce(&store, &request).await.unwrap();
+
+        assert_eq!(produced.artifact_ref.kind, ArtifactKind::OptionsJson);
+        assert_eq!(produced.metadata.producer, "eval-modules");
+        assert!(
+            produced
+                .metadata
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("source-link enrichment is not implemented yet"))
+        );
+
+        let consumer = OptionsJsonConsumer;
+        let docs = consumer.consume(&store, &produced).await.unwrap();
+
+        assert!(
+            docs.iter()
+                .any(|doc| doc.name() == "programs.fixture.enable"),
+            "expected fixture option in docs: {docs:#?}"
+        );
+    }
+
     #[test]
     fn normalizes_github_flake_ref_to_tarball_url() {
         let normalized = normalize_nix_path_source("github:NixOS/nixpkgs/nixos-unstable");
@@ -675,13 +750,18 @@ mod tests {
     }
 
     #[test]
-    fn eval_modules_expression_contains_flake_ref_and_module_attr() {
+    fn eval_modules_expression_contains_flake_ref_module_attr_and_default_eval_args() {
         let expression = eval_modules_expression("github:example/project", "nixosModules.default");
 
         assert!(expression.contains("\"github:example/project\""));
         assert!(expression.contains("\"nixosModules.default\""));
         assert!(expression.contains("builtins.getFlake"));
         assert!(expression.contains("lib.evalModules"));
+        assert!(expression.contains("specialArgs"));
+        assert!(expression.contains("inherit pkgs lib;"));
+        assert!(expression.contains("inputs = flake.inputs or {};"));
+        assert!(expression.contains("self = flake;"));
+        assert!(expression.contains("config._module.check = false;"));
         assert!(expression.contains("pkgs.nixosOptionsDoc"));
     }
 
@@ -690,5 +770,33 @@ mod tests {
         let escaped = super::nix_string("hello\"world");
 
         assert_eq!(escaped, "\"hello\\\"world\"");
+    }
+
+    #[test]
+    fn normalize_flake_ref_canonicalizes_relative_path_refs() {
+        let tempdir = tempdir().unwrap();
+        let flake_dir = tempdir.path().join("flake");
+        fs::create_dir(&flake_dir).unwrap();
+
+        let previous_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tempdir.path()).unwrap();
+
+        let normalized = super::normalize_flake_ref("path:./flake").unwrap();
+
+        std::env::set_current_dir(previous_dir).unwrap();
+
+        assert_eq!(
+            normalized,
+            format!("path:{}", flake_dir.canonicalize().unwrap().display())
+        );
+    }
+
+    #[test]
+    fn normalize_flake_ref_leaves_non_path_refs_unchanged() {
+        let source_ref = "github:NixOS/nixpkgs/nixos-unstable";
+
+        let normalized = super::normalize_flake_ref(source_ref).unwrap();
+
+        assert_eq!(normalized, source_ref);
     }
 }

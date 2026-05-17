@@ -550,6 +550,56 @@ mod tests {
     }
 
     #[test]
+    fn loads_eval_modules_producer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+              [projects.fixtures]
+              name = "Fixtures"
+
+              [[projects.fixtures.datasets]]
+              id = "options"
+              kind = "options"
+
+              [[projects.fixtures.datasets.refs]]
+              id = "eval"
+
+              [projects.fixtures.datasets.refs.producer]
+              type = "eval-modules"
+              ref = "path:/some/flake"
+              modules_attr = "nixosModules.default"
+              url_prefix = "https://example.com/blob/main/"
+              "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+
+        let producer = &config.projects["fixtures"].datasets[0].refs[0].producer;
+
+        assert_eq!(producer.kind(), ProducerKind::EvalModules);
+
+        match producer {
+            ProducerConfig::EvalModules {
+                source_ref,
+                modules_attr,
+                url_prefix,
+            } => {
+                assert_eq!(source_ref, "path:/some/flake");
+                assert_eq!(modules_attr, "nixosModules.default");
+                assert_eq!(
+                    url_prefix.as_deref(),
+                    Some("https://example.com/blob/main/")
+                );
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_invalid_project_ids() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nix-search.toml");

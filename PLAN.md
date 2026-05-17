@@ -703,6 +703,9 @@ Metadata should track:
 
 Preserve and normalize source links.
 
+Source-link configuration such as `urlPrefix` is inspired by NüschtOS, but it should be treated as
+cross-producer enrichment rather than as part of artifact production. Producers and consumers should preserve raw declarations/positions from `options.json` and `packages.json`; a later resolver should derive renderable URLs from repo/ref metadata, URL templates, strip prefixes, and revisions. This avoids regenerating artifacts just because source-link policy changes.
+
 Support at least GitHub initially:
 
 ```text

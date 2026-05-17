@@ -723,6 +723,10 @@ fn print_artifact_metadata(produced: &ProducedArtifact) {
     );
     println!("  hash = {}", produced.metadata.content_hash);
     println!("  size = {}", produced.metadata.size_bytes);
+
+    for warning in &produced.metadata.warnings {
+        println!("warning = {warning}");
+    }
 }
 
 fn print_search_hit(hit: SearchHit) {
