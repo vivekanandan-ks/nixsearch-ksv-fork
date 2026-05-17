@@ -5,7 +5,7 @@ This is a rough architectural plan for a future Rust project inspired by `nixos-
 ## Goals
 
 - Build a search system for Nix packages, NixOS options, Home Manager options, nix-darwin options, flake outputs, and arbitrary module-based projects.
-- Keep the frontend sufficiently separated so the same backend can support a website, CLI, TUI, editor plugin, or static exporter.
+- Keep search/indexing/domain logic separate from presentation so the same core can support a Datastar website, CLI, TUI, editor plugin, or static exporter.
 - Avoid requiring paid services such as hosted Elasticsearch/OpenSearch.
 - Support multiple repositories, datasets, and refs/branches in one deployment.
 - Be more flexible than `searchix` by making refs and import strategies first-class configuration concepts.
@@ -105,16 +105,15 @@ crates/
   source/        source/ref resolution, producers, Nix evaluators
   ingest/        artifact consumers and parsers into normalized documents
   index/         Tantivy schema, ranking, facets, index lifecycle
-  api/           HTTP/search API, frontend-agnostic
+  web/           Datastar-powered web UI and HTTP routes
   cli/           commands: produce, consume, index, update, serve, inspect
-  web/           optional website shell/assets later
 ```
 
 The key rule:
 
-> Frontends should consume a stable search/detail API and should not know how Nix data is fetched, parsed, or indexed.
+> Presentation should depend on stable search/indexing services and should not know how Nix data is fetched, parsed, or indexed.
 
-This makes the backend reusable by a website, CLI, TUI, editor integration, or static exporter.
+The website should be built with Datastar. Keep the core crates reusable so CLI, TUI, editor integrations, and static exporters can call the same search/indexing logic without depending on the web UI.
 
 ## Core conceptual model
 
@@ -616,35 +615,35 @@ Support filters/facets:
 - license
 - maintainer
 
-## API design
+## Web design
 
-Build a frontend-agnostic API.
+Build the website with [Datastar](https://data-star.dev/). Datastar is a good fit because search UI interactions can be handled with server-rendered HTML fragments, signals, and SSE updates without building a heavy client-side app.
 
-Possible endpoints:
+The web server can still use Axum internally as the Rust HTTP framework, but the primary web contract should be Datastar-oriented HTML/fragments rather than a frontend-agnostic JSON API.
+
+Potential routes:
 
 ```text
-GET /api/projects
-GET /api/datasets
-GET /api/refs
-GET /api/search?q=git&project=nixpkgs&dataset=packages&ref=unstable
-GET /api/document/{id}
-GET /api/suggest?q=git
-GET /api/status
+GET /                         main search page
+GET /search?q=git&project=... returns a page or Datastar fragment
+GET /document/{id}            detail page or detail fragment
+GET /status                   human-readable status
+GET /-/health                 simple health check
 ```
 
-Search responses should include:
+Search/page rendering should include:
 
-- stable document ID
+- stable document links
 - kind
 - project/dataset/ref
 - title/name
-- score
+- score if useful for debugging
 - short summary
 - relevant metadata
 - highlights if available
-- facets
+- facets/groups/filters
 
-Do not bake HTML into API responses. The web UI should render from structured data.
+Keep search functionality in reusable crates. The Datastar web layer should call shared search services rather than embedding indexing/search logic directly. A small JSON/debug API can be added later if useful, but it should not drive the primary frontend design.
 
 ## CLI design
 
@@ -760,8 +759,9 @@ Frontend work should come after backend/search fundamentals.
 
 Principles:
 
-- Keep UI separate from backend crates.
-- Use the API as the contract.
+- Build the web frontend with Datastar.
+- Keep Datastar/web rendering separate from core indexing/search crates.
+- Prefer server-rendered HTML and Datastar fragments/signals over a heavy client-side SPA.
 - Make source/ref switching easy and obvious.
 - Avoid hiding important filters.
 - Result pages should be linkable and stable.
@@ -782,7 +782,7 @@ Test areas:
 - document normalization
 - Tantivy indexing
 - ranking behavior on known queries
-- API response stability
+- Datastar route/fragment rendering stability
 - index generation swap/rollback
 
 Ranking tests should assert relative ordering for key queries, not exact scores.
@@ -809,13 +809,13 @@ Recommended vertical-slice order:
 16. Add package parser for nixpkgs `packages.json`.
 17. Add normalized `PackageDoc`.
 18. Add package indexing/search.
-19. Add Axum API.
-20. Add index generations and metadata.
-21. Add source link generation.
-22. Add `programs.sqlite` enrichment.
-23. Add `EvalModulesProducer` inspired by NuschtOS.
-24. Add built-in presets for nixpkgs/NixOS/Home Manager/nix-darwin.
-25. Start serious frontend work.
+19. Add index generations and manifests.
+20. Add source link generation.
+21. Add `programs.sqlite` enrichment.
+22. Add `EvalModulesProducer` inspired by NuschtOS.
+23. Add built-in presets for nixpkgs/NixOS/Home Manager/nix-darwin.
+24. Add Datastar-powered web UI/routes.
+25. Add optional JSON/debug endpoints only if useful.
 
 This order gives future agents a working vertical slice early while preserving flexibility.
 
@@ -829,7 +829,7 @@ Future agents should revisit these with experiments:
 - How should schema migrations work for existing indexes?
 - How much markdown should be rendered at ingestion time vs frontend time?
 - Should full documents be stored in Tantivy, SQLite, or separate JSON blobs?
-- Should the web API support federated/multiple index backends?
+- Should the Datastar web layer expose any stable JSON/debug endpoints, or keep JSON private/internal?
 - What is the best analyzer/tokenizer setup for dotted Nix attribute paths?
 
 ## Non-goals for early versions
@@ -849,4 +849,4 @@ The project should combine the best parts of the references:
 - From `searchix`: practical local indexing, fetch/import/index separation, and multi-source support.
 - From `NuschtOS-search`: flexible arbitrary module option scopes and static-generation inspiration.
 
-The main improvement is a more general model built around projects, datasets, and refs, plus a clean frontend-agnostic API and local Tantivy indexing.
+The main improvement is a more general model built around projects, datasets, and refs, plus reusable search/indexing crates, a Datastar-powered web UI, and local Tantivy indexing.
