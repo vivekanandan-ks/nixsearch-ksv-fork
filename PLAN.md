@@ -85,7 +85,7 @@ Key lessons:
 - A scope can be backed by either:
   - modules evaluated with `lib.evalModules`
   - a pre-generated `options.json`
-- Supporting `optionsPrefix`, `urlPrefix`, `specialArgs`, and `overrideEvalModulesArgs` makes arbitrary module projects much easier.
+- Supporting `urlPrefix`, `specialArgs`, and `overrideEvalModulesArgs` makes arbitrary module projects much easier.
 
 Things to avoid:
 
@@ -254,7 +254,6 @@ id = "main"
 ref = "github:feel-co/hjem"
 producer = "eval-modules"
 modules_attr = "nixosModules.default"
-options_prefix = "hjem"
 url_prefix = "https://github.com/feel-co/hjem/blob/main/"
 ```
 
@@ -403,7 +402,6 @@ Should support:
 - `modules_attr`
 - `specialArgs`
 - `overrideEvalModulesArgs`
-- `optionsPrefix`
 - `urlPrefix`
 
 ### `custom-command`

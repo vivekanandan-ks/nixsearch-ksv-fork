@@ -492,15 +492,9 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
         ProducerConfig::EvalModules {
             source_ref,
             modules_attr,
-            options_prefix,
             url_prefix,
         } => {
-            let producer = EvalModulesProducer::new(
-                source_ref,
-                modules_attr,
-                options_prefix.clone(),
-                url_prefix.clone(),
-            );
+            let producer = EvalModulesProducer::new(source_ref, modules_attr, url_prefix.clone());
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(

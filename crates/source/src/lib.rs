@@ -237,7 +237,6 @@ fn normalize_nix_path_source(source_ref: &str) -> String {
 pub struct EvalModulesProducer {
     source_ref: String,
     modules_attr: String,
-    options_prefix: Option<String>,
     url_prefix: Option<String>,
     producer_name: String,
 }
@@ -246,13 +245,11 @@ impl EvalModulesProducer {
     pub fn new(
         source_ref: impl Into<String>,
         modules_attr: impl Into<String>,
-        options_prefix: Option<String>,
         url_prefix: Option<String>,
     ) -> Self {
         Self {
             source_ref: source_ref.into(),
             modules_attr: modules_attr.into(),
-            options_prefix,
             url_prefix,
             producer_name: "eval-modules".to_owned(),
         }
@@ -301,12 +298,6 @@ impl Producer for EvalModulesProducer {
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
         metadata_input.source = Some(self.source_ref.clone());
-
-        if let Some(options_prefix) = &self.options_prefix {
-            metadata_input.warnings.push(format!(
-                "options_prefix is configured but not applied yet: {options_prefix}"
-            ));
-        }
 
         if let Some(url_prefix) = &self.url_prefix {
             metadata_input.warnings.push(format!(

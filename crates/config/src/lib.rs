@@ -211,8 +211,6 @@ pub enum ProducerConfig {
         source_ref: String,
         modules_attr: String,
         #[serde(default)]
-        options_prefix: Option<String>,
-        #[serde(default)]
         url_prefix: Option<String>,
     },
 
@@ -287,7 +285,6 @@ impl ProducerConfig {
             Self::EvalModules {
                 source_ref,
                 modules_attr,
-                options_prefix,
                 url_prefix,
             } => {
                 validate_producer_non_empty(project_id, dataset_id, ref_id, "ref", source_ref)?;
@@ -298,16 +295,6 @@ impl ProducerConfig {
                     "modules_attr",
                     modules_attr,
                 )?;
-
-                if let Some(options_prefix) = options_prefix {
-                    validate_producer_non_empty(
-                        project_id,
-                        dataset_id,
-                        ref_id,
-                        "options_prefix",
-                        options_prefix,
-                    )?;
-                }
 
                 if let Some(url_prefix) = url_prefix {
                     validate_producer_non_empty(
@@ -642,4 +629,3 @@ mod tests {
         assert!(error.contains("command must not be empty"));
     }
 }
-
