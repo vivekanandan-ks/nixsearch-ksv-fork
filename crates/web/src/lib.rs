@@ -41,6 +41,26 @@ struct PageQuery {
     ref_id: Option<String>,
 
     kind: Option<String>,
+
+    source: Option<LinkScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LinkScope {
+    All,
+}
+
+impl LinkScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+        }
+    }
+
+    fn from_query_param(s: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(s.to_owned())).ok()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -379,6 +399,12 @@ fn render_hit(request: &PageRequest, hit: &SearchHit, config: &AppConfig) -> Str
     let summary = summary_for_document(&hit.document);
     let source_link = first_source_link(&hit.document, config);
 
+    let from_scope = if request.source.is_none() {
+        Some(LinkScope::All)
+    } else {
+        None
+    };
+
     let entry_href = entry_url_for(
         &common.source,
         &common.name,
@@ -387,6 +413,7 @@ fn render_hit(request: &PageRequest, hit: &SearchHit, config: &AppConfig) -> Str
             q: request.query.q.clone(),
             ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
             kind: None,
+            source: from_scope,
         },
     );
 
@@ -537,6 +564,13 @@ fn render_ambiguous_entry_modal(
 
     for document in documents {
         let common = document.common();
+
+        let from_scope = if request.source.is_none() {
+            Some(LinkScope::All)
+        } else {
+            None
+        };
+
         let href = entry_url_for(
             &common.source,
             &common.name,
@@ -545,6 +579,7 @@ fn render_ambiguous_entry_modal(
                 q: request.query.q.clone(),
                 ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
                 kind: None,
+                source: from_scope,
             },
         );
 
@@ -949,7 +984,11 @@ fn source_path(source: &str) -> String {
 fn search_url_for(source: Option<&str>, query: &PageQuery) -> String {
     let path = source.map(source_path).unwrap_or_else(|| "/".to_owned());
 
-    let qs = query_string([("q", query.q.as_deref()), ("ref", query.ref_id.as_deref())]);
+    let qs = query_string([
+        ("q", query.q.as_deref()),
+        ("ref", query.ref_id.as_deref()),
+        ("source", query.source.map(|s| s.as_str())),
+    ]);
 
     if qs.is_empty() {
         path
@@ -965,6 +1004,7 @@ fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuer
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
         ("kind", kind.or(query.kind.as_deref())),
+        ("source", query.source.map(|s| s.as_str())),
     ]);
 
     if qs.is_empty() {
@@ -975,7 +1015,24 @@ fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuer
 }
 
 fn close_url_for(request: &PageRequest) -> String {
-    search_url_for(request.source.as_deref(), &request.query)
+    if request.query.source == Some(LinkScope::All) {
+        return search_url_for(
+            None,
+            &PageQuery {
+                q: request.query.q.clone(),
+                ..PageQuery::default()
+            },
+        );
+    }
+
+    search_url_for(
+        request.source.as_deref(),
+        &PageQuery {
+            q: request.query.q.clone(),
+            ref_id: request.query.ref_id.clone(),
+            ..PageQuery::default()
+        },
+    )
 }
 
 fn query_string<const N: usize>(pairs: [(&str, Option<&str>); N]) -> String {
@@ -1029,12 +1086,14 @@ fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageReques
     let mut q = None;
     let mut ref_id = None;
     let mut kind = None;
+    let mut source_param = None;
 
     for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
         match key.as_ref() {
             "q" => q = Some(value.into_owned()),
             "ref" => ref_id = Some(value.into_owned()),
             "kind" => kind = Some(value.into_owned()),
+            "source" => source_param = LinkScope::from_query_param(&value),
             _ => {}
         }
     }
@@ -1042,7 +1101,12 @@ fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageReques
     Ok(PageRequest {
         source,
         entry,
-        query: PageQuery { q, ref_id, kind },
+        query: PageQuery {
+            q,
+            ref_id,
+            kind,
+            source: source_param,
+        },
     })
 }
 
@@ -1360,6 +1424,8 @@ mod tests {
     use nix_search_config::AppConfig;
     use nix_search_core::{Declaration, OptionDoc, SearchDocument};
 
+    use crate::LinkScope;
+
     use super::{
         AppState, PageQuery, PageRequest, close_url_for, dialog_reconcile_script, entry_url_for,
         first_source_link, page_request_from_public_url, render_full_page, search_url_for,
@@ -1484,6 +1550,7 @@ mod tests {
                 q: Some("git".to_owned()),
                 ref_id: Some("small".to_owned()),
                 kind: Some("option".to_owned()),
+                source: None,
             },
         };
 
@@ -1563,5 +1630,31 @@ mod tests {
 
     fn test_config() -> AppConfig {
         nix_search_test_support::app_config("./data/indexes")
+    }
+
+    #[test]
+    fn close_url_for_all_scope_returns_to_root() {
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            entry: Some("rubyPackages.git".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: None,
+                kind: None,
+                source: Some(LinkScope::All),
+            },
+        };
+
+        assert_eq!(close_url_for(&request), "/?q=git");
+    }
+
+    #[test]
+    fn parses_source_query_param() {
+        let request = page_request_from_public_url("/nixpkgs/git?q=git&source=all").unwrap();
+
+        assert_eq!(request.source.as_deref(), Some("nixpkgs"));
+        assert_eq!(request.entry.as_deref(), Some("git"));
+        assert_eq!(request.query.q.as_deref(), Some("git"));
+        assert_eq!(request.query.source, Some(LinkScope::All));
     }
 }
