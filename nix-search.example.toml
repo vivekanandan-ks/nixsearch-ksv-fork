@@ -8,21 +8,20 @@ listen = "127.0.0.1:3000"
 [sources.nixpkgs]
 name = "Nixpkgs"
 preset = "nixpkgs-packages"
-ref = "nixos-unstable"
+default_ref = "nixos-unstable"
+preset_refs = ["nixos-unstable", "nixos-25.11"]
 
 [sources.nixos]
 name = "NixOS Options"
 preset = "nixos-options"
-ref = "nixos-unstable"
+default_ref = "nixos-unstable"
+preset_refs = ["nixos-unstable", "nixos-25.11"]
 
 [sources.fixtures]
 name = "Fixtures"
 kind = "options"
 
-[[sources.fixtures.refs]]
-id = "small"
-
-[sources.fixtures.refs.producer]
+[sources.fixtures.refs.small.producer]
 type = "existing-file"
 path = "fixtures/search-small/options.json"
 artifact = "options-json"
@@ -31,14 +30,11 @@ artifact = "options-json"
 name = "Eval Modules Fixture"
 kind = "options"
 
-[[sources.eval-fixture.refs]]
-id = "local"
-
-[sources.eval-fixture.refs.source_links]
+[sources.eval-fixture.refs.local.source_links]
 type = "prefix"
 url_prefix = "https://example.com/blob/main/"
 
-[sources.eval-fixture.refs.producer]
+[sources.eval-fixture.refs.local.producer]
 type = "eval-modules"
 ref = "path:./fixtures/eval-modules-flake"
 modules_attr = "nixosModules.default"

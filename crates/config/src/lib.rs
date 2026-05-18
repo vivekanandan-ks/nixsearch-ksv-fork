@@ -208,10 +208,26 @@ struct RawSourceConfig {
     name: Option<String>,
     kind: Option<SourceKind>,
     default_ref: Option<String>,
-    refs: Vec<RefConfig>,
+    refs: BTreeMap<String, RawRefConfig>,
     preset: Option<SourcePreset>,
-    #[serde(rename = "ref")]
-    preset_ref: Option<String>,
+    preset_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRefConfig {
+    pub producer: ProducerConfig,
+    #[serde(default)]
+    pub source_links: Option<SourceLinkConfig>,
+}
+
+impl RawRefConfig {
+    fn into_ref_config(self, id: String) -> RefConfig {
+        RefConfig {
+            id,
+            producer: self.producer,
+            source_links: self.source_links,
+        }
+    }
 }
 
 impl RawSourceConfig {
@@ -227,48 +243,70 @@ impl RawSourceConfig {
             ConfigError::Validation(format!("sources.{source_id}: kind is required"))
         })?;
 
-        let default_ref = effective_default_ref(source_id, self.default_ref, &self.refs)?;
+        if !self.preset_refs.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}: preset_refs requires preset"
+            )));
+        }
+
+        let refs = self
+            .refs
+            .into_iter()
+            .map(|(id, ref_config)| ref_config.into_ref_config(id))
+            .collect::<Vec<_>>();
+        let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
         Ok(SourceConfig {
             name: self.name,
             kind,
             default_ref,
-            refs: self.refs,
+            refs,
         })
     }
 
     fn expand_preset(self, source_id: &str, preset: SourcePreset) -> Result<SourceConfig> {
         if !self.refs.is_empty() {
             return Err(ConfigError::Validation(format!(
-                "sources.{source_id}: preset sources must not also define refs"
+                "sources.{source_id}: preset sources must not define explicit refs"
             )));
         }
 
-        let ref_id = self.preset_ref.clone().ok_or_else(|| {
-            ConfigError::Validation(format!("sources.{source_id}: preset sources require ref"))
-        })?;
+        let ref_ids = self.preset_refs.clone();
+
+        if ref_ids.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}: preset sources require at least one ref"
+            )));
+        }
 
         match preset {
-            SourcePreset::NixpkgsPackages => self.expand_nixpkgs_packages(source_id, ref_id),
-            SourcePreset::NixosOptions => self.expand_nixos_options(source_id, ref_id),
+            SourcePreset::NixpkgsPackages => self.expand_nixpkgs_packages(source_id, ref_ids),
+            SourcePreset::NixosOptions => self.expand_nixos_options(source_id, ref_ids),
         }
     }
 
-    fn expand_nixpkgs_packages(self, source_id: &str, ref_id: String) -> Result<SourceConfig> {
+    fn expand_nixpkgs_packages(
+        self,
+        source_id: &str,
+        ref_ids: Vec<String>,
+    ) -> Result<SourceConfig> {
         reject_conflicting_kind(
             self.kind,
             SourceKind::Packages,
             SourcePreset::NixpkgsPackages,
         )?;
 
-        let refs = vec![RefConfig {
-            id: ref_id.clone(),
-            source_links: Some(nixpkgs_source_links(&ref_id)),
-            producer: ProducerConfig::ChannelPackagesJson {
-                channel: ref_id,
-                url: None,
-            },
-        }];
+        let refs = ref_ids
+            .into_iter()
+            .map(|ref_id| RefConfig {
+                id: ref_id.clone(),
+                source_links: Some(nixpkgs_source_links(&ref_id)),
+                producer: ProducerConfig::ChannelPackagesJson {
+                    channel: ref_id,
+                    url: None,
+                },
+            })
+            .collect::<Vec<_>>();
 
         let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
@@ -280,19 +318,22 @@ impl RawSourceConfig {
         })
     }
 
-    fn expand_nixos_options(self, source_id: &str, ref_id: String) -> Result<SourceConfig> {
+    fn expand_nixos_options(self, source_id: &str, ref_ids: Vec<String>) -> Result<SourceConfig> {
         reject_conflicting_kind(self.kind, SourceKind::Options, SourcePreset::NixosOptions)?;
 
-        let refs = vec![RefConfig {
-            id: ref_id.clone(),
-            source_links: Some(nixpkgs_source_links(&ref_id)),
-            producer: ProducerConfig::NixBuildOptionsJson {
-                source_ref: format!("github:NixOS/nixpkgs/{ref_id}"),
-                attribute: "options".to_owned(),
-                import_path: "nixos/release.nix".to_owned(),
-                output_path: "share/doc/nixos/options.json".to_owned(),
-            },
-        }];
+        let refs = ref_ids
+            .into_iter()
+            .map(|ref_id| RefConfig {
+                id: ref_id.clone(),
+                source_links: Some(nixpkgs_source_links(&ref_id)),
+                producer: ProducerConfig::NixBuildOptionsJson {
+                    source_ref: format!("github:NixOS/nixpkgs/{ref_id}"),
+                    attribute: "options".to_owned(),
+                    import_path: "nixos/release.nix".to_owned(),
+                    output_path: "share/doc/nixos/options.json".to_owned(),
+                },
+            })
+            .collect::<Vec<_>>();
 
         let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
@@ -345,6 +386,12 @@ fn effective_default_ref(
         }
 
         return Ok(Some(configured));
+    }
+
+    if refs.len() > 1 {
+        return Err(ConfigError::Validation(format!(
+            "sources.{source_id}: default_ref is required when multiple refs are configured"
+        )));
     }
 
     Ok(refs.first().map(|ref_config| ref_config.id.clone()))
@@ -616,9 +663,9 @@ mod tests {
     const NIXOS_SOURCE: &str = "nixos";
     const NIXPKGS_SOURCE: &str = "nixpkgs";
     const SMALL_REF: &str = "small";
-    const STABLE_REF: &str = "stable";
     const UNSTABLE_REF: &str = "unstable";
     const NIXOS_UNSTABLE_REF: &str = "nixos-unstable";
+    const NIXOS_STABLE_REF: &str = "nixos-25.11";
     const FIXTURE_OPTIONS_PATH: &str = "fixtures/search-small/options.json";
 
     fn load_toml(toml: &str) -> AppConfig {
@@ -647,10 +694,7 @@ mod tests {
         name = "Fixtures"
         kind = "options"
 
-        [[sources.fixtures.refs]]
-        id = "small"
-
-        [sources.fixtures.refs.producer]
+        [sources.fixtures.refs.small.producer]
         type = "existing-file"
         path = "fixtures/search-small/options.json"
         artifact = "options-json"
@@ -669,18 +713,12 @@ mod tests {
             kind = "options"
             {default_ref}
 
-            [[sources.fixtures.refs]]
-            id = "stable"
-
-            [sources.fixtures.refs.producer]
+            [sources.fixtures.refs.stable.producer]
             type = "existing-file"
             path = "fixtures/search-small/options.json"
             artifact = "options-json"
 
-            [[sources.fixtures.refs]]
-            id = "unstable"
-
-            [sources.fixtures.refs.producer]
+            [sources.fixtures.refs.unstable.producer]
             type = "existing-file"
             path = "fixtures/search-small/options.json"
             artifact = "options-json"
@@ -730,10 +768,7 @@ mod tests {
             name = "NixOS Options"
             kind = "options"
 
-            [[sources.nixos.refs]]
-            id = "unstable"
-
-            [sources.nixos.refs.producer]
+            [sources.nixos.refs.unstable.producer]
             type = "nix-build-options-json"
             ref = "github:NixOS/nixpkgs/nixos-unstable"
             attribute = "options"
@@ -744,10 +779,7 @@ mod tests {
             name = "Nixpkgs"
             kind = "packages"
 
-            [[sources.nixpkgs.refs]]
-            id = "unstable"
-
-            [sources.nixpkgs.refs.producer]
+            [sources.nixpkgs.refs.unstable.producer]
             type = "channel-packages-json"
             channel = "nixos-unstable"
             "#,
@@ -797,10 +829,7 @@ mod tests {
             name = "Fixtures"
             kind = "options"
 
-            [[sources.fixtures.refs]]
-            id = "eval"
-
-            [sources.fixtures.refs.producer]
+            [sources.fixtures.refs.eval.producer]
             type = "eval-modules"
             ref = "path:/some/flake"
             modules_attr = "nixosModules.default"
@@ -850,10 +879,7 @@ mod tests {
             name = "NixOS Options"
             kind = "options"
 
-            [[sources.nixos.refs]]
-            id = "unstable"
-
-            [sources.nixos.refs.producer]
+            [sources.nixos.refs.unstable.producer]
             type = "nix-build-options-json"
             ref = "github:NixOS/nixpkgs/nixos-unstable"
             "#,
@@ -870,10 +896,7 @@ mod tests {
             name = "Custom"
             kind = "options"
 
-            [[sources.custom.refs]]
-            id = "main"
-
-            [sources.custom.refs.producer]
+            [sources.custom.refs.main.producer]
             type = "custom-command"
             command = []
             artifact = "options-json"
@@ -891,17 +914,14 @@ mod tests {
             name = "Fixtures"
             kind = "options"
 
-            [[sources.fixtures.refs]]
-            id = "main"
-
-            [sources.fixtures.refs.source_links]
+            [sources.fixtures.refs.main.source_links]
             type = "github"
             owner = "example"
             repo = "modules"
             revision = "abc123"
             strip_prefixes = ["/build/source/"]
 
-            [sources.fixtures.refs.producer]
+            [sources.fixtures.refs.main.producer]
             type = "existing-file"
             path = "fixtures/search-small/options.json"
             artifact = "options-json"
@@ -936,7 +956,7 @@ mod tests {
             [sources.nixpkgs]
             name = "Nixpkgs"
             preset = "nixpkgs-packages"
-            ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable"]
             "#,
         );
 
@@ -970,7 +990,7 @@ mod tests {
             [sources.nixos]
             name = "NixOS Options"
             preset = "nixos-options"
-            ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable"]
             "#,
         );
 
@@ -990,6 +1010,77 @@ mod tests {
     }
 
     #[test]
+    fn loads_nixpkgs_packages_preset_with_multiple_refs() {
+        let config = load_toml(
+            r#"
+            [sources.nixpkgs]
+            name = "Nixpkgs"
+            preset = "nixpkgs-packages"
+            default_ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable", "nixos-25.11"]
+            "#,
+        );
+
+        let source = &config.sources[NIXPKGS_SOURCE];
+
+        assert_eq!(source.kind, SourceKind::Packages);
+        assert_eq!(source.default_ref.as_deref(), Some(NIXOS_UNSTABLE_REF));
+        assert_eq!(source.refs.len(), 2);
+        assert_eq!(source.refs[0].id, NIXOS_UNSTABLE_REF);
+        assert_eq!(source.refs[1].id, NIXOS_STABLE_REF);
+
+        match &source.refs[1].producer {
+            ProducerConfig::ChannelPackagesJson { channel, url } => {
+                assert_eq!(channel, NIXOS_STABLE_REF);
+                assert_eq!(url, &None);
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loads_nixos_options_preset_with_multiple_refs() {
+        let config = load_toml(
+            r#"
+            [sources.nixos]
+            name = "NixOS Options"
+            preset = "nixos-options"
+            default_ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable", "nixos-25.11"]
+            "#,
+        );
+
+        let source = &config.sources[NIXOS_SOURCE];
+
+        assert_eq!(source.kind, SourceKind::Options);
+        assert_eq!(source.default_ref.as_deref(), Some(NIXOS_UNSTABLE_REF));
+        assert_eq!(source.refs.len(), 2);
+        assert_eq!(source.refs[0].id, NIXOS_UNSTABLE_REF);
+        assert_eq!(source.refs[1].id, NIXOS_STABLE_REF);
+
+        match &source.refs[1].producer {
+            ProducerConfig::NixBuildOptionsJson { source_ref, .. } => {
+                assert_eq!(source_ref, "github:NixOS/nixpkgs/nixos-25.11");
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preset_rejects_empty_ref_array() {
+        let error = load_toml_error(
+            r#"
+            [sources.nixpkgs]
+            name = "Nixpkgs"
+            preset = "nixpkgs-packages"
+            preset_refs = []
+            "#,
+        );
+
+        assert_error_contains(&error, "preset sources require at least one ref");
+    }
+
+    #[test]
     fn preset_rejects_missing_ref() {
         let error = load_toml_error(
             r#"
@@ -999,7 +1090,7 @@ mod tests {
             "#,
         );
 
-        assert_error_contains(&error, "preset sources require ref");
+        assert_error_contains(&error, "preset sources require at least one ref");
     }
 
     #[test]
@@ -1009,19 +1100,16 @@ mod tests {
             [sources.nixpkgs]
             name = "Nixpkgs"
             preset = "nixpkgs-packages"
-            ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable"]
 
-            [[sources.nixpkgs.refs]]
-            id = "manual"
-
-            [sources.nixpkgs.refs.producer]
+            [sources.nixpkgs.refs.manual.producer]
             type = "existing-file"
             path = "fixtures/search-small/options.json"
             artifact = "options-json"
             "#,
         );
 
-        assert_error_contains(&error, "preset sources must not also define refs");
+        assert_error_contains(&error, "preset sources must not define explicit refs");
     }
 
     #[test]
@@ -1032,7 +1120,7 @@ mod tests {
             name = "Nixpkgs"
             preset = "nixpkgs-packages"
             kind = "options"
-            ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable"]
             "#,
         );
 
@@ -1050,12 +1138,12 @@ mod tests {
     }
 
     #[test]
-    fn infers_default_ref_from_first_ref() {
-        let config = load_toml(&fixture_two_ref_source_toml(None));
+    fn rejects_missing_default_ref_with_multiple_refs() {
+        let error = load_toml_error(&fixture_two_ref_source_toml(None));
 
-        assert_eq!(
-            config.sources[FIXTURES_SOURCE].default_ref.as_deref(),
-            Some(STABLE_REF)
+        assert_error_contains(
+            &error,
+            "default_ref is required when multiple refs are configured",
         );
     }
 
@@ -1078,10 +1166,7 @@ mod tests {
             kind = "options"
             default_ref = "missing"
 
-            [[sources.fixtures.refs]]
-            id = "small"
-
-            [sources.fixtures.refs.producer]
+            [sources.fixtures.refs.small.producer]
             type = "existing-file"
             path = "fixtures/search-small/options.json"
             artifact = "options-json"
@@ -1101,7 +1186,7 @@ mod tests {
             [sources.nixpkgs]
             name = "Nixpkgs"
             preset = "nixpkgs-packages"
-            ref = "nixos-unstable"
+            preset_refs = ["nixos-unstable"]
             "#,
             fixture_existing_file_source_toml()
         ));

@@ -201,16 +201,13 @@ pub fn config_toml(index_dir: &Path) -> String {
    kind = "options"
    default_ref = "small"
 
-   [[sources.fixtures.refs]]
-   id = "small"
-
-   [sources.fixtures.refs.source_links]
+   [sources.fixtures.refs.small.source_links]
    type = "github"
    owner = "example"
    repo = "repo"
    revision = "main"
 
-   [sources.fixtures.refs.producer]
+   [sources.fixtures.refs.small.producer]
    type = "existing-file"
    path = "fixtures/search-small/options.json"
    artifact = "options-json"
