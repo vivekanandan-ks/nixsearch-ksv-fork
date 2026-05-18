@@ -13,25 +13,18 @@ use nix_search_store::{ArtifactMetadata, ArtifactMetadataInput, ArtifactRef, Art
 
 #[derive(Debug, Clone)]
 pub struct ProduceRequest {
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
 }
 
 impl ProduceRequest {
     pub fn artifact_ref(&self, kind: ArtifactKind) -> ArtifactRef {
-        ArtifactRef::latest(
-            self.project.clone(),
-            self.dataset.clone(),
-            self.ref_id.clone(),
-            kind,
-        )
+        ArtifactRef::latest(self.source.clone(), self.ref_id.clone(), kind)
     }
 
     pub fn ingest_context(&self, revision: Option<String>) -> IngestContext {
         IngestContext {
-            project: self.project.clone(),
-            dataset: self.dataset.clone(),
+            source: self.source.clone(),
             ref_id: self.ref_id.clone(),
             revision,
             repo: None,
@@ -106,7 +99,7 @@ impl Producer for ExistingFileProducer {
         let artifact_ref = request.artifact_ref(self.kind);
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
-        metadata_input.source = Some(self.path.display().to_string());
+        metadata_input.source_url = Some(self.path.display().to_string());
 
         let metadata = store
             .put_artifact(&artifact_ref, Bytes::from(bytes), metadata_input)
@@ -203,7 +196,7 @@ impl Producer for NixBuildOptionsJsonProducer {
         let artifact_ref = request.artifact_ref(ArtifactKind::OptionsJson);
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
-        metadata_input.source = Some(self.source_ref.clone());
+        metadata_input.source_url = Some(self.source_ref.clone());
 
         match resolve_flake_revision(&self.source_ref).await {
             Ok(Some(revision)) => metadata_input.revision = Some(revision),
@@ -307,7 +300,7 @@ impl Producer for EvalModulesProducer {
         let artifact_ref = request.artifact_ref(ArtifactKind::OptionsJson);
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
-        metadata_input.source = Some(source_ref.clone());
+        metadata_input.source_url = Some(source_ref.clone());
 
         match resolve_flake_revision(&source_ref).await {
             Ok(Some(revision)) => metadata_input.revision = Some(revision),
@@ -493,7 +486,7 @@ impl Producer for ChannelPackagesJsonProducer {
         let artifact_ref = request.artifact_ref(ArtifactKind::PackagesJson);
 
         let mut metadata_input = ArtifactMetadataInput::new(self.producer_name.clone());
-        metadata_input.source = Some(url.clone());
+        metadata_input.source_url = Some(url.clone());
 
         match fetch_channel_git_revision(&self.channel).await {
             Ok(Some(revision)) => metadata_input.revision = Some(revision),
@@ -553,8 +546,7 @@ impl Consumer for OptionsJsonConsumer {
             .context("failed to read options artifact")?;
 
         let context = IngestContext {
-            project: artifact.metadata.project.clone(),
-            dataset: artifact.metadata.dataset.clone(),
+            source: artifact.metadata.source.clone(),
             ref_id: artifact.metadata.ref_id.clone(),
             revision: artifact.metadata.revision.clone(),
             repo: None,
@@ -587,8 +579,7 @@ impl Consumer for PackagesJsonConsumer {
             .context("failed to read packages artifact")?;
 
         let context = IngestContext {
-            project: artifact.metadata.project.clone(),
-            dataset: artifact.metadata.dataset.clone(),
+            source: artifact.metadata.source.clone(),
             ref_id: artifact.metadata.ref_id.clone(),
             revision: artifact.metadata.revision.clone(),
             repo: None,
@@ -696,20 +687,18 @@ mod tests {
 
         let producer = ExistingFileProducer::new(&artifact_path, ArtifactKind::OptionsJson);
         let request = ProduceRequest {
-            project: "fixtures".into(),
-            dataset: "options".into(),
+            source: "fixtures".into(),
             ref_id: "small".into(),
         };
 
         let produced = producer.produce(&store, &request).await.unwrap();
 
         assert_eq!(produced.artifact_ref.kind, ArtifactKind::OptionsJson);
-        assert_eq!(produced.metadata.project, "fixtures");
-        assert_eq!(produced.metadata.dataset, "options");
+        assert_eq!(produced.metadata.source, "fixtures");
         assert_eq!(produced.metadata.ref_id, "small");
         assert_eq!(produced.metadata.producer, "existing-file");
         assert_eq!(
-            produced.metadata.source.as_deref(),
+            produced.metadata.source_url.as_deref(),
             Some(artifact_path.to_string_lossy().as_ref())
         );
 
@@ -743,8 +732,7 @@ mod tests {
 
         let producer = ExistingFileProducer::new(&artifact_path, ArtifactKind::OptionsJson);
         let request = ProduceRequest {
-            project: "fixtures".into(),
-            dataset: "options".into(),
+            source: "fixtures".into(),
             ref_id: "small".into(),
         };
 
@@ -785,8 +773,7 @@ mod tests {
         );
 
         let request = ProduceRequest {
-            project: "fixtures".into(),
-            dataset: "eval-options".into(),
+            source: "eval-fixture".into(),
             ref_id: "local".into(),
         };
 

@@ -5,49 +5,40 @@ index_dir = "./data/indexes"
 [server]
 listen = "127.0.0.1:3000"
 
-[projects.nixpkgs]
+[sources.nixpkgs]
 name = "Nixpkgs"
-
-[[projects.nixpkgs.datasets]]
 preset = "nixpkgs-packages"
 ref = "nixos-unstable"
 
-[[projects.nixpkgs.datasets]]
+[sources.nixos]
+name = "NixOS Options"
 preset = "nixos-options"
 ref = "nixos-unstable"
 
-[projects.fixtures]
+[sources.fixtures]
 name = "Fixtures"
-
-[[projects.fixtures.datasets]]
-id = "options"
-name = "Fixture Options"
 kind = "options"
 
-[[projects.fixtures.datasets.refs]]
+[[sources.fixtures.refs]]
 id = "small"
 
-[projects.fixtures.datasets.refs.producer]
+[sources.fixtures.refs.producer]
 type = "existing-file"
 path = "fixtures/options-small.json"
 artifact = "options-json"
 
-[projects.eval-fixture]
+[sources.eval-fixture]
 name = "Eval Modules Fixture"
-
-[[projects.eval-fixture.datasets]]
-id = "options"
-name = "Eval Modules Fixture Options"
 kind = "options"
 
-[[projects.eval-fixture.datasets.refs]]
+[[sources.eval-fixture.refs]]
 id = "local"
 
-[projects.eval-fixture.datasets.refs.source_links]
+[sources.eval-fixture.refs.source_links]
 type = "prefix"
 url_prefix = "https://example.com/blob/main/"
 
-[projects.eval-fixture.datasets.refs.producer]
+[sources.eval-fixture.refs.producer]
 type = "eval-modules"
 ref = "path:./fixtures/eval-modules-flake"
 modules_attr = "nixosModules.default"

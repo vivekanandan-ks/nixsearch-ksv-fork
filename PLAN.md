@@ -4,12 +4,12 @@ This is a rough architectural plan for a future Rust project inspired by `nixos-
 
 ## Goals
 
-- Build a search system for Nix packages, NixOS options, Home Manager options, nix-darwin options, flake outputs, and arbitrary module-based projects.
+- Build a search system for Nix packages, NixOS options, Home Manager options, nix-darwin options, flake outputs, and arbitrary module-based sources.
 - Keep search/indexing/domain logic separate from presentation so the same core can support a Datastar website, CLI, TUI, editor plugin, or static exporter.
 - Avoid requiring paid services such as hosted Elasticsearch/OpenSearch.
-- Support multiple repositories, datasets, and refs/branches in one deployment.
+- Support multiple repositories, sources, and refs/branches in one deployment.
 - Be more flexible than `searchix` by making refs and import strategies first-class configuration concepts.
-- Support known common cases with presets, but allow custom projects such as `hjem`, NixVim, Nixidy, organization module collections, etc.
+- Support known common cases with presets, but allow custom sources such as `hjem`, NixVim, Nixidy, organization module collections, etc.
 - Preserve rich metadata: source links, revisions, declarations, package positions, licenses, maintainers, platforms, programs, manpages, and option defaults/examples.
 
 ## Lessons from reference projects
@@ -85,7 +85,7 @@ Key lessons:
 - A scope can be backed by either:
   - modules evaluated with `lib.evalModules`
   - a pre-generated `options.json`
-- Supporting `urlPrefix`, `specialArgs`, and `overrideEvalModulesArgs` makes arbitrary module projects much easier.
+- Supporting `urlPrefix`, `specialArgs`, and `overrideEvalModulesArgs` makes arbitrary module sources much easier.
 
 Things to avoid:
 
@@ -119,47 +119,32 @@ The website should be built with Datastar. Keep the core crates reusable so CLI,
 
 Keep these concepts distinct.
 
-### Project
+### Source
 
-A logical collection or deployment namespace.
-
-Examples:
-
-- `nixpkgs`
-- `nixos`
-- `home-manager`
-- `nix-darwin`
-- `hjem`
-- `my-org-options`
-
-A project may contain multiple datasets and refs.
-
-### Dataset
-
-A searchable logical collection inside a project.
+A top-level searchable collection.
 
 Examples:
 
-- `packages`
-- `nixos-options`
-- `home-manager-options`
-- `darwin-options`
-- `apps`
-- `services`
-- `hjem-options`
+- `nixpkgs` — Nix packages
+- `nixos` — NixOS options
+- `home-manager` — Home Manager options
+- `nix-darwin` — nix-darwin options
+- `hjem` — hjem options
+- `fixtures` — local/debug data
 
-A dataset has:
+A source has:
 
 - stable ID
 - display name
 - kind: `packages`, `options`, `apps`, `services`, or `mixed`
 - repository/link metadata
 - import strategy
+- available refs
 - available facets
 
 ### Ref
 
-A concrete version of a dataset.
+A concrete version of a source.
 
 Examples:
 
@@ -175,18 +160,18 @@ Refs should be first-class. Branches do not need a special primitive; they can b
 Document IDs should include all relevant identity dimensions:
 
 ```text
-project_id/dataset_id/ref_id/kind/name
+source_id/ref_id/kind/name
 ```
 
 This allows one deployment to contain, for example:
 
-- `nixpkgs/packages/nixos-unstable`
-- `nixpkgs/packages/nixos-25.05`
-- `nixpkgs/nixos-options/nixos-unstable`
-- `home-manager/options/master`
-- `nix-darwin/options/master`
+- `nixpkgs/nixos-unstable/package/git`
+- `nixpkgs/nixos-25.05/package/git`
+- `nixos/nixos-unstable/option/programs.git.enable`
+- `home-manager/master/option/programs.git.enable`
+- `nix-darwin/master/option/system.defaults.dock.autohide`
 
-Future agents may decide whether physical Tantivy indexes should be global, per project, per dataset, or per ref. The logical model should support all of these.
+Future agents may decide whether physical Tantivy indexes should be global, per source, or per ref. The logical model should support all of these.
 
 ## Configuration design
 
@@ -201,58 +186,50 @@ built-in defaults
   -> CLI overrides
 ```
 
-The server/importer should generally be configured with projects, datasets, refs, and producers rather than direct paths to `options.json` or `packages.json`. Direct file paths should still be supported as a low-level/debug producer.
+The server/importer should generally be configured with sources, refs, and producers rather than direct paths to `options.json` or `packages.json`. Direct file paths should still be supported as a low-level/debug producer.
 
 Conceptual example:
 
 ```toml
-[projects.nixpkgs]
+[sources.nixpkgs]
 name = "Nixpkgs"
+preset = "nixpkgs-packages"
+ref = "nixos-unstable"
 
-[[projects.nixpkgs.datasets]]
-id = "packages"
-name = "Nix Packages"
-kind = "packages"
-
-[[projects.nixpkgs.datasets.refs]]
-id = "unstable"
-ref = "github:NixOS/nixpkgs/nixos-unstable"
-producer = "channel-packages-json"
-
-[[projects.nixpkgs.datasets.refs]]
-id = "25.05"
-ref = "github:NixOS/nixpkgs/nixos-25.05"
-producer = "channel-packages-json"
-
-[[projects.nixpkgs.datasets]]
-id = "nixos-options"
+[sources.nixos]
 name = "NixOS Options"
-kind = "options"
-
-[[projects.nixpkgs.datasets.refs]]
-id = "unstable"
-ref = "github:NixOS/nixpkgs/nixos-unstable"
-producer = "nix-build-options-json"
-attribute = "options"
-import_path = "nixos/release.nix"
-output_path = "share/doc/nixos/options.json"
+preset = "nixos-options"
+ref = "nixos-unstable"
 ```
 
-Arbitrary module project example:
+Explicit source example:
 
 ```toml
-[projects.hjem]
-name = "hjem"
+[sources.nixpkgs]
+name = "Nixpkgs"
+kind = "packages"
 
-[[projects.hjem.datasets]]
-id = "options"
+[[sources.nixpkgs.refs]]
+id = "unstable"
+
+[sources.nixpkgs.refs.producer]
+type = "channel-packages-json"
+channel = "nixos-unstable"
+```
+
+Arbitrary module source example:
+
+```toml
+[sources.hjem]
 name = "hjem Options"
 kind = "options"
 
-[[projects.hjem.datasets.refs]]
+[[sources.hjem.refs]]
 id = "main"
+
+[sources.hjem.refs.producer]
+type = "eval-modules"
 ref = "github:feel-co/hjem"
-producer = "eval-modules"
 modules_attr = "nixosModules.default"
 url_prefix = "https://github.com/feel-co/hjem/blob/main/"
 ```
@@ -271,7 +248,7 @@ Use a producer/consumer pipeline:
 
 ```text
 Figment config
-  -> Resolve project/dataset/ref
+  -> Resolve source/ref
   -> Producer fetches/evaluates source data
   -> Artifact store writes raw artifacts and metadata
   -> Consumer reads artifact
@@ -307,20 +284,19 @@ Artifacts are the boundary between production and ingestion. They allow caching,
 Recommended artifact keys:
 
 ```text
-artifacts/{project}/{dataset}/{ref}/latest/options.json
-artifacts/{project}/{dataset}/{ref}/latest/packages.json
-artifacts/{project}/{dataset}/{ref}/latest/meta.json
-artifacts/{project}/{dataset}/{ref}/revisions/{revision}/options.json
-artifacts/{project}/{dataset}/{ref}/revisions/{revision}/packages.json
-artifacts/{project}/{dataset}/{ref}/revisions/{revision}/meta.json
+artifacts/{source}/{ref}/latest/options.json
+artifacts/{source}/{ref}/latest/packages.json
+artifacts/{source}/{ref}/latest/meta.json
+artifacts/{source}/{ref}/revisions/{revision}/options.json
+artifacts/{source}/{ref}/revisions/{revision}/packages.json
+artifacts/{source}/{ref}/revisions/{revision}/meta.json
 ```
 
 Keep `latest` for convenience, but prefer revision-addressed or content-addressed storage for reproducibility.
 
 Metadata should include:
 
-- project
-- dataset
+- source
 - ref
 - artifact kind
 - producer name/config hash
@@ -454,8 +430,7 @@ Conceptually:
 ```rust
 struct CommonDoc {
     id: String,
-    project: String,
-    dataset: String,
+    source: String,
     ref_id: String,
     kind: DocumentKind,
     name: String,
@@ -602,8 +577,7 @@ Example important queries:
 
 Support filters/facets:
 
-- project
-- dataset
+- source
 - ref
 - kind
 - option set
@@ -657,8 +631,7 @@ nix-search update
 nix-search serve
 nix-search search "programs.git.enable"
 nix-search inspect-source nixos-options unstable
-nix-search list-projects
-nix-search list-datasets
+nix-search list-sources
 nix-search list-refs
 ```
 
@@ -808,7 +781,7 @@ Recommended vertical-slice order:
 10. Add artifact types: `ArtifactKind`, `ArtifactRef`, `ArtifactMetadata`.
 11. Add producer/consumer traits.
 12. Add `ExistingFileProducer` and refactor `index-options` to use the artifact path internally.
-13. Add project/dataset/ref config model.
+13. Add source/ref config model.
 14. Add `NixBuildOptionsProducer`.
 15. Add `ChannelPackagesJsonProducer`.
 16. Add package parser for nixpkgs `packages.json`.
@@ -828,7 +801,7 @@ This order gives future agents a working vertical slice early while preserving f
 
 Future agents should revisit these with experiments:
 
-- One global Tantivy index or multiple indexes per project/dataset/ref?
+- One global Tantivy index or multiple indexes per source/ref?
 - How much should custom Nix eval be configured in TOML vs Nix?
 - Should the project expose a Nix library similar to NuschtOS `mkSearch`?
 - How should schema migrations work for existing indexes?
@@ -854,4 +827,4 @@ The project should combine the best parts of the references:
 - From `searchix`: practical local indexing, fetch/import/index separation, and multi-source support.
 - From `NuschtOS-search`: flexible arbitrary module option scopes and static-generation inspiration.
 
-The main improvement is a more general model built around projects, datasets, and refs, plus reusable search/indexing crates, a Datastar-powered web UI, and local Tantivy indexing.
+The main improvement is a more general model built around sources and refs, plus reusable search/indexing crates, a Datastar-powered web UI, and local Tantivy indexing.

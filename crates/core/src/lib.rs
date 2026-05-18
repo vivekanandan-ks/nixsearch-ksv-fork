@@ -301,8 +301,7 @@ fn is_absolute_url(value: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestContext {
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
     pub revision: Option<String>,
     pub repo: Option<Repo>,
@@ -311,8 +310,7 @@ pub struct IngestContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommonDoc {
     pub id: String,
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
     pub kind: DocumentKind,
     pub name: String,
@@ -326,18 +324,11 @@ pub struct CommonDoc {
 impl CommonDoc {
     pub fn new(context: &IngestContext, kind: DocumentKind, name: impl Into<String>) -> Self {
         let name = name.into();
-        let id = make_document_id(
-            &context.project,
-            &context.dataset,
-            &context.ref_id,
-            kind.as_str(),
-            &name,
-        );
+        let id = make_document_id(&context.source, &context.ref_id, kind.as_str(), &name);
 
         Self {
             id,
-            project: context.project.clone(),
-            dataset: context.dataset.clone(),
+            source: context.source.clone(),
             ref_id: context.ref_id.clone(),
             kind,
             name_parts: NameParts::from_dotted(&name),
@@ -480,17 +471,10 @@ impl SearchDocument {
     }
 }
 
-pub fn make_document_id(
-    project: &str,
-    dataset: &str,
-    ref_id: &str,
-    kind: &str,
-    name: &str,
-) -> String {
+pub fn make_document_id(source: &str, ref_id: &str, kind: &str, name: &str) -> String {
     format!(
-        "{}/{}/{}/{}/{}",
-        escape_id_part(project),
-        escape_id_part(dataset),
+        "{}/{}/{}/{}",
+        escape_id_part(source),
         escape_id_part(ref_id),
         escape_id_part(kind),
         escape_id_part(name),
@@ -510,25 +494,15 @@ mod tests {
 
     #[test]
     fn document_ids_are_stable_and_include_identity_dimensions() {
-        let id = make_document_id(
-            "nixpkgs",
-            "nixos-options",
-            "unstable",
-            "option",
-            "programs.git.enable",
-        );
+        let id = make_document_id("nixos", "unstable", "option", "programs.git.enable");
 
-        assert_eq!(
-            id,
-            "nixpkgs/nixos-options/unstable/option/programs.git.enable"
-        );
+        assert_eq!(id, "nixos/unstable/option/programs.git.enable");
     }
 
     #[test]
     fn document_id_parts_escape_slashes() {
         let id = make_document_id(
             "my/project",
-            "options",
             "release/25.05",
             "option",
             "programs.git.enable",
@@ -536,15 +510,14 @@ mod tests {
 
         assert_eq!(
             id,
-            "my%2Fproject/options/release%2F25.05/option/programs.git.enable"
+            "my%2Fproject/release%2F25.05/option/programs.git.enable"
         );
     }
 
     #[test]
     fn common_doc_uses_context_identity() {
         let context = IngestContext {
-            project: "nixpkgs".into(),
-            dataset: "nixos-options".into(),
+            source: "nixos".into(),
             ref_id: "unstable".into(),
             revision: Some("abc123".into()),
             repo: None,
@@ -552,16 +525,12 @@ mod tests {
 
         let doc = CommonDoc::new(&context, DocumentKind::Option, "programs.git.enable");
 
-        assert_eq!(doc.project, "nixpkgs");
-        assert_eq!(doc.dataset, "nixos-options");
+        assert_eq!(doc.source, "nixos");
         assert_eq!(doc.ref_id, "unstable");
         assert_eq!(doc.revision.as_deref(), Some("abc123"));
         assert_eq!(doc.kind, DocumentKind::Option);
         assert_eq!(doc.name, "programs.git.enable");
-        assert_eq!(
-            doc.id,
-            "nixpkgs/nixos-options/unstable/option/programs.git.enable"
-        );
+        assert_eq!(doc.id, "nixos/unstable/option/programs.git.enable");
 
         assert_eq!(doc.name_parts.root.as_deref(), Some("programs"));
         assert_eq!(doc.name_parts.groups, ["programs", "programs.git"]);
@@ -571,8 +540,7 @@ mod tests {
     #[test]
     fn package_doc_uses_attribute_as_document_name() {
         let context = IngestContext {
-            project: "nixpkgs".into(),
-            dataset: "packages".into(),
+            source: "nixpkgs".into(),
             ref_id: "unstable".into(),
             revision: None,
             repo: None,

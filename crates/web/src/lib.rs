@@ -29,8 +29,7 @@ struct AppState {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct SearchQuery {
     q: Option<String>,
-    project: Option<String>,
-    dataset: Option<String>,
+    source: Option<String>,
     #[serde(rename = "ref")]
     ref_id: Option<String>,
 }
@@ -38,8 +37,7 @@ struct SearchQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct SearchSignals {
     q: Option<String>,
-    project: Option<String>,
-    dataset: Option<String>,
+    source: Option<String>,
     #[serde(rename = "ref")]
     ref_id: Option<String>,
 }
@@ -48,8 +46,7 @@ impl From<SearchSignals> for SearchQuery {
     fn from(value: SearchSignals) -> Self {
         Self {
             q: value.q,
-            project: value.project,
-            dataset: value.dataset,
+            source: value.source,
             ref_id: value.ref_id,
         }
     }
@@ -149,13 +146,8 @@ fn run_search(state: &AppState, query: &SearchQuery) -> Result<Vec<SearchHit>> {
         .search(SearchOptions {
             query: q.to_owned(),
             limit: DEFAULT_LIMIT,
-            project: query
-                .project
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned),
-            dataset: query
-                .dataset
+            source: query
+                .source
                 .as_deref()
                 .and_then(non_empty)
                 .map(ToOwned::to_owned),
@@ -184,8 +176,7 @@ fn render_page(
     config: &AppConfig,
 ) -> String {
     let q = query.q.as_deref().unwrap_or("");
-    let project = query.project.as_deref().unwrap_or("");
-    let dataset = query.dataset.as_deref().unwrap_or("");
+    let source = query.source.as_deref().unwrap_or("");
     let ref_id = query.ref_id.as_deref().unwrap_or("");
 
     let results_html = match results {
@@ -336,8 +327,7 @@ fn render_page(
        }}
      </style>
    </head>
-   <body data-signals-q="{q_attr}" data-signals-project="{project_attr}" data-signals-dataset="{dataset_attr}"
- data-signals-ref="{ref_attr}">
+   <body data-signals-q="{q_attr}" data-signals-source="{source_attr}" data-signals-ref="{ref_attr}">
      <main>
        <h1>Nix Search</h1>
        <p class="subtitle">Search indexed Nix packages and options.</p>
@@ -359,23 +349,12 @@ fn render_page(
 
          <div class="filters">
            <label>
-             Project
+             Source
              <input
-               name="project"
-               value="{project_attr}"
+               name="source"
+               value="{source_attr}"
                placeholder="optional"
-               data-bind-project
-               data-on-input__debounce.300ms="@get('/search/events')"
-             >
-           </label>
-
-           <label>
-             Dataset
-             <input
-               name="dataset"
-               value="{dataset_attr}"
-               placeholder="optional"
-               data-bind-dataset
+               data-bind-source
                data-on-input__debounce.300ms="@get('/search/events')"
              >
            </label>
@@ -400,8 +379,7 @@ fn render_page(
    </body>
    </html>"#,
         q_attr = encode_double_quoted_attribute(q),
-        project_attr = encode_double_quoted_attribute(project),
-        dataset_attr = encode_double_quoted_attribute(dataset),
+        source_attr = encode_double_quoted_attribute(source),
         ref_attr = encode_double_quoted_attribute(ref_id),
     )
 }
@@ -453,11 +431,10 @@ fn render_hit(hit: &SearchHit, config: &AppConfig) -> String {
     let mut html = format!(
         r#"<article class="result">
      <h2><code>{name}</code></h2>
-     <div class="meta">{kind} · {project}/{dataset}/{ref_id} · score {score:.3}</div>"#,
+     <div class="meta">{kind} · {source}/{ref_id} · score {score:.3}</div>"#,
         name = encode_text(&common.name),
         kind = encode_text(common.kind.as_str()),
-        project = encode_text(&common.project),
-        dataset = encode_text(&common.dataset),
+        source = encode_text(&common.source),
         ref_id = encode_text(&common.ref_id),
         score = hit.score,
     );
@@ -519,14 +496,9 @@ fn source_link_config_for_document<'a>(
     config: &'a AppConfig,
     common: &CommonDoc,
 ) -> Option<&'a SourceLinkConfig> {
-    let project = config.projects.get(&common.project)?;
+    let source = config.sources.get(&common.source)?;
 
-    let dataset = project
-        .datasets
-        .iter()
-        .find(|dataset| dataset.id == common.dataset)?;
-
-    let ref_config = dataset
+    let ref_config = source
         .refs
         .iter()
         .find(|ref_config| ref_config.id == common.ref_id)?;
@@ -539,8 +511,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use nix_search_config::{
-        AppConfig, DataConfig, DatasetConfig, DatasetKind, ProducerConfig, ProjectConfig,
-        RefConfig, ServerConfig,
+        AppConfig, DataConfig, ProducerConfig, RefConfig, ServerConfig, SourceConfig, SourceKind,
     };
     use nix_search_core::{
         CommonDoc, Declaration, DocumentKind, NameParts, OptionDoc, SearchDocument,
@@ -576,8 +547,7 @@ mod tests {
         let config = test_config();
         let mut option = OptionDoc::new(
             &nix_search_core::IngestContext {
-                project: "fixtures".into(),
-                dataset: "options".into(),
+                source: "fixtures".into(),
                 ref_id: "small".into(),
                 revision: Some("abc123".into()),
                 repo: None,
@@ -602,27 +572,23 @@ mod tests {
         AppConfig {
             data: DataConfig::default(),
             server: ServerConfig::default(),
-            projects: [(
+            sources: [(
                 "fixtures".to_owned(),
-                ProjectConfig {
+                SourceConfig {
                     name: Some("Fixtures".to_owned()),
-                    datasets: vec![DatasetConfig {
-                        id: "options".to_owned(),
-                        name: Some("Options".to_owned()),
-                        kind: DatasetKind::Options,
-                        refs: vec![RefConfig {
-                            id: "small".to_owned(),
-                            source_links: Some(SourceLinkConfig::Github {
-                                owner: "example".to_owned(),
-                                repo: "repo".to_owned(),
-                                revision: Some("main".to_owned()),
-                                strip_prefixes: Vec::new(),
-                            }),
-                            producer: ProducerConfig::ExistingFile {
-                                path: "fixtures/options-small.json".into(),
-                                artifact: nix_search_core::ArtifactKind::OptionsJson,
-                            },
-                        }],
+                    kind: SourceKind::Options,
+                    refs: vec![RefConfig {
+                        id: "small".to_owned(),
+                        source_links: Some(SourceLinkConfig::Github {
+                            owner: "example".to_owned(),
+                            repo: "repo".to_owned(),
+                            revision: Some("main".to_owned()),
+                            strip_prefixes: Vec::new(),
+                        }),
+                        producer: ProducerConfig::ExistingFile {
+                            path: "fixtures/options-small.json".into(),
+                            artifact: nix_search_core::ArtifactKind::OptionsJson,
+                        },
                     }],
                 },
             )]
@@ -633,9 +599,8 @@ mod tests {
     #[allow(dead_code)]
     fn test_common() -> CommonDoc {
         CommonDoc {
-            id: "fixtures/options/small/option/programs.fixture.enable".to_owned(),
-            project: "fixtures".to_owned(),
-            dataset: "options".to_owned(),
+            id: "fixtures/small/option/programs.fixture.enable".to_owned(),
+            source: "fixtures".to_owned(),
             ref_id: "small".to_owned(),
             kind: DocumentKind::Option,
             name: "programs.fixture.enable".to_owned(),
@@ -646,4 +611,3 @@ mod tests {
         }
     }
 }
-

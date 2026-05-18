@@ -17,8 +17,7 @@ pub const INDEX_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 struct IndexFields {
     id: Field,
-    project: Field,
-    dataset: Field,
+    source: Field,
     ref_id: Field,
     kind: Field,
     name_exact: Field,
@@ -42,12 +41,7 @@ impl IndexFields {
     fn from_schema(schema: &Schema) -> Result<Self> {
         Ok(Self {
             id: schema.get_field("id").context("missing field id")?,
-            project: schema
-                .get_field("project")
-                .context("missing field project")?,
-            dataset: schema
-                .get_field("dataset")
-                .context("missing field dataset")?,
+            source: schema.get_field("source").context("missing field source")?,
             ref_id: schema.get_field("ref").context("missing field ref")?,
             kind: schema.get_field("kind").context("missing field kind")?,
             name_exact: schema
@@ -115,8 +109,7 @@ pub struct SearchHit {
 pub struct SearchOptions {
     pub query: String,
     pub limit: usize,
-    pub project: Option<String>,
-    pub dataset: Option<String>,
+    pub source: Option<String>,
     pub ref_id: Option<String>,
 }
 
@@ -217,21 +210,11 @@ impl SearchIndex {
         let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
             vec![(tantivy::query::Occur::Must, parsed_query)];
 
-        if let Some(project) = options.project {
+        if let Some(source) = options.source {
             clauses.push((
                 tantivy::query::Occur::Must,
                 Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.project, &project),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ));
-        }
-
-        if let Some(dataset) = options.dataset {
-            clauses.push((
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.dataset, &dataset),
+                    tantivy::Term::from_field_text(self.fields.source, &source),
                     tantivy::schema::IndexRecordOption::Basic,
                 )),
             ));
@@ -302,8 +285,7 @@ impl SearchIndexWriter {
 
         let mut document = doc!(
             self.fields.id => common.id.clone(),
-            self.fields.project => common.project.clone(),
-            self.fields.dataset => common.dataset.clone(),
+            self.fields.source => common.source.clone(),
             self.fields.ref_id => common.ref_id.clone(),
             self.fields.kind => common.kind.as_str(),
             self.fields.name_exact => common.name.clone(),
@@ -343,8 +325,7 @@ impl SearchIndexWriter {
 
         let mut document = doc!(
             self.fields.id => common.id.clone(),
-            self.fields.project => common.project.clone(),
-            self.fields.dataset => common.dataset.clone(),
+            self.fields.source => common.source.clone(),
             self.fields.ref_id => common.ref_id.clone(),
             self.fields.kind => common.kind.as_str(),
             self.fields.name_exact => common.name.clone(),
@@ -402,8 +383,7 @@ fn build_schema() -> Schema {
     let mut builder = Schema::builder();
 
     builder.add_text_field("id", STRING | STORED);
-    builder.add_text_field("project", STRING | STORED);
-    builder.add_text_field("dataset", STRING | STORED);
+    builder.add_text_field("source", STRING | STORED);
     builder.add_text_field("ref", STRING | STORED);
     builder.add_text_field("kind", STRING | STORED);
 
@@ -575,8 +555,7 @@ impl IndexGenerationManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexTargetManifest {
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
     pub artifact_kind: ArtifactKind,
     pub document_count: usize,
@@ -594,8 +573,7 @@ mod tests {
 
     fn test_context() -> IngestContext {
         IngestContext {
-            project: "nixpkgs".into(),
-            dataset: "nixos-options".into(),
+            source: "nixos".into(),
             ref_id: "unstable".into(),
             revision: None,
             repo: None,
@@ -646,8 +624,7 @@ mod tests {
             .search(SearchOptions {
                 query: "git".to_owned(),
                 limit: 10,
-                project: None,
-                dataset: None,
+                source: None,
                 ref_id: None,
             })
             .unwrap();
@@ -679,8 +656,7 @@ mod tests {
             .search(SearchOptions {
                 query: "programs.git.enable".to_owned(),
                 limit: 10,
-                project: None,
-                dataset: None,
+                source: None,
                 ref_id: None,
             })
             .unwrap();
@@ -712,8 +688,7 @@ mod tests {
             .search(SearchOptions {
                 query: "EFI".to_owned(),
                 limit: 10,
-                project: None,
-                dataset: None,
+                source: None,
                 ref_id: None,
             })
             .unwrap();
@@ -753,8 +728,7 @@ mod tests {
             .search(SearchOptions {
                 query: "services.tailscale".to_owned(),
                 limit: 10,
-                project: None,
-                dataset: None,
+                source: None,
                 ref_id: None,
             })
             .unwrap();
@@ -786,8 +760,7 @@ mod tests {
             .search(SearchOptions {
                 query: "enable".to_owned(),
                 limit: 10,
-                project: None,
-                dataset: None,
+                source: None,
                 ref_id: None,
             })
             .unwrap();
@@ -821,8 +794,7 @@ mod tests {
         let manifest = super::IndexGenerationManifest::new(
             10,
             vec![super::IndexTargetManifest {
-                project: "fixtures".into(),
-                dataset: "options".into(),
+                source: "fixtures".into(),
                 ref_id: "small".into(),
                 artifact_kind: nix_search_core::ArtifactKind::OptionsJson,
                 document_count: 10,
@@ -838,7 +810,7 @@ mod tests {
 
         assert_eq!(loaded.document_count, 10);
         assert_eq!(loaded.targets.len(), 1);
-        assert_eq!(loaded.targets[0].project, "fixtures");
+        assert_eq!(loaded.targets[0].source, "fixtures");
     }
 
     #[test]

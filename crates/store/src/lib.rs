@@ -34,8 +34,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
     pub kind: ArtifactKind,
     pub version: ArtifactVersion,
@@ -43,14 +42,12 @@ pub struct ArtifactRef {
 
 impl ArtifactRef {
     pub fn latest(
-        project: impl Into<String>,
-        dataset: impl Into<String>,
+        source: impl Into<String>,
         ref_id: impl Into<String>,
         kind: ArtifactKind,
     ) -> Self {
         Self {
-            project: project.into(),
-            dataset: dataset.into(),
+            source: source.into(),
             ref_id: ref_id.into(),
             kind,
             version: ArtifactVersion::Latest,
@@ -58,15 +55,13 @@ impl ArtifactRef {
     }
 
     pub fn revision(
-        project: impl Into<String>,
-        dataset: impl Into<String>,
+        source: impl Into<String>,
         ref_id: impl Into<String>,
         kind: ArtifactKind,
         revision: impl Into<String>,
     ) -> Self {
         Self {
-            project: project.into(),
-            dataset: dataset.into(),
+            source: source.into(),
             ref_id: ref_id.into(),
             kind,
             version: ArtifactVersion::Revision(revision.into()),
@@ -74,11 +69,7 @@ impl ArtifactRef {
     }
 
     pub fn artifact_key(&self) -> ObjectPath {
-        let mut parts = vec![
-            self.project.as_str(),
-            self.dataset.as_str(),
-            self.ref_id.as_str(),
-        ];
+        let mut parts = vec![self.source.as_str(), self.ref_id.as_str()];
 
         self.version.push_key_parts(&mut parts);
         parts.push(self.kind.file_name());
@@ -87,11 +78,7 @@ impl ArtifactRef {
     }
 
     pub fn metadata_key(&self) -> ObjectPath {
-        let mut parts = vec![
-            self.project.as_str(),
-            self.dataset.as_str(),
-            self.ref_id.as_str(),
-        ];
+        let mut parts = vec![self.source.as_str(), self.ref_id.as_str()];
 
         self.version.push_key_parts(&mut parts);
         parts.push("meta.json");
@@ -123,7 +110,7 @@ impl ArtifactVersion {
 pub struct ArtifactMetadataInput {
     pub producer: String,
     pub revision: Option<String>,
-    pub source: Option<String>,
+    pub source_url: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -132,7 +119,7 @@ impl ArtifactMetadataInput {
         Self {
             producer: producer.into(),
             revision: None,
-            source: None,
+            source_url: None,
             warnings: Vec::new(),
         }
     }
@@ -140,13 +127,12 @@ impl ArtifactMetadataInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
-    pub project: String,
-    pub dataset: String,
+    pub source: String,
     pub ref_id: String,
     pub kind: ArtifactKind,
     pub producer: String,
     pub revision: Option<String>,
-    pub source: Option<String>,
+    pub source_url: Option<String>,
     pub content_hash: String,
     pub size_bytes: u64,
     #[serde(with = "time::serde::rfc3339")]
@@ -193,13 +179,12 @@ impl ArtifactStore {
         self.store.put(&artifact_key, bytes.clone().into()).await?;
 
         let metadata = ArtifactMetadata {
-            project: artifact_ref.project.clone(),
-            dataset: artifact_ref.dataset.clone(),
+            source: artifact_ref.source.clone(),
             ref_id: artifact_ref.ref_id.clone(),
             kind: artifact_ref.kind,
             producer: input.producer,
             revision: input.revision,
-            source: input.source,
+            source_url: input.source_url,
             content_hash: sha256_hex(&bytes),
             size_bytes: bytes.len() as u64,
             produced_at: OffsetDateTime::now_utc(),
@@ -267,20 +252,15 @@ mod tests {
 
     #[test]
     fn latest_artifact_keys_are_stable() {
-        let artifact_ref = ArtifactRef::latest(
-            "nixpkgs",
-            "nixos-options",
-            "unstable",
-            ArtifactKind::OptionsJson,
-        );
+        let artifact_ref = ArtifactRef::latest("nixos", "unstable", ArtifactKind::OptionsJson);
 
         assert_eq!(
             artifact_ref.artifact_key().as_ref(),
-            "nixpkgs/nixos-options/unstable/latest/options.json"
+            "nixos/unstable/latest/options.json"
         );
         assert_eq!(
             artifact_ref.metadata_key().as_ref(),
-            "nixpkgs/nixos-options/unstable/latest/meta.json"
+            "nixos/unstable/latest/meta.json"
         );
     }
 
@@ -288,7 +268,6 @@ mod tests {
     fn revision_artifact_keys_are_stable_and_escape_slashes() {
         let artifact_ref = ArtifactRef::revision(
             "nixpkgs",
-            "packages",
             "stable",
             ArtifactKind::PackagesJson,
             "release/25.05",
@@ -296,11 +275,11 @@ mod tests {
 
         assert_eq!(
             artifact_ref.artifact_key().as_ref(),
-            "nixpkgs/packages/stable/revisions/release%2F25.05/packages.json"
+            "nixpkgs/stable/revisions/release%2F25.05/packages.json"
         );
         assert_eq!(
             artifact_ref.metadata_key().as_ref(),
-            "nixpkgs/packages/stable/revisions/release%2F25.05/meta.json"
+            "nixpkgs/stable/revisions/release%2F25.05/meta.json"
         );
     }
 
@@ -309,12 +288,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
 
-        let artifact_ref = ArtifactRef::latest(
-            "nixpkgs",
-            "nixos-options",
-            "unstable",
-            ArtifactKind::OptionsJson,
-        );
+        let artifact_ref = ArtifactRef::latest("nixos", "unstable", ArtifactKind::OptionsJson);
 
         let bytes = Bytes::from_static(br#"{"hello":"world"}"#);
 
@@ -337,16 +311,11 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
 
-        let artifact_ref = ArtifactRef::latest(
-            "nixpkgs",
-            "nixos-options",
-            "unstable",
-            ArtifactKind::OptionsJson,
-        );
+        let artifact_ref = ArtifactRef::latest("nixos", "unstable", ArtifactKind::OptionsJson);
 
         let mut input = ArtifactMetadataInput::new("test-producer");
         input.revision = Some("abc123".to_owned());
-        input.source = Some("github:NixOS/nixpkgs/nixos-unstable".to_owned());
+        input.source_url = Some("github:NixOS/nixpkgs/nixos-unstable".to_owned());
         input.warnings.push("example warning".to_owned());
 
         let metadata = store
@@ -361,14 +330,13 @@ mod tests {
         let loaded = store.get_metadata(&artifact_ref).await.unwrap();
 
         assert_eq!(loaded, metadata);
-        assert_eq!(loaded.project, "nixpkgs");
-        assert_eq!(loaded.dataset, "nixos-options");
+        assert_eq!(loaded.source, "nixos");
         assert_eq!(loaded.ref_id, "unstable");
         assert_eq!(loaded.kind, ArtifactKind::OptionsJson);
         assert_eq!(loaded.producer, "test-producer");
         assert_eq!(loaded.revision.as_deref(), Some("abc123"));
         assert_eq!(
-            loaded.source.as_deref(),
+            loaded.source_url.as_deref(),
             Some("github:NixOS/nixpkgs/nixos-unstable")
         );
         assert_eq!(loaded.warnings, ["example warning"]);
@@ -379,8 +347,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
 
-        let artifact_ref =
-            ArtifactRef::latest("fixtures", "options", "small", ArtifactKind::OptionsJson);
+        let artifact_ref = ArtifactRef::latest("fixtures", "small", ArtifactKind::OptionsJson);
 
         let metadata = store
             .put_artifact(
@@ -403,8 +370,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
 
-        let artifact_ref =
-            ArtifactRef::latest("missing", "options", "main", ArtifactKind::OptionsJson);
+        let artifact_ref = ArtifactRef::latest("missing", "main", ArtifactKind::OptionsJson);
 
         assert!(!store.exists(&artifact_ref).await.unwrap());
     }
@@ -414,8 +380,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
 
-        let artifact_ref =
-            ArtifactRef::latest("fixtures", "options", "small", ArtifactKind::OptionsJson);
+        let artifact_ref = ArtifactRef::latest("fixtures", "small", ArtifactKind::OptionsJson);
 
         store
             .put_artifact(

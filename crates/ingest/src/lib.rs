@@ -307,8 +307,7 @@ mod tests {
 
     fn test_context() -> IngestContext {
         IngestContext {
-            project: "nixpkgs".into(),
-            dataset: "nixos-options".into(),
+            source: "nixos".into(),
             ref_id: "unstable".into(),
             revision: None,
             repo: None,
@@ -340,8 +339,7 @@ mod tests {
             panic!("expected option document");
         };
 
-        assert_eq!(option.common.project, "nixpkgs");
-        assert_eq!(option.common.dataset, "nixos-options");
+        assert_eq!(option.common.source, "nixos");
         assert_eq!(option.common.ref_id, "unstable");
         assert_eq!(option.loc, ["programs", "git", "enable"]);
         assert_eq!(option.option_set.as_deref(), Some("programs"));

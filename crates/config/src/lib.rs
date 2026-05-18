@@ -30,7 +30,7 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 pub struct AppConfig {
     pub data: DataConfig,
     pub server: ServerConfig,
-    pub projects: BTreeMap<String, ProjectConfig>,
+    pub sources: BTreeMap<String, SourceConfig>,
 }
 
 impl AppConfig {
@@ -62,8 +62,8 @@ impl AppConfig {
         self.data.validate()?;
         self.server.validate()?;
 
-        for (project_key, project) in &self.projects {
-            project.validate(project_key)?;
+        for (source_id, source) in &self.sources {
+            source.validate(source_id)?;
         }
 
         Ok(())
@@ -75,24 +75,21 @@ impl AppConfig {
 struct RawAppConfig {
     data: DataConfig,
     server: ServerConfig,
-    projects: BTreeMap<String, RawProjectConfig>,
+    sources: BTreeMap<String, RawSourceConfig>,
 }
 
 impl RawAppConfig {
     fn into_app_config(self) -> Result<AppConfig> {
-        let mut projects = BTreeMap::new();
+        let mut sources = BTreeMap::new();
 
-        for (project_id, project) in self.projects {
-            projects.insert(
-                project_id.clone(),
-                project.into_project_config(&project_id)?,
-            );
+        for (source_id, source) in self.sources {
+            sources.insert(source_id.clone(), source.into_source_config(&source_id)?);
         }
 
         Ok(AppConfig {
             data: self.data,
             server: self.server,
-            projects,
+            sources,
         })
     }
 }
@@ -149,91 +146,62 @@ impl ServerConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-struct RawProjectConfig {
+struct RawSourceConfig {
     name: Option<String>,
-    datasets: Vec<RawDatasetConfig>,
-}
-
-impl RawProjectConfig {
-    fn into_project_config(self, project_id: &str) -> Result<ProjectConfig> {
-        let mut datasets = Vec::with_capacity(self.datasets.len());
-
-        for dataset in self.datasets {
-            datasets.push(dataset.into_dataset_config(project_id)?);
-        }
-
-        Ok(ProjectConfig {
-            name: self.name,
-            datasets,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-struct RawDatasetConfig {
-    id: Option<String>,
-    name: Option<String>,
-    kind: Option<DatasetKind>,
+    kind: Option<SourceKind>,
     refs: Vec<RefConfig>,
-    preset: Option<DatasetPreset>,
+    preset: Option<SourcePreset>,
     #[serde(rename = "ref")]
     preset_ref: Option<String>,
 }
 
-impl RawDatasetConfig {
-    fn into_dataset_config(self, project_id: &str) -> Result<DatasetConfig> {
+impl RawSourceConfig {
+    fn into_source_config(self, source_id: &str) -> Result<SourceConfig> {
         match self.preset {
-            Some(preset) => self.expand_preset(project_id, preset),
-            None => self.into_explicit_dataset(project_id),
+            Some(preset) => self.expand_preset(source_id, preset),
+            None => self.into_explicit_source(source_id),
         }
     }
 
-    fn into_explicit_dataset(self, project_id: &str) -> Result<DatasetConfig> {
-        let id = self.id.ok_or_else(|| {
-            ConfigError::Validation(format!(
-                "projects.{project_id}.datasets: dataset id is required"
-            ))
+    fn into_explicit_source(self, source_id: &str) -> Result<SourceConfig> {
+        let kind = self.kind.ok_or_else(|| {
+            ConfigError::Validation(format!("sources.{source_id}: kind is required"))
         })?;
 
-        Ok(DatasetConfig {
-            id,
+        Ok(SourceConfig {
             name: self.name,
-            kind: self.kind.unwrap_or_default(),
+            kind,
             refs: self.refs,
         })
     }
 
-    fn expand_preset(self, project_id: &str, preset: DatasetPreset) -> Result<DatasetConfig> {
+    fn expand_preset(self, source_id: &str, preset: SourcePreset) -> Result<SourceConfig> {
         if !self.refs.is_empty() {
             return Err(ConfigError::Validation(format!(
-                "projects.{project_id}.datasets: preset datasets must not also define refs"
+                "sources.{source_id}: preset sources must not also define refs"
             )));
         }
 
         let ref_id = self.preset_ref.clone().ok_or_else(|| {
-            ConfigError::Validation(format!(
-                "projects.{project_id}.datasets: preset datasets require ref"
-            ))
+            ConfigError::Validation(format!("sources.{source_id}: preset sources require ref"))
         })?;
 
         match preset {
-            DatasetPreset::NixpkgsPackages => self.expand_nixpkgs_packages(ref_id),
-            DatasetPreset::NixosOptions => self.expand_nixos_options(ref_id),
+            SourcePreset::NixpkgsPackages => self.expand_nixpkgs_packages(ref_id),
+            SourcePreset::NixosOptions => self.expand_nixos_options(ref_id),
         }
     }
 
-    fn expand_nixpkgs_packages(self, ref_id: String) -> Result<DatasetConfig> {
+    fn expand_nixpkgs_packages(self, ref_id: String) -> Result<SourceConfig> {
         reject_conflicting_kind(
             self.kind,
-            DatasetKind::Packages,
-            DatasetPreset::NixpkgsPackages,
+            SourceKind::Packages,
+            SourcePreset::NixpkgsPackages,
         )?;
 
-        Ok(DatasetConfig {
-            id: self.id.unwrap_or_else(|| "packages".to_owned()),
-            name: self.name.or_else(|| Some("Nix Packages".to_owned())),
-            kind: DatasetKind::Packages,
+        Ok(SourceConfig {
+            name: self.name.or_else(|| Some("Nixpkgs".to_owned())),
+            kind: SourceKind::Packages,
             refs: vec![RefConfig {
                 id: ref_id.clone(),
                 source_links: Some(nixpkgs_source_links(&ref_id)),
@@ -245,13 +213,12 @@ impl RawDatasetConfig {
         })
     }
 
-    fn expand_nixos_options(self, ref_id: String) -> Result<DatasetConfig> {
-        reject_conflicting_kind(self.kind, DatasetKind::Options, DatasetPreset::NixosOptions)?;
+    fn expand_nixos_options(self, ref_id: String) -> Result<SourceConfig> {
+        reject_conflicting_kind(self.kind, SourceKind::Options, SourcePreset::NixosOptions)?;
 
-        Ok(DatasetConfig {
-            id: self.id.unwrap_or_else(|| "nixos-options".to_owned()),
+        Ok(SourceConfig {
             name: self.name.or_else(|| Some("NixOS Options".to_owned())),
-            kind: DatasetKind::Options,
+            kind: SourceKind::Options,
             refs: vec![RefConfig {
                 id: ref_id.clone(),
                 source_links: Some(nixpkgs_source_links(&ref_id)),
@@ -276,64 +243,37 @@ fn nixpkgs_source_links(revision: &str) -> SourceLinkConfig {
 }
 
 fn reject_conflicting_kind(
-    configured: Option<DatasetKind>,
-    expected: DatasetKind,
-    preset: DatasetPreset,
+    configured: Option<SourceKind>,
+    expected: SourceKind,
+    preset: SourcePreset,
 ) -> Result<()> {
     if let Some(configured) = configured
         && configured != expected
     {
         return Err(ConfigError::Validation(format!(
-            "preset {preset:?} requires dataset kind {expected:?}, got {configured:?}"
+            "preset {preset:?} requires source kind {expected:?}, got {configured:?}"
         )));
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProjectConfig {
-    pub name: Option<String>,
-    pub datasets: Vec<DatasetConfig>,
-}
-
-impl ProjectConfig {
-    fn validate(&self, project_key: &str) -> Result<()> {
-        validate_id("project key", project_key)?;
-
-        for dataset in &self.datasets {
-            dataset.validate(project_key)?;
-        }
-
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatasetConfig {
-    pub id: String,
+pub struct SourceConfig {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
-    pub kind: DatasetKind,
+    pub kind: SourceKind,
     #[serde(default)]
     pub refs: Vec<RefConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DatasetPreset {
-    NixpkgsPackages,
-    NixosOptions,
-}
-
-impl DatasetConfig {
-    fn validate(&self, project_key: &str) -> Result<()> {
-        validate_id("dataset id", &self.id)?;
+impl SourceConfig {
+    fn validate(&self, source_id: &str) -> Result<()> {
+        validate_id("source id", source_id)?;
 
         for ref_config in &self.refs {
-            ref_config.validate(project_key, &self.id)?;
+            ref_config.validate(source_id)?;
         }
 
         Ok(())
@@ -342,13 +282,20 @@ impl DatasetConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum DatasetKind {
+pub enum SourceKind {
     #[default]
     Options,
     Packages,
     Apps,
     Services,
     Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourcePreset {
+    NixpkgsPackages,
+    NixosOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,9 +307,9 @@ pub struct RefConfig {
 }
 
 impl RefConfig {
-    fn validate(&self, project_id: &str, dataset_id: &str) -> Result<()> {
+    fn validate(&self, source_id: &str) -> Result<()> {
         validate_id("ref id", &self.id)?;
-        self.producer.validate(project_id, dataset_id, &self.id)
+        self.producer.validate(source_id, &self.id)
     }
 }
 
@@ -413,24 +360,19 @@ pub enum ProducerConfig {
 }
 
 impl ProducerConfig {
-    fn validate(&self, project_id: &str, dataset_id: &str, ref_id: &str) -> Result<()> {
+    fn validate(&self, source_id: &str, ref_id: &str) -> Result<()> {
         match self {
             Self::ExistingFile { path, .. } => {
                 if path.as_os_str().is_empty() {
-                    return producer_error(
-                        project_id,
-                        dataset_id,
-                        ref_id,
-                        "path must not be empty",
-                    );
+                    return producer_error(source_id, ref_id, "path must not be empty");
                 }
             }
 
             Self::ChannelPackagesJson { channel, url } => {
-                validate_producer_non_empty(project_id, dataset_id, ref_id, "channel", channel)?;
+                validate_producer_non_empty(source_id, ref_id, "channel", channel)?;
 
                 if let Some(url) = url {
-                    validate_producer_non_empty(project_id, dataset_id, ref_id, "url", url)?;
+                    validate_producer_non_empty(source_id, ref_id, "url", url)?;
                 }
             }
 
@@ -440,28 +382,10 @@ impl ProducerConfig {
                 import_path,
                 output_path,
             } => {
-                validate_producer_non_empty(project_id, dataset_id, ref_id, "ref", source_ref)?;
-                validate_producer_non_empty(
-                    project_id,
-                    dataset_id,
-                    ref_id,
-                    "attribute",
-                    attribute,
-                )?;
-                validate_producer_non_empty(
-                    project_id,
-                    dataset_id,
-                    ref_id,
-                    "import_path",
-                    import_path,
-                )?;
-                validate_producer_non_empty(
-                    project_id,
-                    dataset_id,
-                    ref_id,
-                    "output_path",
-                    output_path,
-                )?;
+                validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
+                validate_producer_non_empty(source_id, ref_id, "attribute", attribute)?;
+                validate_producer_non_empty(source_id, ref_id, "import_path", import_path)?;
+                validate_producer_non_empty(source_id, ref_id, "output_path", output_path)?;
             }
 
             Self::EvalModules {
@@ -469,53 +393,30 @@ impl ProducerConfig {
                 modules_attr,
                 url_prefix,
             } => {
-                validate_producer_non_empty(project_id, dataset_id, ref_id, "ref", source_ref)?;
-                validate_producer_non_empty(
-                    project_id,
-                    dataset_id,
-                    ref_id,
-                    "modules_attr",
-                    modules_attr,
-                )?;
+                validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
+                validate_producer_non_empty(source_id, ref_id, "modules_attr", modules_attr)?;
 
                 if let Some(url_prefix) = url_prefix {
-                    validate_producer_non_empty(
-                        project_id,
-                        dataset_id,
-                        ref_id,
-                        "url_prefix",
-                        url_prefix,
-                    )?;
+                    validate_producer_non_empty(source_id, ref_id, "url_prefix", url_prefix)?;
                 }
             }
 
             Self::Download { url, .. } => {
-                validate_producer_non_empty(project_id, dataset_id, ref_id, "url", url)?;
+                validate_producer_non_empty(source_id, ref_id, "url", url)?;
             }
 
             Self::CustomCommand { command, .. } => {
                 if command.is_empty() {
-                    return producer_error(
-                        project_id,
-                        dataset_id,
-                        ref_id,
-                        "command must not be empty",
-                    );
+                    return producer_error(source_id, ref_id, "command must not be empty");
                 }
 
                 for item in command {
-                    validate_producer_non_empty(
-                        project_id,
-                        dataset_id,
-                        ref_id,
-                        "command item",
-                        item,
-                    )?;
+                    validate_producer_non_empty(source_id, ref_id, "command item", item)?;
                 }
             }
 
             Self::FlakeOutput { source_ref } => {
-                validate_producer_non_empty(project_id, dataset_id, ref_id, "ref", source_ref)?;
+                validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
             }
         }
 
@@ -568,27 +469,21 @@ fn validate_id(name: &str, value: &str) -> Result<()> {
 }
 
 fn validate_producer_non_empty(
-    project_id: &str,
-    dataset_id: &str,
+    source_id: &str,
     ref_id: &str,
     field: &str,
     value: &str,
 ) -> Result<()> {
     if value.trim().is_empty() {
-        return producer_error(
-            project_id,
-            dataset_id,
-            ref_id,
-            &format!("{field} must not be empty"),
-        );
+        return producer_error(source_id, ref_id, &format!("{field} must not be empty"));
     }
 
     Ok(())
 }
 
-fn producer_error<T>(project_id: &str, dataset_id: &str, ref_id: &str, message: &str) -> Result<T> {
+fn producer_error<T>(source_id: &str, ref_id: &str, message: &str) -> Result<T> {
     Err(ConfigError::Validation(format!(
-        "projects.{project_id}.datasets.{dataset_id}.refs.{ref_id}: {message}"
+        "sources.{source_id}.refs.{ref_id}: {message}"
     )))
 }
 
@@ -601,7 +496,7 @@ mod tests {
 
     use nix_search_core::{ArtifactKind, SourceLinkConfig};
 
-    use super::{AppConfig, DatasetKind, ProducerConfig, ProducerKind};
+    use super::{AppConfig, ProducerConfig, ProducerKind, SourceKind};
 
     #[test]
     fn default_config_is_valid() {
@@ -613,7 +508,7 @@ mod tests {
             std::path::PathBuf::from("./data/indexes")
         );
         assert_eq!(config.server.listen, "127.0.0.1:3000");
-        assert!(config.projects.is_empty());
+        assert!(config.sources.is_empty());
     }
 
     #[test]
@@ -631,33 +526,28 @@ mod tests {
                [server]
                listen = "0.0.0.0:8080"
 
-               [projects.nixpkgs]
-               name = "Nixpkgs"
-
-               [[projects.nixpkgs.datasets]]
-               id = "nixos-options"
+               [sources.nixos]
                name = "NixOS Options"
                kind = "options"
 
-               [[projects.nixpkgs.datasets.refs]]
+               [[sources.nixos.refs]]
                id = "unstable"
 
-               [projects.nixpkgs.datasets.refs.producer]
+               [sources.nixos.refs.producer]
                type = "nix-build-options-json"
                ref = "github:NixOS/nixpkgs/nixos-unstable"
                attribute = "options"
                import_path = "nixos/release.nix"
                output_path = "share/doc/nixos/options.json"
 
-               [[projects.nixpkgs.datasets]]
-               id = "packages"
-               name = "Nix Packages"
+               [sources.nixpkgs]
+               name = "Nixpkgs"
                kind = "packages"
 
-               [[projects.nixpkgs.datasets.refs]]
+               [[sources.nixpkgs.refs]]
                id = "unstable"
 
-               [projects.nixpkgs.datasets.refs.producer]
+               [sources.nixpkgs.refs.producer]
                type = "channel-packages-json"
                channel = "nixos-unstable"
                "#,
@@ -669,21 +559,17 @@ mod tests {
         assert_eq!(config.data.artifact_url, "file://./tmp/artifacts");
         assert_eq!(config.server.listen, "0.0.0.0:8080");
 
-        let project = config.projects.get("nixpkgs").unwrap();
-        assert_eq!(project.name.as_deref(), Some("Nixpkgs"));
-        assert_eq!(project.datasets.len(), 2);
-
-        let options = &project.datasets[0];
-        assert_eq!(options.id, "nixos-options");
-        assert_eq!(options.kind, DatasetKind::Options);
+        let options = config.sources.get("nixos").unwrap();
+        assert_eq!(options.name.as_deref(), Some("NixOS Options"));
+        assert_eq!(options.kind, SourceKind::Options);
         assert_eq!(
             options.refs[0].producer.kind(),
             ProducerKind::NixBuildOptionsJson
         );
 
-        let packages = &project.datasets[1];
-        assert_eq!(packages.id, "packages");
-        assert_eq!(packages.kind, DatasetKind::Packages);
+        let packages = config.sources.get("nixpkgs").unwrap();
+        assert_eq!(packages.name.as_deref(), Some("Nixpkgs"));
+        assert_eq!(packages.kind, SourceKind::Packages);
         assert_eq!(
             packages.refs[0].producer.kind(),
             ProducerKind::ChannelPackagesJson
@@ -698,17 +584,14 @@ mod tests {
         fs::write(
             &path,
             r#"
-               [projects.fixtures]
+               [sources.fixtures]
                name = "Fixtures"
-
-               [[projects.fixtures.datasets]]
-               id = "options"
                kind = "options"
 
-               [[projects.fixtures.datasets.refs]]
+               [[sources.fixtures.refs]]
                id = "small"
 
-               [projects.fixtures.datasets.refs.producer]
+               [sources.fixtures.refs.producer]
                type = "existing-file"
                path = "fixtures/options-small.json"
                artifact = "options-json"
@@ -718,7 +601,7 @@ mod tests {
 
         let config = AppConfig::load(Some(&path)).unwrap();
 
-        let producer = &config.projects["fixtures"].datasets[0].refs[0].producer;
+        let producer = &config.sources["fixtures"].refs[0].producer;
 
         assert_eq!(producer.kind(), ProducerKind::ExistingFile);
 
@@ -739,17 +622,14 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.fixtures]
+              [sources.fixtures]
               name = "Fixtures"
-
-              [[projects.fixtures.datasets]]
-              id = "options"
               kind = "options"
 
-              [[projects.fixtures.datasets.refs]]
+              [[sources.fixtures.refs]]
               id = "eval"
 
-              [projects.fixtures.datasets.refs.producer]
+              [sources.fixtures.refs.producer]
               type = "eval-modules"
               ref = "path:/some/flake"
               modules_attr = "nixosModules.default"
@@ -760,7 +640,7 @@ mod tests {
 
         let config = AppConfig::load(Some(&path)).unwrap();
 
-        let producer = &config.projects["fixtures"].datasets[0].refs[0].producer;
+        let producer = &config.sources["fixtures"].refs[0].producer;
 
         assert_eq!(producer.kind(), ProducerKind::EvalModules);
 
@@ -782,15 +662,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_project_ids() {
+    fn rejects_invalid_source_ids() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nix-search.toml");
 
         fs::write(
             &path,
             r#"
-               [projects."bad/project"]
-               name = "Bad Project"
+               [sources."bad/source"]
+               name = "Bad Source"
+               kind = "options"
                "#,
         )
         .unwrap();
@@ -808,17 +689,14 @@ mod tests {
         fs::write(
             &path,
             r#"
-               [projects.nixpkgs]
-               name = "Nixpkgs"
-
-               [[projects.nixpkgs.datasets]]
-               id = "nixos-options"
+               [sources.nixos]
+               name = "NixOS Options"
                kind = "options"
 
-               [[projects.nixpkgs.datasets.refs]]
+               [[sources.nixos.refs]]
                id = "unstable"
 
-               [projects.nixpkgs.datasets.refs.producer]
+               [sources.nixos.refs.producer]
                type = "nix-build-options-json"
                ref = "github:NixOS/nixpkgs/nixos-unstable"
                "#,
@@ -838,17 +716,14 @@ mod tests {
         fs::write(
             &path,
             r#"
-               [projects.custom]
+               [sources.custom]
                name = "Custom"
-
-               [[projects.custom.datasets]]
-               id = "options"
                kind = "options"
 
-               [[projects.custom.datasets.refs]]
+               [[sources.custom.refs]]
                id = "main"
 
-               [projects.custom.datasets.refs.producer]
+               [sources.custom.refs.producer]
                type = "custom-command"
                command = []
                artifact = "options-json"
@@ -869,24 +744,21 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.fixtures]
+              [sources.fixtures]
               name = "Fixtures"
-
-              [[projects.fixtures.datasets]]
-              id = "options"
               kind = "options"
 
-              [[projects.fixtures.datasets.refs]]
+              [[sources.fixtures.refs]]
               id = "main"
 
-              [projects.fixtures.datasets.refs.source_links]
+              [sources.fixtures.refs.source_links]
               type = "github"
               owner = "example"
               repo = "modules"
               revision = "abc123"
               strip_prefixes = ["/build/source/"]
 
-              [projects.fixtures.datasets.refs.producer]
+              [sources.fixtures.refs.producer]
               type = "existing-file"
               path = "fixtures/options-small.json"
               artifact = "options-json"
@@ -895,7 +767,7 @@ mod tests {
         .unwrap();
 
         let config = AppConfig::load(Some(&path)).unwrap();
-        let source_links = config.projects["fixtures"].datasets[0].refs[0]
+        let source_links = config.sources["fixtures"].refs[0]
             .source_links
             .as_ref()
             .unwrap();
@@ -924,10 +796,8 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.nixpkgs]
+              [sources.nixpkgs]
               name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
               preset = "nixpkgs-packages"
               ref = "nixos-unstable"
               "#,
@@ -936,14 +806,13 @@ mod tests {
 
         let config = AppConfig::load(Some(&path)).unwrap();
 
-        let dataset = &config.projects["nixpkgs"].datasets[0];
+        let source = &config.sources["nixpkgs"];
 
-        assert_eq!(dataset.id, "packages");
-        assert_eq!(dataset.name.as_deref(), Some("Nix Packages"));
-        assert_eq!(dataset.kind, DatasetKind::Packages);
-        assert_eq!(dataset.refs.len(), 1);
+        assert_eq!(source.name.as_deref(), Some("Nixpkgs"));
+        assert_eq!(source.kind, SourceKind::Packages);
+        assert_eq!(source.refs.len(), 1);
 
-        let ref_config = &dataset.refs[0];
+        let ref_config = &source.refs[0];
 
         assert_eq!(ref_config.id, "nixos-unstable");
         assert_eq!(
@@ -958,21 +827,6 @@ mod tests {
             }
             other => panic!("unexpected producer: {other:?}"),
         }
-
-        match ref_config.source_links.as_ref().unwrap() {
-            SourceLinkConfig::Github {
-                owner,
-                repo,
-                revision,
-                strip_prefixes,
-            } => {
-                assert_eq!(owner, "NixOS");
-                assert_eq!(repo, "nixpkgs");
-                assert_eq!(revision.as_deref(), Some("nixos-unstable"));
-                assert!(strip_prefixes.is_empty());
-            }
-            other => panic!("unexpected source links config: {other:?}"),
-        }
     }
 
     #[test]
@@ -983,10 +837,8 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.nixpkgs]
-              name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
+              [sources.nixos]
+              name = "NixOS Options"
               preset = "nixos-options"
               ref = "nixos-unstable"
               "#,
@@ -995,79 +847,19 @@ mod tests {
 
         let config = AppConfig::load(Some(&path)).unwrap();
 
-        let dataset = &config.projects["nixpkgs"].datasets[0];
+        let source = &config.sources["nixos"];
 
-        assert_eq!(dataset.id, "nixos-options");
-        assert_eq!(dataset.name.as_deref(), Some("NixOS Options"));
-        assert_eq!(dataset.kind, DatasetKind::Options);
-        assert_eq!(dataset.refs.len(), 1);
+        assert_eq!(source.name.as_deref(), Some("NixOS Options"));
+        assert_eq!(source.kind, SourceKind::Options);
+        assert_eq!(source.refs.len(), 1);
 
-        let ref_config = &dataset.refs[0];
+        let ref_config = &source.refs[0];
 
         assert_eq!(ref_config.id, "nixos-unstable");
         assert_eq!(
             ref_config.producer.kind(),
             ProducerKind::NixBuildOptionsJson
         );
-
-        match &ref_config.producer {
-            ProducerConfig::NixBuildOptionsJson {
-                source_ref,
-                attribute,
-                import_path,
-                output_path,
-            } => {
-                assert_eq!(source_ref, "github:NixOS/nixpkgs/nixos-unstable");
-                assert_eq!(attribute, "options");
-                assert_eq!(import_path, "nixos/release.nix");
-                assert_eq!(output_path, "share/doc/nixos/options.json");
-            }
-            other => panic!("unexpected producer: {other:?}"),
-        }
-
-        match ref_config.source_links.as_ref().unwrap() {
-            SourceLinkConfig::Github {
-                owner,
-                repo,
-                revision,
-                strip_prefixes,
-            } => {
-                assert_eq!(owner, "NixOS");
-                assert_eq!(repo, "nixpkgs");
-                assert_eq!(revision.as_deref(), Some("nixos-unstable"));
-                assert!(strip_prefixes.is_empty());
-            }
-            other => panic!("unexpected source links config: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preset_allows_dataset_id_and_name_overrides() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("nix-search.toml");
-
-        fs::write(
-            &path,
-            r#"
-              [projects.nixpkgs]
-              name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
-              preset = "nixpkgs-packages"
-              id = "unstable-packages"
-              name = "Unstable Packages"
-              ref = "nixos-unstable"
-              "#,
-        )
-        .unwrap();
-
-        let config = AppConfig::load(Some(&path)).unwrap();
-
-        let dataset = &config.projects["nixpkgs"].datasets[0];
-
-        assert_eq!(dataset.id, "unstable-packages");
-        assert_eq!(dataset.name.as_deref(), Some("Unstable Packages"));
-        assert_eq!(dataset.kind, DatasetKind::Packages);
     }
 
     #[test]
@@ -1078,10 +870,8 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.nixpkgs]
+              [sources.nixpkgs]
               name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
               preset = "nixpkgs-packages"
               "#,
         )
@@ -1089,7 +879,7 @@ mod tests {
 
         let error = AppConfig::load(Some(&path)).unwrap_err().to_string();
 
-        assert!(error.contains("preset datasets require ref"));
+        assert!(error.contains("preset sources require ref"));
     }
 
     #[test]
@@ -1100,17 +890,15 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.nixpkgs]
+              [sources.nixpkgs]
               name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
               preset = "nixpkgs-packages"
               ref = "nixos-unstable"
 
-              [[projects.nixpkgs.datasets.refs]]
+              [[sources.nixpkgs.refs]]
               id = "manual"
 
-              [projects.nixpkgs.datasets.refs.producer]
+              [sources.nixpkgs.refs.producer]
               type = "existing-file"
               path = "fixtures/options-small.json"
               artifact = "options-json"
@@ -1120,7 +908,7 @@ mod tests {
 
         let error = AppConfig::load(Some(&path)).unwrap_err().to_string();
 
-        assert!(error.contains("preset datasets must not also define refs"));
+        assert!(error.contains("preset sources must not also define refs"));
     }
 
     #[test]
@@ -1131,10 +919,8 @@ mod tests {
         fs::write(
             &path,
             r#"
-              [projects.nixpkgs]
+              [sources.nixpkgs]
               name = "Nixpkgs"
-
-              [[projects.nixpkgs.datasets]]
               preset = "nixpkgs-packages"
               kind = "options"
               ref = "nixos-unstable"
@@ -1144,6 +930,6 @@ mod tests {
 
         let error = AppConfig::load(Some(&path)).unwrap_err().to_string();
 
-        assert!(error.contains("requires dataset kind"));
+        assert!(error.contains("requires source kind"));
     }
 }

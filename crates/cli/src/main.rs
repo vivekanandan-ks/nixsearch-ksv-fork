@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-use nix_search_config::{
-    AppConfig, DatasetConfig, DatasetKind, ProducerConfig, ProjectConfig, RefConfig,
-};
+use nix_search_config::{AppConfig, ProducerConfig, RefConfig, SourceConfig, SourceKind};
 use nix_search_core::{
     ArtifactKind, CommonDoc, SearchDocument, SourceLinkConfig, SourceLinkResolver,
 };
@@ -86,13 +84,9 @@ struct SelectionArgs {
     #[arg(long)]
     config: PathBuf,
 
-    /// Restrict to one project.
+    /// Restrict to one source.
     #[arg(long)]
-    project: Option<String>,
-
-    /// Restrict to one dataset.
-    #[arg(long)]
-    dataset: Option<String>,
+    source: Option<String>,
 
     /// Restrict to one ref.
     #[arg(long = "ref")]
@@ -108,13 +102,9 @@ struct SearchArgs {
     #[arg(long)]
     config: PathBuf,
 
-    /// Restrict to one project.
+    /// Restrict to one source.
     #[arg(long)]
-    project: Option<String>,
-
-    /// Restrict to one dataset.
-    #[arg(long)]
-    dataset: Option<String>,
+    source: Option<String>,
 
     /// Restrict to one ref.
     #[arg(long = "ref")]
@@ -127,28 +117,21 @@ struct SearchArgs {
 
 #[derive(Debug, Clone)]
 struct TargetRef {
-    project_id: String,
-    dataset_id: String,
-    dataset_kind: DatasetKind,
+    source_id: String,
+    source_kind: SourceKind,
     ref_config: RefConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct TargetKey {
-    project: String,
-    dataset: String,
+    source: String,
     ref_id: String,
 }
 
 impl TargetKey {
-    fn new(
-        project: impl Into<String>,
-        dataset: impl Into<String>,
-        ref_id: impl Into<String>,
-    ) -> Self {
+    fn new(source: impl Into<String>, ref_id: impl Into<String>) -> Self {
         Self {
-            project: project.into(),
-            dataset: dataset.into(),
+            source: source.into(),
             ref_id: ref_id.into(),
         }
     }
@@ -156,21 +139,13 @@ impl TargetKey {
 
 impl From<&TargetRef> for TargetKey {
     fn from(target: &TargetRef) -> Self {
-        Self::new(
-            target.project_id.clone(),
-            target.dataset_id.clone(),
-            target.ref_config.id.clone(),
-        )
+        Self::new(target.source_id.clone(), target.ref_config.id.clone())
     }
 }
 
 impl From<&IndexTargetManifest> for TargetKey {
     fn from(target: &IndexTargetManifest) -> Self {
-        Self::new(
-            target.project.clone(),
-            target.dataset.clone(),
-            target.ref_id.clone(),
-        )
+        Self::new(target.source.clone(), target.ref_id.clone())
     }
 }
 
@@ -207,10 +182,10 @@ fn check_config(args: ConfigArgs) -> Result<()> {
     println!("artifact_url = {}", config.data.artifact_url);
     println!("index_dir = {}", config.data.index_dir.display());
     println!("listen = {}", config.server.listen);
-    println!("projects = {}", config.projects.len());
+    println!("sources = {}", config.sources.len());
 
-    for (project_id, project) in &config.projects {
-        print_project(project_id, project);
+    for (source_id, source) in &config.sources {
+        print_source(source_id, source);
     }
 
     Ok(())
@@ -277,14 +252,13 @@ async fn artifact_inspect(args: SelectionArgs) -> Result<()> {
         let artifact_ref = latest_artifact_ref_for_target(&target);
         let metadata = store.get_metadata(&artifact_ref).await.with_context(|| {
             format!(
-                "failed to read metadata for {}/{}/{}",
-                target.project_id, target.dataset_id, target.ref_config.id
+                "failed to read metadata for {}/{}",
+                target.source_id, target.ref_config.id
             )
         })?;
 
         println!("artifact");
-        println!("  project = {}", metadata.project);
-        println!("  dataset = {}", metadata.dataset);
+        println!("  source = {}", metadata.source);
         println!("  ref = {}", metadata.ref_id);
         println!("  kind = {:?}", metadata.kind);
         println!("  producer = {}", metadata.producer);
@@ -292,7 +266,10 @@ async fn artifact_inspect(args: SelectionArgs) -> Result<()> {
             "  revision = {}",
             metadata.revision.as_deref().unwrap_or("-")
         );
-        println!("  source = {}", metadata.source.as_deref().unwrap_or("-"));
+        println!(
+            "  upstream = {}",
+            metadata.source_url.as_deref().unwrap_or("-")
+        );
         println!("  hash = {}", metadata.content_hash);
         println!("  size = {}", metadata.size_bytes);
         println!("  produced_at = {}", metadata.produced_at);
@@ -352,8 +329,7 @@ async fn build_and_publish_generation(
         total_documents += documents.len();
 
         manifest_targets.push(IndexTargetManifest {
-            project: target.project_id.clone(),
-            dataset: target.dataset_id.clone(),
+            source: target.source_id.clone(),
             ref_id: target.ref_config.id.clone(),
             artifact_kind: produced.artifact_ref.kind,
             document_count: documents.len(),
@@ -362,15 +338,14 @@ async fn build_and_publish_generation(
         });
 
         println!(
-            "{} {} documents: {}/{}/{}",
+            "{} {} documents: {}/{}",
             if refresh_keys.contains(&key) {
                 "refreshed"
             } else {
                 "retained"
             },
             documents.len(),
-            target.project_id,
-            target.dataset_id,
+            target.source_id,
             target.ref_config.id
         );
     }
@@ -404,12 +379,8 @@ fn index_inspect(args: ConfigArgs) -> Result<()> {
 
     for target in manifest.targets {
         println!(
-            "    {}/{}/{} {:?} documents={}",
-            target.project,
-            target.dataset,
-            target.ref_id,
-            target.artifact_kind,
-            target.document_count
+            "    {}/{} {:?} documents={}",
+            target.source, target.ref_id, target.artifact_kind, target.document_count
         );
 
         if let Some(revision) = target.revision {
@@ -436,8 +407,7 @@ fn search(args: SearchArgs) -> Result<()> {
     let hits = index.search(SearchOptions {
         query: args.query,
         limit: args.limit,
-        project: args.project,
-        dataset: args.dataset,
+        source: args.source,
         ref_id: args.ref_id,
     })?;
 
@@ -456,8 +426,7 @@ async fn serve(args: ConfigArgs) -> Result<()> {
 
 async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<ProducedArtifact> {
     let request = ProduceRequest {
-        project: target.project_id.clone(),
-        dataset: target.dataset_id.clone(),
+        source: target.source_id.clone(),
         ref_id: target.ref_config.id.clone(),
     };
 
@@ -467,8 +436,8 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(
-                    "failed to produce artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to produce artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
@@ -484,8 +453,8 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(
-                    "failed to produce Nix-built options artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to produce Nix-built options artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
@@ -495,8 +464,8 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(
-                    "failed to produce channel packages artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to produce channel packages artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
@@ -510,8 +479,8 @@ async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<Pro
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(
-                    "failed to produce eval-modules options artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to produce eval-modules options artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
@@ -530,8 +499,8 @@ async fn produced_from_existing_artifact(
     let artifact_ref = latest_artifact_ref_for_target(target);
     let metadata = store.get_metadata(&artifact_ref).await.with_context(|| {
         format!(
-            "failed to read artifact metadata for retained target {}/{}/{}",
-            target.project_id, target.dataset_id, target.ref_config.id
+            "failed to read artifact metadata for retained target {}/{}",
+            target.source_id, target.ref_config.id
         )
     })?;
 
@@ -546,31 +515,31 @@ async fn consume_target(
     target: &TargetRef,
     produced: &ProducedArtifact,
 ) -> Result<Vec<SearchDocument>> {
-    match (target.dataset_kind, produced.artifact_ref.kind) {
-        (DatasetKind::Options | DatasetKind::Mixed, ArtifactKind::OptionsJson) => {
+    match (target.source_kind, produced.artifact_ref.kind) {
+        (SourceKind::Options | SourceKind::Mixed, ArtifactKind::OptionsJson) => {
             let consumer = OptionsJsonConsumer;
 
             consumer.consume(store, produced).await.with_context(|| {
                 format!(
-                    "failed to consume options artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to consume options artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
 
-        (DatasetKind::Packages | DatasetKind::Mixed, ArtifactKind::PackagesJson) => {
+        (SourceKind::Packages | SourceKind::Mixed, ArtifactKind::PackagesJson) => {
             let consumer = PackagesJsonConsumer;
 
             consumer.consume(store, produced).await.with_context(|| {
                 format!(
-                    "failed to consume packages artifact for {}/{}/{}",
-                    target.project_id, target.dataset_id, target.ref_config.id
+                    "failed to consume packages artifact for {}/{}",
+                    target.source_id, target.ref_config.id
                 )
             })
         }
 
         (kind, artifact) => bail!(
-            "no consumer implemented for dataset kind {:?} and artifact kind {:?}",
+            "no consumer implemented for source kind {:?} and artifact kind {:?}",
             kind,
             artifact
         ),
@@ -606,8 +575,7 @@ fn file_url_to_path(url: &str) -> Result<PathBuf> {
 
 fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
     ArtifactRef::latest(
-        target.project_id.clone(),
-        target.dataset_id.clone(),
+        target.source_id.clone(),
         target.ref_config.id.clone(),
         artifact_kind_for_producer(&target.ref_config.producer),
     )
@@ -626,63 +594,36 @@ fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
 }
 
 fn select_targets(config: &AppConfig, selection: &SelectionArgs) -> Result<Vec<TargetRef>> {
-    if selection.dataset.is_some() && selection.project.is_none() {
-        bail!("--dataset requires --project");
-    }
-
-    if selection.ref_id.is_some() && selection.dataset.is_none() {
-        bail!("--ref requires --dataset");
-    }
-
     let mut targets = Vec::new();
 
-    for (project_id, project) in &config.projects {
+    for (source_id, source) in &config.sources {
         if selection
-            .project
+            .source
             .as_ref()
-            .is_some_and(|selected| selected != project_id)
+            .is_some_and(|selected| selected != source_id)
         {
             continue;
         }
 
-        collect_project_targets(project_id, project, selection, &mut targets);
+        collect_source_targets(source_id, source, selection, &mut targets);
     }
 
-    if let Some(project_id) = &selection.project
-        && !config.projects.contains_key(project_id)
+    if let Some(source_id) = &selection.source
+        && !config.sources.contains_key(source_id)
     {
-        bail!("unknown project {project_id:?}");
+        bail!("unknown source {source_id:?}");
     }
 
     Ok(targets)
 }
 
-fn collect_project_targets(
-    project_id: &str,
-    project: &ProjectConfig,
+fn collect_source_targets(
+    source_id: &str,
+    source: &SourceConfig,
     selection: &SelectionArgs,
     targets: &mut Vec<TargetRef>,
 ) {
-    for dataset in &project.datasets {
-        if selection
-            .dataset
-            .as_ref()
-            .is_some_and(|selected| selected != &dataset.id)
-        {
-            continue;
-        }
-
-        collect_dataset_targets(project_id, dataset, selection, targets);
-    }
-}
-
-fn collect_dataset_targets(
-    project_id: &str,
-    dataset: &DatasetConfig,
-    selection: &SelectionArgs,
-    targets: &mut Vec<TargetRef>,
-) {
-    for ref_config in &dataset.refs {
+    for ref_config in &source.refs {
         if selection
             .ref_id
             .as_ref()
@@ -692,36 +633,29 @@ fn collect_dataset_targets(
         }
 
         targets.push(TargetRef {
-            project_id: project_id.to_owned(),
-            dataset_id: dataset.id.clone(),
-            dataset_kind: dataset.kind,
+            source_id: source_id.to_owned(),
+            source_kind: source.kind,
             ref_config: ref_config.clone(),
         });
     }
 }
 
-fn print_project(project_id: &str, project: &ProjectConfig) {
-    let name = project.name.as_deref().unwrap_or(project_id);
-    println!("  project {project_id}: {name}");
+fn print_source(source_id: &str, source: &SourceConfig) {
+    let name = source.name.as_deref().unwrap_or(source_id);
+    println!("  source {source_id}: {name} ({:?})", source.kind);
 
-    for dataset in &project.datasets {
-        let name = dataset.name.as_deref().unwrap_or(&dataset.id);
-        println!("    dataset {}: {} ({:?})", dataset.id, name, dataset.kind);
-
-        for ref_config in &dataset.refs {
-            println!(
-                "      ref {}: producer={:?}",
-                ref_config.id,
-                ref_config.producer.kind()
-            );
-        }
+    for ref_config in &source.refs {
+        println!(
+            "    ref {}: producer={:?}",
+            ref_config.id,
+            ref_config.producer.kind()
+        );
     }
 }
 
 fn print_artifact_metadata(produced: &ProducedArtifact) {
     println!("produced artifact");
-    println!("  project = {}", produced.metadata.project);
-    println!("  dataset = {}", produced.metadata.dataset);
+    println!("  source = {}", produced.metadata.source);
     println!("  ref = {}", produced.metadata.ref_id);
     println!("  kind = {:?}", produced.metadata.kind);
     println!("  producer = {}", produced.metadata.producer);
@@ -730,8 +664,8 @@ fn print_artifact_metadata(produced: &ProducedArtifact) {
         produced.metadata.revision.as_deref().unwrap_or("-")
     );
     println!(
-        "  source = {}",
-        produced.metadata.source.as_deref().unwrap_or("-")
+        "  upstream = {}",
+        produced.metadata.source_url.as_deref().unwrap_or("-")
     );
     println!("  hash = {}", produced.metadata.content_hash);
     println!("  size = {}", produced.metadata.size_bytes);
@@ -745,11 +679,10 @@ fn print_search_hit(config: &AppConfig, hit: SearchHit) {
     let common = hit.document.common().clone();
 
     println!(
-        "{score:.3}  {kind}  {project}/{dataset}/{ref_id}  {name}",
+        "{score:.3}  {kind}  {source}/{ref_id}  {name}",
         score = hit.score,
         kind = common.kind.as_str(),
-        project = common.project,
-        dataset = common.dataset,
+        source = common.source,
         ref_id = common.ref_id,
         name = common.name,
     );
@@ -816,14 +749,9 @@ fn source_link_config_for_document<'a>(
     config: &'a AppConfig,
     common: &CommonDoc,
 ) -> Option<&'a SourceLinkConfig> {
-    let project = config.projects.get(&common.project)?;
+    let source = config.sources.get(&common.source)?;
 
-    let dataset = project
-        .datasets
-        .iter()
-        .find(|dataset| dataset.id == common.dataset)?;
-
-    let ref_config = dataset
+    let ref_config = source
         .refs
         .iter()
         .find(|ref_config| ref_config.id == common.ref_id)?;
@@ -853,42 +781,30 @@ fn resolve_manifest_target(
     config: &AppConfig,
     manifest_target: &IndexTargetManifest,
 ) -> Result<TargetRef> {
-    let project = config
-        .projects
-        .get(&manifest_target.project)
+    let source = config
+        .sources
+        .get(&manifest_target.source)
         .with_context(|| {
             format!(
-                "current index manifest contains unknown project {:?}",
-                manifest_target.project
+                "current index manifest contains unknown source {:?}",
+                manifest_target.source
             )
         })?;
 
-    let dataset = project
-        .datasets
-        .iter()
-        .find(|dataset| dataset.id == manifest_target.dataset)
-        .with_context(|| {
-            format!(
-                "current index manifest contains unknown dataset {:?} in project {:?}",
-                manifest_target.dataset, manifest_target.project
-            )
-        })?;
-
-    let ref_config = dataset
+    let ref_config = source
         .refs
         .iter()
         .find(|ref_config| ref_config.id == manifest_target.ref_id)
         .with_context(|| {
             format!(
-                "current index manifest contains unknown ref {:?} in project {:?}, dataset {:?}",
-                manifest_target.ref_id, manifest_target.project, manifest_target.dataset
+                "current index manifest contains unknown ref {:?} in source {:?}",
+                manifest_target.ref_id, manifest_target.source
             )
         })?;
 
     Ok(TargetRef {
-        project_id: manifest_target.project.clone(),
-        dataset_id: manifest_target.dataset.clone(),
-        dataset_kind: dataset.kind,
+        source_id: manifest_target.source.clone(),
+        source_kind: source.kind,
         ref_config: ref_config.clone(),
     })
 }
