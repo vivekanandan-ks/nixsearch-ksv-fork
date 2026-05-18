@@ -42,16 +42,16 @@ struct PageQuery {
 
     kind: Option<String>,
 
-    source: Option<LinkScope>,
+    source: Option<LinkOrigin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum LinkScope {
+enum LinkOrigin {
     All,
 }
 
-impl LinkScope {
+impl LinkOrigin {
     fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -61,6 +61,125 @@ impl LinkScope {
     fn from_query_param(s: &str) -> Option<Self> {
         serde_json::from_value(serde_json::Value::String(s.to_owned())).ok()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceFilter {
+    All,
+    Named(String),
+}
+
+impl SourceFilter {
+    fn from_request(request: &PageRequest) -> Self {
+        match &request.source {
+            None => Self::All,
+            Some(source) => Self::Named(source.clone()),
+        }
+    }
+}
+
+fn source_metadata_json(config: &AppConfig) -> String {
+    let entries: Vec<String> = config
+        .sources
+        .iter()
+        .map(|(id, source)| {
+            let name = source.name.as_deref().unwrap_or(id);
+            let refs: Vec<&str> = source.refs.iter().map(|r| r.id.as_str()).collect();
+            let refs_json = refs
+                .iter()
+                .map(|r| format!("\"{}\"", encode_text(r)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let default_ref = source.default_ref.as_deref().unwrap_or("");
+
+            format!(
+                r#"{{"id":"{}","name":"{}","refs":[{}],"defaultRef":"{}"}}"#,
+                encode_text(id),
+                encode_text(name),
+                refs_json,
+                encode_text(default_ref),
+            )
+        })
+        .collect();
+
+    format!("[{}]", entries.join(","))
+}
+
+fn render_source_select(config: &AppConfig, selected: &SourceFilter) -> String {
+    let mut html = String::from(
+        r#"<label>
+              Source
+              <select data-nix-search-input="source-path">"#,
+    );
+    let all_selected = if *selected == SourceFilter::All {
+        " selected"
+    } else {
+        ""
+    };
+    html.push_str(&format!(
+        r#"
+                <option value=""{all_selected}>All</option>"#
+    ));
+    for (id, source) in &config.sources {
+        let name = source.name.as_deref().unwrap_or(id);
+        let is_selected = matches!(selected, SourceFilter::Named(s) if s == id);
+        let sel = if is_selected { " selected" } else { "" };
+        html.push_str(&format!(
+            r#"
+                <option value="{value}"{sel}>{label}</option>"#,
+            value = encode_double_quoted_attribute(id),
+            label = encode_text(name),
+        ));
+    }
+    html.push_str(
+        r#"
+              </select>
+            </label>"#,
+    );
+    html
+}
+
+fn render_ref_select(
+    config: &AppConfig,
+    selected_source: &SourceFilter,
+    current_ref: &str,
+) -> String {
+    let (refs, default_ref): (Vec<&str>, Option<&str>) = match selected_source {
+        SourceFilter::All => (Vec::new(), None),
+        SourceFilter::Named(source_id) => match config.sources.get(source_id.as_str()) {
+            Some(source) => (
+                source.refs.iter().map(|r| r.id.as_str()).collect(),
+                source.default_ref.as_deref(),
+            ),
+            None => (Vec::new(), None),
+        },
+    };
+    let hidden = if refs.is_empty() { " hidden" } else { "" };
+    let mut html = format!(
+        r#"<label{hidden}>
+              Ref
+              <select name="ref" data-nix-search-input="ref">"#,
+    );
+    for ref_id in &refs {
+        let is_selected = if current_ref.is_empty() {
+            default_ref == Some(*ref_id)
+        } else {
+            *ref_id == current_ref
+        };
+        let sel = if is_selected { " selected" } else { "" };
+        html.push_str(&format!(
+            r#"
+                <option value="{value}"{sel}>{label}</option>"#,
+            value = encode_double_quoted_attribute(ref_id),
+            label = encode_text(ref_id),
+        ));
+    }
+    html.push_str(
+        r#"
+              </select>
+            </label>"#,
+    );
+    html
 }
 
 #[derive(Debug, Clone, Default)]
@@ -267,6 +386,7 @@ fn render_full_page(
 ) -> String {
     let q = request.query.q.as_deref().unwrap_or("");
     let ref_id = request.query.ref_id.as_deref().unwrap_or("");
+    let source_filter = SourceFilter::from_request(request);
 
     let results_html = match search_result {
         Ok(hits) if normalized_query(&request.query).is_some() => {
@@ -277,6 +397,10 @@ fn render_full_page(
     };
 
     let modal_html = render_modal_html(state, request);
+
+    let source_select = render_source_select(&state.config, &source_filter);
+    let ref_select = render_ref_select(&state.config, &source_filter, ref_id);
+    let source_metadata = source_metadata_json(&state.config);
 
     let form_action = request
         .source
@@ -325,15 +449,8 @@ fn render_full_page(
          </label>
 
          <div class="filters">
-           <label>
-             Ref
-             <input
-               name="ref"
-               value="{ref_attr}"
-               placeholder="optional"
-               data-nix-search-input="ref"
-             >
-           </label>
+           {source_select}
+           {ref_select}
          </div>
 
          <button type="submit">Search</button>
@@ -341,6 +458,7 @@ fn render_full_page(
 
        {results_html}
        {modal_html}
+       <script id="source-metadata" type="application/json">{source_metadata}</script>
      </main>
 
      <script>{nav_script}</script>
@@ -350,7 +468,6 @@ fn render_full_page(
         reconcile_url = RECONCILE_EVENTS_URL,
         form_action = encode_double_quoted_attribute(&form_action),
         q_attr = encode_double_quoted_attribute(q),
-        ref_attr = encode_double_quoted_attribute(ref_id),
         nav_script = navigation_script(),
     )
 }
@@ -400,7 +517,7 @@ fn render_hit(request: &PageRequest, hit: &SearchHit, config: &AppConfig) -> Str
     let source_link = first_source_link(&hit.document, config);
 
     let from_scope = if request.source.is_none() {
-        Some(LinkScope::All)
+        Some(LinkOrigin::All)
     } else {
         None
     };
@@ -566,7 +683,7 @@ fn render_ambiguous_entry_modal(
         let common = document.common();
 
         let from_scope = if request.source.is_none() {
-            Some(LinkScope::All)
+            Some(LinkOrigin::All)
         } else {
             None
         };
@@ -1015,7 +1132,7 @@ fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuer
 }
 
 fn close_url_for(request: &PageRequest) -> String {
-    if request.query.source == Some(LinkScope::All) {
+    if request.query.source == Some(LinkOrigin::All) {
         return search_url_for(
             None,
             &PageQuery {
@@ -1093,7 +1210,7 @@ fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageReques
             "q" => q = Some(value.into_owned()),
             "ref" => ref_id = Some(value.into_owned()),
             "kind" => kind = Some(value.into_owned()),
-            "source" => source_param = LinkScope::from_query_param(&value),
+            "source" => source_param = LinkOrigin::from_query_param(&value),
             _ => {}
         }
     }
@@ -1128,25 +1245,76 @@ fn navigation_script() -> &'static str {
     r#"
    (() => {
      const RECONCILE_EVENT = "nix-search-reconcile";
+     const metadata = JSON.parse(
+       document.getElementById("source-metadata").textContent
+     );
 
-     function paramsFromInputs() {
-       const params = new URLSearchParams();
-       document.querySelectorAll("[data-nix-search-input]").forEach((el) => {
-         const name = el.getAttribute("data-nix-search-input");
-         const value = el.value.trim();
-         if (value) params.set(name, value);
-       });
-       return params;
+     function getSourceSelect() {
+       return document.querySelector('[data-nix-search-input="source-path"]');
      }
 
-     function currentSourcePath() {
-       const parts = window.location.pathname.split("/").filter(Boolean);
-       return parts.length > 0 ? "/" + parts[0] : "/";
+     function getRefSelect() {
+       return document.querySelector('[data-nix-search-input="ref"]');
+     }
+
+     function sourceMetadata(sourceId) {
+       return metadata.find((s) => s.id === sourceId);
+     }
+
+     function populateRefSelect(sourceId) {
+       const refSelect = getRefSelect();
+       if (!refSelect) return;
+
+       const source = sourceMetadata(sourceId);
+       const refLabel = refSelect.closest("label");
+
+       if (!source || source.refs.length === 0) {
+         refSelect.innerHTML = "";
+         if (refLabel) refLabel.hidden = true;
+         return;
+       }
+
+       if (refLabel) refLabel.hidden = false;
+
+       refSelect.innerHTML = source.refs
+         .map((r) => {
+           const selected = r === source.defaultRef ? " selected" : "";
+           return `<option value="${r}"${selected}>${r}</option>`;
+         })
+         .join("");
+     }
+
+     function currentSourceFromSelect() {
+       const sel = getSourceSelect();
+       return sel ? sel.value : "";
+     }
+
+     function currentRefFromSelect() {
+       const sel = getRefSelect();
+       return sel ? sel.value : "";
+     }
+
+     function sourcePath(sourceId) {
+       return sourceId ? "/" + encodeURIComponent(sourceId) : "/";
      }
 
      function buildSearchUrlFromInputs() {
-       const params = paramsFromInputs();
-       const path = currentSourcePath();
+       const sourceId = currentSourceFromSelect();
+       const path = sourcePath(sourceId);
+       const params = new URLSearchParams();
+
+       const q = document.querySelector('[data-nix-search-input="q"]');
+       if (q && q.value.trim()) params.set("q", q.value.trim());
+
+       if (sourceId) {
+         const refValue = currentRefFromSelect();
+         const source = sourceMetadata(sourceId);
+         // Only include ref if it differs from default
+         if (refValue && source && refValue !== source.defaultRef) {
+           params.set("ref", refValue);
+         }
+       }
+
        const qs = params.toString();
        return qs ? path + "?" + qs : path;
      }
@@ -1165,11 +1333,43 @@ fn navigation_script() -> &'static str {
 
      function syncInputsFromUrl() {
        const params = new URLSearchParams(window.location.search);
-       document.querySelectorAll("[data-nix-search-input]").forEach((el) => {
-         const name = el.getAttribute("data-nix-search-input");
-         el.value = params.get(name) || "";
-       });
+       const parts = window.location.pathname.split("/").filter(Boolean);
+       const pathSource = parts.length > 0 ? decodeURIComponent(parts[0]) : "";
+
+       const sourceSelect = getSourceSelect();
+       if (sourceSelect) sourceSelect.value = pathSource;
+
+       populateRefSelect(pathSource);
+
+       const refSelect = getRefSelect();
+       if (refSelect) {
+         const refParam = params.get("ref") || "";
+         if (refParam) {
+           refSelect.value = refParam;
+         }
+         // Otherwise it stays on the default from populateRefSelect
+       }
+
+       const q = document.querySelector('[data-nix-search-input="q"]');
+       if (q) q.value = params.get("q") || "";
      }
+
+     // Source change: repopulate refs and navigate immediately
+     document.addEventListener("change", (evt) => {
+       const el = evt.target;
+       if (!el.matches) return;
+
+       if (el.matches('[data-nix-search-input="source-path"]')) {
+         populateRefSelect(el.value);
+         navigate(buildSearchUrlFromInputs());
+         return;
+       }
+
+       if (el.matches('[data-nix-search-input="ref"]')) {
+         navigate(buildSearchUrlFromInputs());
+         return;
+       }
+     });
 
      document.addEventListener("click", (evt) => {
        if (evt.defaultPrevented) return;
@@ -1204,7 +1404,7 @@ fn navigation_script() -> &'static str {
      let debounce;
      document.addEventListener("input", (evt) => {
        const el = evt.target;
-       if (!el.matches || !el.matches("[data-nix-search-input]")) return;
+       if (!el.matches || !el.matches('[data-nix-search-input="q"]')) return;
        clearTimeout(debounce);
        debounce = setTimeout(() => {
          navigate(buildSearchUrlFromInputs());
@@ -1309,6 +1509,19 @@ fn page_css() -> &'static str {
 
    input[type="search"] {
      font-size: 1.1rem;
+   }
+
+   select {
+     box-sizing: border-box;
+     width: 100%;
+     border: 1px solid var(--border);
+     border-radius: 0.5rem;
+     background: #030712;
+     color: var(--text);
+     padding: 0.7rem 0.8rem;
+     font: inherit;
+     appearance: none;
+     -webkit-appearance: none;
    }
 
    button {
@@ -1436,7 +1649,7 @@ mod tests {
     use nix_search_config::AppConfig;
     use nix_search_core::{Declaration, OptionDoc, SearchDocument};
 
-    use crate::LinkScope;
+    use crate::LinkOrigin;
 
     use super::{
         AppState, PageQuery, PageRequest, close_url_for, dialog_reconcile_script, entry_url_for,
@@ -1653,7 +1866,7 @@ mod tests {
                 q: Some("git".to_owned()),
                 ref_id: None,
                 kind: None,
-                source: Some(LinkScope::All),
+                source: Some(LinkOrigin::All),
             },
         };
 
@@ -1667,6 +1880,6 @@ mod tests {
         assert_eq!(request.source.as_deref(), Some("nixpkgs"));
         assert_eq!(request.entry.as_deref(), Some("git"));
         assert_eq!(request.query.q.as_deref(), Some("git"));
-        assert_eq!(request.query.source, Some(LinkScope::All));
+        assert_eq!(request.query.source, Some(LinkOrigin::All));
     }
 }
