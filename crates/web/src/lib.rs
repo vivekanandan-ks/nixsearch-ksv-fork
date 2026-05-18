@@ -382,11 +382,11 @@ fn render_hit(request: &PageRequest, hit: &SearchHit, config: &AppConfig) -> Str
     let entry_href = entry_url_for(
         &common.source,
         &common.name,
-        Some(common.kind.as_str()),
+        None,
         &PageQuery {
             q: request.query.q.clone(),
-            ref_id: Some(common.ref_id.clone()),
-            kind: Some(common.kind.as_str().to_owned()),
+            ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
+            kind: None,
         },
     );
 
@@ -463,7 +463,7 @@ fn render_modal_html(state: &AppState, request: &PageRequest) -> String {
         }
         Ok(EntryLookupResult::NotFound) => render_entry_error_modal(request, "Entry not found."),
         Ok(EntryLookupResult::Ambiguous(documents)) => {
-            render_ambiguous_entry_modal(request, &documents)
+            render_ambiguous_entry_modal(request, &documents, &state.config)
         }
         Err(error) => render_entry_error_modal(request, &format!("{error:#}")),
     }
@@ -526,7 +526,11 @@ fn render_entry_error_modal(request: &PageRequest, message: &str) -> String {
     )
 }
 
-fn render_ambiguous_entry_modal(request: &PageRequest, documents: &[SearchDocument]) -> String {
+fn render_ambiguous_entry_modal(
+    request: &PageRequest,
+    documents: &[SearchDocument],
+    config: &AppConfig,
+) -> String {
     let close_href = close_url_for(request);
 
     let mut list = String::new();
@@ -539,8 +543,8 @@ fn render_ambiguous_entry_modal(request: &PageRequest, documents: &[SearchDocume
             Some(common.kind.as_str()),
             &PageQuery {
                 q: request.query.q.clone(),
-                ref_id: Some(common.ref_id.clone()),
-                kind: Some(common.kind.as_str().to_owned()),
+                ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
+                kind: None,
             },
         );
 
@@ -912,6 +916,19 @@ fn resolve_entry_ref(config: &AppConfig, source_id: &str, ref_id: Option<&str>) 
         .default_ref
         .clone()
         .with_context(|| format!("source {source_id:?} has no default ref"))
+}
+
+fn ref_id_for_link(config: &AppConfig, source: &str, ref_id: &str) -> Option<String> {
+    let default_ref = config
+        .sources
+        .get(source)
+        .and_then(|source| source.default_ref.as_deref());
+
+    if default_ref == Some(ref_id) {
+        None
+    } else {
+        Some(ref_id.to_owned())
+    }
 }
 
 fn parse_document_kind(value: Option<&str>) -> std::result::Result<Option<DocumentKind>, String> {
