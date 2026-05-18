@@ -16,7 +16,7 @@ use tower_http::trace::TraceLayer;
 
 use nix_search_config::AppConfig;
 use nix_search_core::{CommonDoc, SearchDocument, SourceLinkConfig, SourceLinkResolver};
-use nix_search_index::{IndexStore, SearchHit, SearchIndex, SearchOptions};
+use nix_search_index::{IndexStore, SearchHit, SearchIndex, SearchOptions, SearchScope};
 
 const DEFAULT_LIMIT: usize = 20;
 
@@ -142,20 +142,25 @@ fn run_search(state: &AppState, query: &SearchQuery) -> Result<Vec<SearchHit>> {
         )
     })?;
 
+    let scopes = state
+        .config
+        .resolve_search_scopes(
+            query.source.as_deref().and_then(non_empty),
+            query.ref_id.as_deref().and_then(non_empty),
+        )
+        .context("failed to resolve search scope")?
+        .into_iter()
+        .map(|scope| SearchScope {
+            source: scope.source,
+            ref_id: scope.ref_id,
+        })
+        .collect();
+
     index
         .search(SearchOptions {
             query: q.to_owned(),
             limit: DEFAULT_LIMIT,
-            source: query
-                .source
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned),
-            ref_id: query
-                .ref_id
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned),
+            scopes,
         })
         .context("search failed")
 }
@@ -577,6 +582,7 @@ mod tests {
                 SourceConfig {
                     name: Some("Fixtures".to_owned()),
                     kind: SourceKind::Options,
+                    default_ref: Some("small".to_owned()),
                     refs: vec![RefConfig {
                         id: "small".to_owned(),
                         source_links: Some(SourceLinkConfig::Github {

@@ -68,6 +68,64 @@ impl AppConfig {
 
         Ok(())
     }
+
+    pub fn resolve_search_scopes(
+        &self,
+        source: Option<&str>,
+        ref_id: Option<&str>,
+    ) -> Result<Vec<ResolvedSearchScope>> {
+        match (source, ref_id) {
+            (Some(source_id), Some(ref_id)) => {
+                let source = self.sources.get(source_id).ok_or_else(|| {
+                    ConfigError::Validation(format!("unknown source {source_id:?}"))
+                })?;
+
+                if !source.refs.iter().any(|candidate| candidate.id == ref_id) {
+                    return Err(ConfigError::Validation(format!(
+                        "unknown ref {ref_id:?} for source {source_id:?}"
+                    )));
+                }
+
+                Ok(vec![ResolvedSearchScope {
+                    source: source_id.to_owned(),
+                    ref_id: ref_id.to_owned(),
+                }])
+            }
+
+            (Some(source_id), None) => {
+                let source = self.sources.get(source_id).ok_or_else(|| {
+                    ConfigError::Validation(format!("unknown source {source_id:?}"))
+                })?;
+
+                let default_ref = source.default_ref.as_deref().ok_or_else(|| {
+                    ConfigError::Validation(format!("source {source_id:?} has no default ref"))
+                })?;
+
+                Ok(vec![ResolvedSearchScope {
+                    source: source_id.to_owned(),
+                    ref_id: default_ref.to_owned(),
+                }])
+            }
+
+            (None, Some(_)) => Err(ConfigError::Validation(
+                "--ref requires --source".to_owned(),
+            )),
+
+            (None, None) => Ok(self
+                .sources
+                .iter()
+                .filter_map(|(source_id, source)| {
+                    source
+                        .default_ref
+                        .as_ref()
+                        .map(|default_ref| ResolvedSearchScope {
+                            source: source_id.clone(),
+                            ref_id: default_ref.clone(),
+                        })
+                })
+                .collect()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +207,7 @@ impl ServerConfig {
 struct RawSourceConfig {
     name: Option<String>,
     kind: Option<SourceKind>,
+    default_ref: Option<String>,
     refs: Vec<RefConfig>,
     preset: Option<SourcePreset>,
     #[serde(rename = "ref")]
@@ -168,9 +227,12 @@ impl RawSourceConfig {
             ConfigError::Validation(format!("sources.{source_id}: kind is required"))
         })?;
 
+        let default_ref = effective_default_ref(source_id, self.default_ref, &self.refs)?;
+
         Ok(SourceConfig {
             name: self.name,
             kind,
+            default_ref,
             refs: self.refs,
         })
     }
@@ -187,48 +249,58 @@ impl RawSourceConfig {
         })?;
 
         match preset {
-            SourcePreset::NixpkgsPackages => self.expand_nixpkgs_packages(ref_id),
-            SourcePreset::NixosOptions => self.expand_nixos_options(ref_id),
+            SourcePreset::NixpkgsPackages => self.expand_nixpkgs_packages(source_id, ref_id),
+            SourcePreset::NixosOptions => self.expand_nixos_options(source_id, ref_id),
         }
     }
 
-    fn expand_nixpkgs_packages(self, ref_id: String) -> Result<SourceConfig> {
+    fn expand_nixpkgs_packages(self, source_id: &str, ref_id: String) -> Result<SourceConfig> {
         reject_conflicting_kind(
             self.kind,
             SourceKind::Packages,
             SourcePreset::NixpkgsPackages,
         )?;
 
+        let refs = vec![RefConfig {
+            id: ref_id.clone(),
+            source_links: Some(nixpkgs_source_links(&ref_id)),
+            producer: ProducerConfig::ChannelPackagesJson {
+                channel: ref_id,
+                url: None,
+            },
+        }];
+
+        let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
+
         Ok(SourceConfig {
             name: self.name.or_else(|| Some("Nixpkgs".to_owned())),
             kind: SourceKind::Packages,
-            refs: vec![RefConfig {
-                id: ref_id.clone(),
-                source_links: Some(nixpkgs_source_links(&ref_id)),
-                producer: ProducerConfig::ChannelPackagesJson {
-                    channel: ref_id,
-                    url: None,
-                },
-            }],
+            default_ref,
+            refs,
         })
     }
 
-    fn expand_nixos_options(self, ref_id: String) -> Result<SourceConfig> {
+    fn expand_nixos_options(self, source_id: &str, ref_id: String) -> Result<SourceConfig> {
         reject_conflicting_kind(self.kind, SourceKind::Options, SourcePreset::NixosOptions)?;
+
+        let refs = vec![RefConfig {
+            id: ref_id.clone(),
+            source_links: Some(nixpkgs_source_links(&ref_id)),
+            producer: ProducerConfig::NixBuildOptionsJson {
+                source_ref: format!("github:NixOS/nixpkgs/{ref_id}"),
+                attribute: "options".to_owned(),
+                import_path: "nixos/release.nix".to_owned(),
+                output_path: "share/doc/nixos/options.json".to_owned(),
+            },
+        }];
+
+        let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
         Ok(SourceConfig {
             name: self.name.or_else(|| Some("NixOS Options".to_owned())),
             kind: SourceKind::Options,
-            refs: vec![RefConfig {
-                id: ref_id.clone(),
-                source_links: Some(nixpkgs_source_links(&ref_id)),
-                producer: ProducerConfig::NixBuildOptionsJson {
-                    source_ref: format!("github:NixOS/nixpkgs/{ref_id}"),
-                    attribute: "options".to_owned(),
-                    import_path: "nixos/release.nix".to_owned(),
-                    output_path: "share/doc/nixos/options.json".to_owned(),
-                },
-            }],
+            default_ref,
+            refs,
         })
     }
 }
@@ -258,12 +330,34 @@ fn reject_conflicting_kind(
     Ok(())
 }
 
+fn effective_default_ref(
+    source_id: &str,
+    configured: Option<String>,
+    refs: &[RefConfig],
+) -> Result<Option<String>> {
+    if let Some(configured) = configured {
+        validate_id("default_ref", &configured)?;
+
+        if !refs.iter().any(|ref_config| ref_config.id == configured) {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}.default_ref {configured:?} does not match any configured ref"
+            )));
+        }
+
+        return Ok(Some(configured));
+    }
+
+    Ok(refs.first().map(|ref_config| ref_config.id.clone()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceConfig {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub kind: SourceKind,
+    #[serde(default)]
+    pub default_ref: Option<String>,
     #[serde(default)]
     pub refs: Vec<RefConfig>,
 }
@@ -276,8 +370,28 @@ impl SourceConfig {
             ref_config.validate(source_id)?;
         }
 
+        if let Some(default_ref) = &self.default_ref {
+            validate_id("default_ref", default_ref)?;
+
+            if !self
+                .refs
+                .iter()
+                .any(|ref_config| &ref_config.id == default_ref)
+            {
+                return Err(ConfigError::Validation(format!(
+                    "sources.{source_id}.default_ref {default_ref:?} does not match any configured ref"
+                )));
+            }
+        }
+
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSearchScope {
+    pub source: String,
+    pub ref_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -931,5 +1045,312 @@ mod tests {
         let error = AppConfig::load(Some(&path)).unwrap_err().to_string();
 
         assert!(error.contains("requires source kind"));
+    }
+
+    #[test]
+    fn infers_default_ref_from_single_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+
+        assert_eq!(
+            config.sources["fixtures"].default_ref.as_deref(),
+            Some("small")
+        );
+    }
+
+    #[test]
+    fn infers_default_ref_from_first_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "stable"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-stable.json"
+             artifact = "options-json"
+
+             [[sources.fixtures.refs]]
+             id = "unstable"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-unstable.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+
+        assert_eq!(
+            config.sources["fixtures"].default_ref.as_deref(),
+            Some("stable")
+        );
+    }
+
+    #[test]
+    fn explicit_default_ref_overrides_first_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+             default_ref = "unstable"
+
+             [[sources.fixtures.refs]]
+             id = "stable"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-stable.json"
+             artifact = "options-json"
+
+             [[sources.fixtures.refs]]
+             id = "unstable"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-unstable.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+
+        assert_eq!(
+            config.sources["fixtures"].default_ref.as_deref(),
+            Some("unstable")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_default_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+             default_ref = "missing"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let error = AppConfig::load(Some(&path)).unwrap_err().to_string();
+
+        assert!(error.contains("default_ref"));
+        assert!(error.contains("does not match any configured ref"));
+    }
+
+    #[test]
+    fn resolves_search_scopes_to_all_source_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+
+             [sources.nixpkgs]
+             name = "Nixpkgs"
+             preset = "nixpkgs-packages"
+             ref = "nixos-unstable"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+        let scopes = config.resolve_search_scopes(None, None).unwrap();
+
+        assert_eq!(scopes.len(), 2);
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| { scope.source == "fixtures" && scope.ref_id == "small" })
+        );
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| { scope.source == "nixpkgs" && scope.ref_id == "nixos-unstable" })
+        );
+    }
+
+    #[test]
+    fn resolves_search_scope_to_source_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+        let scopes = config
+            .resolve_search_scopes(Some("fixtures"), None)
+            .unwrap();
+
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].source, "fixtures");
+        assert_eq!(scopes[0].ref_id, "small");
+    }
+
+    #[test]
+    fn resolves_search_scope_to_explicit_source_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+        let scopes = config
+            .resolve_search_scopes(Some("fixtures"), Some("small"))
+            .unwrap();
+
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].source, "fixtures");
+        assert_eq!(scopes[0].ref_id, "small");
+    }
+
+    #[test]
+    fn resolve_search_scope_rejects_ref_without_source() {
+        let config = AppConfig::load(None).unwrap();
+
+        let error = config
+            .resolve_search_scopes(None, Some("small"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("--ref requires --source"));
+    }
+
+    #[test]
+    fn resolve_search_scope_rejects_unknown_source() {
+        let config = AppConfig::load(None).unwrap();
+
+        let error = config
+            .resolve_search_scopes(Some("missing"), None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unknown source"));
+    }
+
+    #[test]
+    fn resolve_search_scope_rejects_unknown_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nix-search.toml");
+
+        fs::write(
+            &path,
+            r#"
+             [sources.fixtures]
+             name = "Fixtures"
+             kind = "options"
+
+             [[sources.fixtures.refs]]
+             id = "small"
+
+             [sources.fixtures.refs.producer]
+             type = "existing-file"
+             path = "fixtures/options-small.json"
+             artifact = "options-json"
+             "#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+
+        let error = config
+            .resolve_search_scopes(Some("fixtures"), Some("missing"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unknown ref"));
     }
 }

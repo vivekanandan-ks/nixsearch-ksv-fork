@@ -105,12 +105,17 @@ pub struct SearchHit {
     pub document: SearchDocument,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchScope {
+    pub source: String,
+    pub ref_id: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
     pub query: String,
     pub limit: usize,
-    pub source: Option<String>,
-    pub ref_id: Option<String>,
+    pub scopes: Vec<SearchScope>,
 }
 
 impl SearchIndex {
@@ -210,23 +215,34 @@ impl SearchIndex {
         let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
             vec![(tantivy::query::Occur::Must, parsed_query)];
 
-        if let Some(source) = options.source {
-            clauses.push((
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.source, &source),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ));
-        }
+        if !options.scopes.is_empty() {
+            let mut scope_clauses = Vec::with_capacity(options.scopes.len());
 
-        if let Some(ref_id) = options.ref_id {
+            for scope in options.scopes {
+                let source_query: Box<dyn tantivy::query::Query> =
+                    Box::new(tantivy::query::TermQuery::new(
+                        tantivy::Term::from_field_text(self.fields.source, &scope.source),
+                        tantivy::schema::IndexRecordOption::Basic,
+                    ));
+
+                let ref_query: Box<dyn tantivy::query::Query> =
+                    Box::new(tantivy::query::TermQuery::new(
+                        tantivy::Term::from_field_text(self.fields.ref_id, &scope.ref_id),
+                        tantivy::schema::IndexRecordOption::Basic,
+                    ));
+
+                let pair_query: Box<dyn tantivy::query::Query> =
+                    Box::new(tantivy::query::BooleanQuery::new(vec![
+                        (tantivy::query::Occur::Must, source_query),
+                        (tantivy::query::Occur::Must, ref_query),
+                    ]));
+
+                scope_clauses.push((tantivy::query::Occur::Should, pair_query));
+            }
+
             clauses.push((
                 tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.ref_id, &ref_id),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
+                Box::new(tantivy::query::BooleanQuery::new(scope_clauses)),
             ));
         }
 
@@ -569,7 +585,7 @@ mod tests {
 
     use nix_search_core::{IngestContext, OptionDoc, SearchDocument};
 
-    use super::{SearchIndex, SearchOptions};
+    use super::{SearchIndex, SearchOptions, SearchScope};
 
     fn test_context() -> IngestContext {
         IngestContext {
@@ -624,8 +640,7 @@ mod tests {
             .search(SearchOptions {
                 query: "git".to_owned(),
                 limit: 10,
-                source: None,
-                ref_id: None,
+                scopes: Vec::new(),
             })
             .unwrap();
 
@@ -656,8 +671,7 @@ mod tests {
             .search(SearchOptions {
                 query: "programs.git.enable".to_owned(),
                 limit: 10,
-                source: None,
-                ref_id: None,
+                scopes: Vec::new(),
             })
             .unwrap();
 
@@ -688,8 +702,7 @@ mod tests {
             .search(SearchOptions {
                 query: "EFI".to_owned(),
                 limit: 10,
-                source: None,
-                ref_id: None,
+                scopes: Vec::new(),
             })
             .unwrap();
 
@@ -728,8 +741,7 @@ mod tests {
             .search(SearchOptions {
                 query: "services.tailscale".to_owned(),
                 limit: 10,
-                source: None,
-                ref_id: None,
+                scopes: Vec::new(),
             })
             .unwrap();
 
@@ -760,8 +772,7 @@ mod tests {
             .search(SearchOptions {
                 query: "enable".to_owned(),
                 limit: 10,
-                source: None,
-                ref_id: None,
+                scopes: Vec::new(),
             })
             .unwrap();
 
@@ -821,5 +832,58 @@ mod tests {
         let manifest = store.try_current_manifest().unwrap();
 
         assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn search_scopes_filter_by_source_and_ref() {
+        let tempdir = tempdir().unwrap();
+
+        let index = SearchIndex::create_or_replace(tempdir.path()).unwrap();
+        let mut writer = index.writer().unwrap();
+
+        let stable_context = IngestContext {
+            source: "nixos".into(),
+            ref_id: "stable".into(),
+            revision: None,
+            repo: None,
+        };
+
+        let unstable_context = IngestContext {
+            source: "nixos".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+
+        let mut stable = OptionDoc::new(&stable_context, "programs.git.enable");
+        stable.description = Some("Stable Git option.".to_owned());
+
+        let mut unstable = OptionDoc::new(&unstable_context, "programs.git.enable");
+        unstable.description = Some("Unstable Git option.".to_owned());
+
+        writer
+            .add_document(&SearchDocument::Option(stable))
+            .unwrap();
+        writer
+            .add_document(&SearchDocument::Option(unstable))
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(tempdir.path()).unwrap();
+
+        let hits = index
+            .search(SearchOptions {
+                query: "programs.git.enable".to_owned(),
+                limit: 10,
+                scopes: vec![SearchScope {
+                    source: "nixos".to_owned(),
+                    ref_id: "stable".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document.common().ref_id, "stable");
     }
 }

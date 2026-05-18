@@ -140,7 +140,10 @@ A source has:
 - repository/link metadata
 - import strategy
 - available refs
+- effective default ref
 - available facets
+
+A source always has an effective default ref when it has at least one ref. If `default_ref` is configured, it must match a configured ref. If it is omitted, the first configured ref is used. Single-ref sources therefore do not need explicit default configuration.
 
 ### Ref
 
@@ -526,8 +529,7 @@ Important requirements:
 Suggested indexed fields:
 
 - `id`
-- `project`
-- `dataset`
+- `source`
 - `ref`
 - `kind`
 - `name_exact`
@@ -580,6 +582,8 @@ Support filters/facets:
 - source
 - ref
 - kind
+
+Search should use default refs by default. If no source/ref filter is provided, search all sources at their default refs. If a source is selected but no ref is selected, search that source's default ref. Searching all refs should be an explicit advanced/debug option because refs such as stable and unstable usually contain heavily overlapping documents.
 - option set
 - option parent
 - package set
@@ -597,7 +601,7 @@ Potential routes:
 
 ```text
 GET /                         main search page
-GET /search?q=git&project=... returns a page or Datastar fragment
+GET /search?q=git&source=... returns a page or Datastar fragment
 GET /document/{id}            detail page or detail fragment
 GET /status                   human-readable status
 GET /-/health                 simple health check
@@ -607,7 +611,7 @@ Search/page rendering should include:
 
 - stable document links
 - kind
-- project/dataset/ref
+- source/ref
 - title/name
 - score if useful for debugging
 - short summary
@@ -630,7 +634,7 @@ nix-search index
 nix-search update
 nix-search serve
 nix-search search "programs.git.enable"
-nix-search inspect-source nixos-options unstable
+nix-search inspect-source nixos unstable
 nix-search list-sources
 nix-search list-refs
 ```
@@ -665,7 +669,7 @@ Metadata should track:
 
 - schema version
 - config hash
-- project/dataset/ref revisions
+- source/ref revisions
 - import start/end time
 - document counts
 - warnings/errors
@@ -676,7 +680,7 @@ Metadata should track:
 
 Preserve and normalize source links.
 
-Source links should be resolved as cross-producer enrichment from raw declarations and positions. The raw parsed document should preserve the original declaration or package `meta.position`; configured source-link metadata on a ref/dataset should derive renderable URLs. This follows searchix's repository-based declaration/definition linking and NüschtOS's `urlPrefix` flexibility, while avoiding destructive artifact mutation.
+Source links should be resolved as cross-producer enrichment from raw declarations and positions. The raw parsed document should preserve the original declaration or package `meta.position`; configured source-link metadata on a source/ref should derive renderable URLs. This follows searchix's repository-based declaration/definition linking and NüschtOS's `urlPrefix` flexibility, while avoiding destructive artifact mutation.
 
 Source-link configuration such as `urlPrefix` is inspired by NüschtOS, but it should be treated as
 cross-producer enrichment rather than as part of artifact production. Producers and consumers should preserve raw declarations/positions from `options.json` and `packages.json`; a later resolver should derive renderable URLs from repo/ref metadata, URL templates, strip prefixes, and revisions. This avoids regenerating artifacts just because source-link policy changes.

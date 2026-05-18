@@ -9,7 +9,8 @@ use nix_search_core::{
     ArtifactKind, CommonDoc, SearchDocument, SourceLinkConfig, SourceLinkResolver,
 };
 use nix_search_index::{
-    IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchHit, SearchIndex, SearchOptions,
+    IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchHit, SearchIndex,
+    SearchOptions, SearchScope,
 };
 use nix_search_source::{
     ChannelPackagesJsonProducer, Consumer, EvalModulesProducer, ExistingFileProducer,
@@ -106,7 +107,7 @@ struct SearchArgs {
     #[arg(long)]
     source: Option<String>,
 
-    /// Restrict to one ref.
+    /// Restrict to one ref. Requires --source.
     #[arg(long = "ref")]
     ref_id: Option<String>,
 
@@ -404,11 +405,20 @@ fn search(args: SearchArgs) -> Result<()> {
     let index = SearchIndex::open(&current_path)
         .with_context(|| format!("failed to open current index {}", current_path.display()))?;
 
+    let scopes = config
+        .resolve_search_scopes(args.source.as_deref(), args.ref_id.as_deref())
+        .context("failed to resolve search scope")?
+        .into_iter()
+        .map(|scope| SearchScope {
+            source: scope.source,
+            ref_id: scope.ref_id,
+        })
+        .collect();
+
     let hits = index.search(SearchOptions {
         query: args.query,
         limit: args.limit,
-        source: args.source,
-        ref_id: args.ref_id,
+        scopes,
     })?;
 
     for hit in hits {
