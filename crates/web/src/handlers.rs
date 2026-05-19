@@ -12,7 +12,7 @@ use nix_search_index::{SearchHit, SearchIndex, SearchOptions, SearchScope};
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::request::{
-    PageQuery, PageRequest, decode_path_value, non_empty, normalized_query,
+    LinkOrigin, PageQuery, PageRequest, decode_path_value, non_empty, normalized_query,
     page_request_from_public_url,
 };
 use crate::scripts::dialog_reconcile_script;
@@ -131,10 +131,16 @@ pub fn run_page_search(state: &AppState, request: &PageRequest) -> Result<Vec<Se
         )
     })?;
 
+    // source=all overrides path-based source filter
+    let effective_source = match request.query.source {
+        Some(LinkOrigin::All) => None,
+        _ => request.source.as_deref().and_then(non_empty),
+    };
+
     let scopes = state
         .config
         .resolve_search_scopes(
-            request.source.as_deref().and_then(non_empty),
+            effective_source,
             request.query.ref_id.as_deref().and_then(non_empty),
         )
         .context("failed to resolve search scope")?

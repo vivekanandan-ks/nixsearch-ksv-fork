@@ -21,7 +21,8 @@ pub fn render(request: &PageRequest, hits: &[SearchHit], config: &AppConfig) -> 
         };
     }
 
-    let show_source = request.source.is_none();
+    let show_source = request.source.is_none()
+        || request.query.source == Some(LinkOrigin::All);
 
     html! {
         div #results aria-live="polite" {
