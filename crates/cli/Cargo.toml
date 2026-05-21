@@ -18,6 +18,7 @@ nix-search-ingest.workspace = true
 nix-search-source.workspace = true
 nix-search-store.workspace = true
 nix-search-web.workspace = true
+nix-search-ops.workspace = true
 
 [dev-dependencies]
 nix-search-core.workspace = true

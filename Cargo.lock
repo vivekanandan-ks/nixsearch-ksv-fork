@@ -1488,6 +1488,7 @@ dependencies = [
  "nix-search-core",
  "nix-search-index",
  "nix-search-ingest",
+ "nix-search-ops",
  "nix-search-source",
  "nix-search-store",
  "nix-search-test-support",
@@ -1543,6 +1544,20 @@ dependencies = [
  "nix-search-test-support",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nix-search-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nix-search-config",
+ "nix-search-core",
+ "nix-search-index",
+ "nix-search-ingest",
+ "nix-search-source",
+ "nix-search-store",
+ "tracing",
 ]
 
 [[package]]

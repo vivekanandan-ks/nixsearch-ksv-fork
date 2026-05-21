@@ -1,0 +1,16 @@
+[package]
+name = "nix-search-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+
+nix-search-config.workspace = true
+nix-search-core.workspace = true
+nix-search-index.workspace = true
+nix-search-ingest.workspace = true
+nix-search-source.workspace = true
+nix-search-store.workspace = true

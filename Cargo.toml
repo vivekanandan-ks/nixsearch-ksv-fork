@@ -6,6 +6,7 @@ members = [
   "crates/core",
   "crates/index",
   "crates/ingest",
+  "crates/ops",
   "crates/source",
   "crates/store",
   "crates/test-support",
@@ -63,4 +64,5 @@ nix-search-config = { path = "crates/config" }
 nix-search-store = { path = "crates/store" }
 nix-search-source = { path = "crates/source" }
 nix-search-web = { path = "crates/web" }
+nix-search-ops = { path = "crates/ops" }
 nix-search-test-support = { path = "crates/test-support" }
