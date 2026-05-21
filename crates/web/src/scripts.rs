@@ -21,6 +21,17 @@ pub fn navigation_script() -> String {
         const metadata = JSON.parse(
           document.getElementById("source-metadata").textContent
         );
+        let currentUrl = currentPublicUrl();
+
+        function currentPublicUrl() {
+          return window.location.pathname + window.location.search;
+        }
+
+        function reconcile(previousUrl) {
+          window.nixSearchPreviousUrl = previousUrl || "";
+          window.dispatchEvent(new CustomEvent(RECONCILE_EVENT));
+          currentUrl = currentPublicUrl();
+        }
 
         function getSourceSelect() {
           return document.querySelector('[data-nix-search-input="source-path"]');
@@ -113,13 +124,13 @@ pub fn navigation_script() -> String {
         function navigate(url, { push = true } = {}) {
           const next = new URL(url, window.location.href);
           const target = next.pathname + next.search;
-          const current = window.location.pathname + window.location.search;
+          const current = currentPublicUrl();
 
           if (push && current !== target) {
             history.pushState(null, "", target);
           }
 
-          window.dispatchEvent(new CustomEvent(RECONCILE_EVENT));
+          reconcile(current);
         }
 
         function syncInputsFromUrl() {
@@ -232,8 +243,9 @@ pub fn navigation_script() -> String {
         });
 
         window.addEventListener("popstate", () => {
+          const previous = currentUrl;
           syncInputsFromUrl();
-          window.dispatchEvent(new CustomEvent(RECONCILE_EVENT));
+          reconcile(previous);
         });
 
         window.nixSearchNavigate = navigate;

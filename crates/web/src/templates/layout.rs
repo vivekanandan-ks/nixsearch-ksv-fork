@@ -41,7 +41,7 @@ pub fn render_full_page(
         .unwrap_or_else(|| "/".to_owned());
 
     let reconcile_attr = format!(
-        "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search))"
+        "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search) + '&previous_url=' + encodeURIComponent(window.nixSearchPreviousUrl || ''))"
     );
 
     html! {

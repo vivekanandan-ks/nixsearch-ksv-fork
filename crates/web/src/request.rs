@@ -23,6 +23,13 @@ pub struct PageQuery {
     pub source: Option<LinkOrigin>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultsContext {
+    q: Option<String>,
+    source: Option<String>,
+    ref_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkOrigin {
@@ -63,6 +70,33 @@ pub fn non_empty(value: &str) -> Option<&str> {
 
 pub fn normalized_query(query: &PageQuery) -> Option<&str> {
     query.q.as_deref().and_then(non_empty)
+}
+
+pub fn results_context(request: &PageRequest) -> ResultsContext {
+    let source_all = request.query.source == Some(LinkOrigin::All);
+
+    ResultsContext {
+        q: normalized_query(&request.query).map(ToOwned::to_owned),
+        source: if source_all {
+            None
+        } else {
+            request
+                .source
+                .as_deref()
+                .and_then(non_empty)
+                .map(ToOwned::to_owned)
+        },
+        ref_id: if source_all {
+            None
+        } else {
+            request
+                .query
+                .ref_id
+                .as_deref()
+                .and_then(non_empty)
+                .map(ToOwned::to_owned)
+        },
+    }
 }
 
 pub fn decode_path_value(value: &str) -> Option<String> {
@@ -194,5 +228,51 @@ mod tests {
         assert_eq!(request.entry.as_deref(), Some("git"));
         assert_eq!(request.query.q.as_deref(), Some("git"));
         assert_eq!(request.query.source, Some(LinkOrigin::All));
+    }
+
+    #[test]
+    fn results_context_ignores_entry_path_and_kind() {
+        let search = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
+        let modal = page_request_from_public_url(
+            "/fixtures/programs.git.enable?q=git&ref=small&kind=option",
+        )
+        .unwrap();
+
+        assert_eq!(results_context(&search), results_context(&modal));
+    }
+
+    #[test]
+    fn results_context_treats_all_scope_modal_as_root_search() {
+        let search = page_request_from_public_url("/?q=git").unwrap();
+        let modal = page_request_from_public_url(
+            "/nixpkgs/rubyPackages.git?q=git&source=all&ref=unstable&kind=package",
+        )
+        .unwrap();
+
+        assert_eq!(results_context(&search), results_context(&modal));
+    }
+
+    #[test]
+    fn results_context_changes_when_query_changes() {
+        let git = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
+        let firefox = page_request_from_public_url("/fixtures?q=firefox&ref=small").unwrap();
+
+        assert_ne!(results_context(&git), results_context(&firefox));
+    }
+
+    #[test]
+    fn results_context_changes_when_source_changes() {
+        let nixpkgs = page_request_from_public_url("/nixpkgs?q=git").unwrap();
+        let nixos = page_request_from_public_url("/nixos?q=git").unwrap();
+
+        assert_ne!(results_context(&nixpkgs), results_context(&nixos));
+    }
+
+    #[test]
+    fn results_context_changes_when_scoped_ref_changes() {
+        let stable = page_request_from_public_url("/fixtures?q=git&ref=stable").unwrap();
+        let unstable = page_request_from_public_url("/fixtures?q=git&ref=unstable").unwrap();
+
+        assert_ne!(results_context(&stable), results_context(&unstable));
     }
 }

@@ -14,7 +14,7 @@ use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::request::{
     LinkOrigin, PageQuery, PageRequest, decode_path_value, non_empty, normalized_query,
-    page_request_from_public_url,
+    page_request_from_public_url, results_context,
 };
 use crate::scripts::dialog_reconcile_script;
 use crate::templates;
@@ -22,6 +22,7 @@ use crate::templates;
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateQuery {
     url: String,
+    previous_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,25 +95,49 @@ pub async fn state_events(
         }
     };
 
-    let search_result = run_search(&state, &request, 0);
+    let patch_results = should_patch_results(query.previous_url.as_deref(), &request);
 
-    let results_html = match &search_result {
-        Ok(result) => {
-            templates::results::render(&request, &result.hits, result.total, &state.config)
-                .into_string()
-        }
-        Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
+    let results_html = if patch_results {
+        let search_result = run_search(&state, &request, 0);
+
+        Some(match &search_result {
+            Ok(result) => {
+                templates::results::render(&request, &result.hits, result.total, &state.config)
+                    .into_string()
+            }
+            Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
+        })
+    } else {
+        None
     };
 
     let modal_html = templates::modal::render(&state, &request).into_string();
 
-    let events: Vec<std::result::Result<Event, Infallible>> = vec![
-        Ok(PatchElements::new(results_html).write_as_axum_sse_event()),
-        Ok(PatchElements::new(modal_html).write_as_axum_sse_event()),
-        Ok(ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()),
-    ];
+    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+
+    if let Some(results_html) = results_html {
+        events.push(Ok(
+            PatchElements::new(results_html).write_as_axum_sse_event()
+        ));
+    }
+
+    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
+    events.push(Ok(
+        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
+    ));
 
     Sse::new(stream::iter(events))
+}
+
+fn should_patch_results(previous_url: Option<&str>, request: &PageRequest) -> bool {
+    let Some(previous_url) = previous_url.and_then(non_empty) else {
+        return true;
+    };
+
+    match page_request_from_public_url(previous_url) {
+        Ok(previous_request) => results_context(&previous_request) != results_context(request),
+        Err(_) => true,
+    }
 }
 
 pub async fn more_results(
