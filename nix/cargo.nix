@@ -7,7 +7,7 @@
     in
     {
       devShells.default = craneLib.devShell {
-
+        packages = with pkgs; [ watchexec ];
       };
     };
 }
