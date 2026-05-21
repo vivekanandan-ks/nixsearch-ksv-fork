@@ -274,15 +274,17 @@ impl SearchIndex {
             .search(
                 &query,
                 &(
-                    TopDocs::with_limit(options.limit + options.offset).order_by_score(),
+                    TopDocs::with_limit(options.limit)
+                        .and_offset(options.offset)
+                        .order_by_score(),
                     Count,
                 ),
             )
             .context("search failed")?;
 
-        let mut hits = Vec::with_capacity(top_docs.len().saturating_sub(options.offset));
+        let mut hits = Vec::with_capacity(top_docs.len());
 
-        for (score, address) in top_docs.into_iter().skip(options.offset) {
+        for (score, address) in top_docs {
             let retrieved: TantivyDocument = searcher
                 .doc(address)
                 .context("failed to retrieve search result document")?;

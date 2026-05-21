@@ -241,21 +241,28 @@ pub fn navigation_script() -> String {
         // ─── Infinite scroll ───
         const MORE_URL = "__MORE_RESULTS_URL__";
         let loadingMore = false;
+        let loadMoreObserver = null;
 
         function observeSentinel() {
+          if (loadMoreObserver) {
+            loadMoreObserver.disconnect();
+            loadMoreObserver = null;
+          }
+
           const sentinel = document.querySelector("#load-more-sentinel .load-more-trigger");
           if (!sentinel) return;
 
-          const observer = new IntersectionObserver((entries) => {
+          loadMoreObserver = new IntersectionObserver((entries) => {
             for (const entry of entries) {
               if (entry.isIntersecting && !loadingMore) {
-                observer.disconnect();
-                loadMore(sentinel);
+                loadMoreObserver.disconnect();
+                loadMoreObserver = null;
+                loadMore(entry.target);
               }
             }
           }, { rootMargin: "200px" });
 
-          observer.observe(sentinel);
+          loadMoreObserver.observe(sentinel);
         }
 
         async function loadMore(trigger) {
