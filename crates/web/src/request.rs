@@ -56,6 +56,10 @@ pub enum SourceFilter {
 
 impl SourceFilter {
     pub fn from_request(request: &PageRequest) -> Self {
+        if request.query.source == Some(LinkOrigin::All) {
+            return Self::All;
+        }
+
         match &request.source {
             None => Self::All,
             Some(source) => Self::Named(source.clone()),
@@ -274,5 +278,14 @@ mod tests {
         let unstable = page_request_from_public_url("/fixtures?q=git&ref=unstable").unwrap();
 
         assert_ne!(results_context(&stable), results_context(&unstable));
+    }
+
+    #[test]
+    fn source_filter_treats_source_all_as_all_sources() {
+        let request =
+            page_request_from_public_url("/nixos/programs.git.config?q=programs.git&source=all")
+                .unwrap();
+
+        assert_eq!(SourceFilter::from_request(&request), SourceFilter::All);
     }
 }

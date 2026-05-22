@@ -34,11 +34,10 @@ pub fn render_full_page(
     let modal_markup = modal::render(state, request);
     let source_metadata = source_metadata_json(&state.config);
 
-    let form_action = request
-        .source
-        .as_deref()
-        .map(source_path)
-        .unwrap_or_else(|| "/".to_owned());
+    let form_action = match &source_filter {
+        SourceFilter::All => "/".to_owned(),
+        SourceFilter::Named(source) => source_path(source),
+    };
 
     let reconcile_attr = format!(
         "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search) + '&previous_url=' + encodeURIComponent(window.nixSearchPreviousUrl || ''))"

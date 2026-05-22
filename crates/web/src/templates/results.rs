@@ -127,7 +127,7 @@ fn render_hit_row(
     let common = hit.document.common();
     let summary = summary_for_document(&hit.document);
 
-    let from_scope = if request.source.is_none() {
+    let from_scope = if request.source.is_none() || request.query.source == Some(LinkOrigin::All) {
         Some(LinkOrigin::All)
     } else {
         None

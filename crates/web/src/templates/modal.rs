@@ -122,7 +122,11 @@ fn render_ambiguous(
                     ul {
                         @for document in documents {
                             @let common = document.common();
-                            @let from_scope = if request.source.is_none() { Some(LinkOrigin::All) } else { None };
+                            @let from_scope = if request.source.is_none() || request.query.source == Some(LinkOrigin::All) {
+                                Some(LinkOrigin::All)
+                            } else {
+                                None
+                            };
                             @let href = entry_url_for(
                                 &common.source,
                                 &common.name,

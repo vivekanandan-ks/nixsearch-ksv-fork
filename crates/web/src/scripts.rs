@@ -1,4 +1,5 @@
 use crate::MORE_RESULTS_URL;
+use crate::request::LinkOrigin;
 
 pub fn dialog_reconcile_script() -> &'static str {
     r#"
@@ -137,11 +138,12 @@ pub fn navigation_script() -> String {
           const params = new URLSearchParams(window.location.search);
           const parts = window.location.pathname.split("/").filter(Boolean);
           const pathSource = parts.length > 0 ? decodeURIComponent(parts[0]) : "";
+          const effectiveSource = params.get("source") === "__SOURCE_ALL_VALUE__" ? "" : pathSource;
 
           const sourceSelect = getSourceSelect();
-          if (sourceSelect) sourceSelect.value = pathSource;
+          if (sourceSelect) sourceSelect.value = effectiveSource;
 
-          populateRefSelect(pathSource);
+          populateRefSelect(effectiveSource);
 
           const refSelect = getRefSelect();
           if (refSelect && refSelect.type !== "hidden") {
@@ -333,4 +335,5 @@ pub fn navigation_script() -> String {
       })();
       "##
     .replace("__MORE_RESULTS_URL__", MORE_RESULTS_URL)
+    .replace("__SOURCE_ALL_VALUE__", LinkOrigin::All.as_str())
 }
