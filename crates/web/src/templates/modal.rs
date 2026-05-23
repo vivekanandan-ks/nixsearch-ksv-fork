@@ -29,7 +29,13 @@ pub fn render(state: &AppState, request: &PageRequest) -> Markup {
         Err(error) => return render_error(request, &error),
     };
 
-    let index = match SearchIndex::open(&*state.index_path) {
+    let index_path = state
+        .index_path
+        .read()
+        .expect("index path lock poisoned")
+        .clone();
+
+    let index = match SearchIndex::open(&index_path) {
         Ok(index) => index,
         Err(error) => return render_error(request, &format!("{error:#}")),
     };

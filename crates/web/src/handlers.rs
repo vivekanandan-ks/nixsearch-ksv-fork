@@ -198,10 +198,16 @@ fn run_search(state: &AppState, request: &PageRequest, offset: usize) -> Result<
         });
     };
 
-    let index = SearchIndex::open(&*state.index_path).with_context(|| {
+    let index_path = state
+        .index_path
+        .read()
+        .expect("index path lock poisoned")
+        .clone();
+
+    let index = SearchIndex::open(&index_path).with_context(|| {
         format!(
             "failed to open current search index {}",
-            state.index_path.display()
+            index_path.display()
         )
     })?;
 

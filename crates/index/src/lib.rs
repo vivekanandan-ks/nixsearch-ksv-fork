@@ -585,6 +585,8 @@ impl IndexStore {
         Ok(path)
     }
 
+    // Callers must hold the maintenance/update lock before publishing.
+    // This uses a shared CURRENT.tmp path, so concurrent unlocked publishers can race.
     pub fn publish(&self, generation_path: &Path) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("failed to create index root {}", self.root.display()))?;

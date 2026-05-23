@@ -10,9 +10,6 @@ axum.workspace = true
 datastar.workspace = true
 futures-util.workspace = true
 maud.workspace = true
-nix-search-config.workspace = true
-nix-search-core.workspace = true
-nix-search-index.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
@@ -21,6 +18,11 @@ tower-http.workspace = true
 tracing.workspace = true
 url.workspace = true
 urlencoding.workspace = true
+
+nix-search-config.workspace = true
+nix-search-core.workspace = true
+nix-search-index.workspace = true
+nix-search-ops.workspace = true
 
 [dev-dependencies]
 nix-search-test-support.workspace = true

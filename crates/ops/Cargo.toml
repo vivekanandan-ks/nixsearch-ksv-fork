@@ -14,3 +14,6 @@ nix-search-index.workspace = true
 nix-search-ingest.workspace = true
 nix-search-source.workspace = true
 nix-search-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

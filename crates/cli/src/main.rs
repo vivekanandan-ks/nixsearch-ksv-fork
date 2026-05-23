@@ -8,6 +8,7 @@ use nix_search_config::{AppConfig, SourceConfig};
 use nix_search_core::{CommonDoc, SearchDocument, SourceLinkConfig, SourceLinkResolver};
 use nix_search_index::{IndexStore, SearchHit, SearchIndex, SearchOptions, SearchScope};
 use nix_search_ops::generate::build_and_publish_generation;
+use nix_search_ops::lock::acquire_update_lock;
 use nix_search_ops::produce::{
     artifact_store_from_config, latest_artifact_ref_for_target, produce_target,
 };
@@ -144,6 +145,9 @@ fn check_config(args: ConfigArgs) -> Result<()> {
     println!("artifact_url = {}", config.data.artifact_url);
     println!("index_dir = {}", config.data.index_dir.display());
     println!("listen = {}", config.server.listen);
+    println!("bootstrap = {}", config.server.bootstrap);
+    println!("schedule.enabled = {}", config.server.schedule.enabled);
+    println!("schedule.interval = {}", config.server.schedule.interval);
     println!("sources = {}", config.sources.len());
 
     for (source_id, source) in &config.sources {
@@ -155,6 +159,8 @@ fn check_config(args: ConfigArgs) -> Result<()> {
 
 async fn update(args: SelectionArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
+    let _lock = acquire_update_lock(&config.data.index_dir)?;
+
     let store = artifact_store_from_config(&config)?;
     let selected_targets = select_targets(&config, args.source.as_deref(), args.ref_id.as_deref())?;
 
@@ -182,11 +188,14 @@ async fn update(args: SelectionArgs) -> Result<()> {
         &selected_keys,
     )
     .await?;
+
     Ok(())
 }
 
 async fn artifact_produce(args: SelectionArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
+    let _lock = acquire_update_lock(&config.data.index_dir)?;
+
     let store = artifact_store_from_config(&config)?;
     let targets = select_targets(&config, args.source.as_deref(), args.ref_id.as_deref())?;
 
@@ -247,6 +256,8 @@ async fn artifact_inspect(args: SelectionArgs) -> Result<()> {
 
 async fn index_rebuild(args: SelectionArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
+    let _lock = acquire_update_lock(&config.data.index_dir)?;
+
     let store = artifact_store_from_config(&config)?;
     let targets = select_targets(&config, args.source.as_deref(), args.ref_id.as_deref())?;
 

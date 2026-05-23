@@ -4,6 +4,11 @@ index_dir = "./data/indexes"
 
 [server]
 listen = "127.0.0.1:3000"
+bootstrap = true
+
+[server.schedule]
+enabled = false
+interval = "24h"
 
 [sources.nixpkgs]
 name = "Nixpkgs"

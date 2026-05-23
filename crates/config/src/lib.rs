@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -24,6 +25,8 @@ impl From<figment::Error> for ConfigError {
 }
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
+
+const MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 
 const NIXPKGS_COLOR: &str = "#4ade80";
 const NIXOS_COLOR: &str = "#60a5fa";
@@ -189,20 +192,104 @@ impl DataConfig {
 #[serde(default)]
 pub struct ServerConfig {
     pub listen: String,
+    pub bootstrap: bool,
+    pub schedule: ScheduleConfig,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:3000".to_owned(),
+            bootstrap: true,
+            schedule: ScheduleConfig::default(),
         }
     }
 }
 
 impl ServerConfig {
     fn validate(&self) -> Result<()> {
-        validate_non_empty("server.listen", &self.listen)
+        validate_non_empty("server.listen", &self.listen)?;
+        self.schedule.validate()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScheduleConfig {
+    pub enabled: bool,
+    pub interval: String,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: "24h".to_owned(),
+        }
+    }
+}
+
+impl ScheduleConfig {
+    pub fn parse_interval(&self) -> std::result::Result<Duration, ConfigError> {
+        parse_duration(&self.interval).map_err(|message| {
+            ConfigError::Validation(format!("server.schedule.interval: {message}"))
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.parse_interval()?;
+        Ok(())
+    }
+}
+
+fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
+    let s = s.trim();
+
+    if s.is_empty() {
+        return Err("interval must not be empty".to_owned());
+    }
+
+    let split_pos = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+
+    let (number, unit) = s.split_at(split_pos);
+
+    if number.is_empty() {
+        return Err(format!("invalid number in {s:?}"));
+    }
+
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("invalid number in {s:?}"))?;
+
+    if !value.is_finite() || value <= 0.0 {
+        return Err("interval must be positive".to_owned());
+    }
+
+    let seconds = match unit.trim() {
+        "s" | "sec" | "secs" => value,
+        "m" | "min" | "mins" => value * 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => value * 3600.0,
+        "d" | "day" | "days" => value * 86400.0,
+        other => return Err(format!("unknown time unit {other:?}; use s, m, h, or d")),
+    };
+
+    if !seconds.is_finite() {
+        return Err("interval is out of range".to_owned());
+    }
+
+    let duration = std::time::Duration::try_from_secs_f64(seconds)
+        .map_err(|_| "interval is out of range".to_owned())?;
+
+    if duration < MIN_SCHEDULE_INTERVAL {
+        return Err(format!(
+            "interval must be at least {}s",
+            MIN_SCHEDULE_INTERVAL.as_secs()
+        ));
+    }
+
+    Ok(duration)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +910,9 @@ mod tests {
 
         assert_eq!(config.data.artifact_url, "file://./tmp/artifacts");
         assert_eq!(config.server.listen, "0.0.0.0:8080");
+        assert!(config.server.bootstrap);
+        assert!(!config.server.schedule.enabled);
+        assert_eq!(config.server.schedule.interval, "24h");
 
         let options = &config.sources[NIXOS_SOURCE];
         assert_eq!(options.name.as_deref(), Some("NixOS Options"));
@@ -1376,5 +1466,92 @@ mod tests {
         );
 
         assert_error_contains(&error, "must be a hex color");
+    }
+
+    #[test]
+    fn parses_schedule_config() {
+        let config = load_toml(
+            r#"
+            [server]
+            bootstrap = false
+
+            [server.schedule]
+            enabled = true
+            interval = "12h"
+            "#,
+        );
+
+        assert!(!config.server.bootstrap);
+        assert!(config.server.schedule.enabled);
+        assert_eq!(config.server.schedule.interval, "12h");
+        assert_eq!(
+            config.server.schedule.parse_interval().unwrap(),
+            std::time::Duration::from_secs(12 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn parse_duration_accepts_supported_units() {
+        assert_eq!(
+            super::parse_duration("24h").unwrap(),
+            std::time::Duration::from_secs(86_400)
+        );
+        assert_eq!(
+            super::parse_duration("12h").unwrap(),
+            std::time::Duration::from_secs(43_200)
+        );
+        assert_eq!(
+            super::parse_duration("1d").unwrap(),
+            std::time::Duration::from_secs(86_400)
+        );
+        assert_eq!(
+            super::parse_duration("30m").unwrap(),
+            std::time::Duration::from_secs(1_800)
+        );
+        assert_eq!(
+            super::parse_duration("3600s").unwrap(),
+            std::time::Duration::from_secs(3_600)
+        );
+        assert_eq!(
+            super::parse_duration("0.5d").unwrap(),
+            std::time::Duration::from_secs(43_200)
+        );
+        assert_eq!(
+            super::parse_duration(" 24h ").unwrap(),
+            std::time::Duration::from_secs(86_400)
+        );
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid_values() {
+        for value in [
+            "",
+            "0h",
+            "1s",
+            "-1h",
+            "24x",
+            "abc",
+            "NaNh",
+            "infh",
+            "999999999999999999999999999999999999999999999999999d",
+        ] {
+            assert!(
+                super::parse_duration(value).is_err(),
+                "expected {value:?} to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_schedule_still_validates_interval() {
+        let error = load_toml_error(
+            r#"
+            [server.schedule]
+            enabled = false
+            interval = "1s"
+            "#,
+        );
+
+        assert_error_contains(&error, "server.schedule.interval");
     }
 }

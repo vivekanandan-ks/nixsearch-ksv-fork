@@ -1557,6 +1557,7 @@ dependencies = [
  "nix-search-ingest",
  "nix-search-source",
  "nix-search-store",
+ "tempfile",
  "tracing",
 ]
 
@@ -1616,6 +1617,7 @@ dependencies = [
  "nix-search-config",
  "nix-search-core",
  "nix-search-index",
+ "nix-search-ops",
  "nix-search-test-support",
  "serde",
  "serde_json",
