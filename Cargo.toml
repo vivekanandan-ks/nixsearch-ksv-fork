@@ -12,6 +12,7 @@ members = [
   "crates/test-support",
   "crates/web",
 ]
+metadata.crane.name = "nix-search"
 
 [workspace.package]
 version = "0.1.0"
