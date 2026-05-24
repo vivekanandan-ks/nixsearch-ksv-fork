@@ -96,7 +96,7 @@ fn publish_documents_with_manifest_targets(
     documents: Vec<SearchDocument>,
     targets: Vec<IndexTargetManifest>,
 ) -> PathBuf {
-    let store = IndexStore::new(index_root);
+    let store = IndexStore::new(index_root).unwrap();
     let generation = store.create_generation_path().unwrap();
 
     let index = SearchIndex::create_or_replace(&generation).unwrap();
@@ -113,7 +113,7 @@ fn publish_documents_with_manifest_targets(
 
     store.write_manifest(&generation, &manifest).unwrap();
     store.publish(&generation).unwrap();
-    store.current_path().unwrap()
+    store.current_path().unwrap().into_std_path_buf()
 }
 
 pub fn assert_canonical_options_manifest_targets(manifest: &IndexGenerationManifest) {

@@ -50,7 +50,13 @@ pub(crate) fn spawn(config: Arc<AppConfig>, index_path: Arc<RwLock<PathBuf>>) {
 }
 
 async fn run_loop(config: Arc<AppConfig>, index_path: Arc<RwLock<PathBuf>>, interval: Duration) {
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = match IndexStore::new(&config.data.index_dir) {
+        Ok(index_store) => index_store,
+        Err(error) => {
+            tracing::error!("invalid index directory for maintenance loop: {error:#}");
+            return;
+        }
+    };
     let regeneration_enabled = config.server.schedule.enabled && has_configured_targets(&config);
 
     loop {
@@ -137,7 +143,13 @@ async fn run_scheduled_regeneration(config: &AppConfig, interval: Duration) -> M
         }
     };
 
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = match IndexStore::new(&config.data.index_dir) {
+        Ok(index_store) => index_store,
+        Err(error) => {
+            tracing::error!("invalid index directory for scheduled regeneration: {error:#}");
+            return MaintenanceOutcome::Failed;
+        }
+    };
     match current_generation_is_due(&index_store, interval, OffsetDateTime::now_utc()) {
         Ok(true) => {}
         Ok(false) => {
@@ -202,7 +214,7 @@ pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<Curren
     let manifest = index_store.read_manifest(&path)?;
 
     Ok(CurrentGeneration::Found(PublishedGeneration {
-        path,
+        path: path.into_std_path_buf(),
         manifest,
     }))
 }
@@ -322,7 +334,7 @@ mod tests {
     #[test]
     fn read_current_generation_returns_missing_when_current_absent() {
         let tempdir = tempdir().unwrap();
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
 
         let generation = read_current_generation(&store).unwrap();
 
@@ -333,7 +345,7 @@ mod tests {
     fn read_current_generation_loads_manifest() {
         let tempdir = tempdir().unwrap();
         let published_path = publish_canonical_index(tempdir.path());
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
 
         let generation = read_current_generation(&store).unwrap();
 
@@ -347,7 +359,7 @@ mod tests {
     #[test]
     fn read_current_generation_errors_on_empty_current() {
         let tempdir = tempdir().unwrap();
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
         fs::create_dir_all(tempdir.path()).unwrap();
         fs::write(store.current_file(), "").unwrap();
 
@@ -361,7 +373,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
         publish_canonical_index_with_generated_at(tempdir.path(), now - TimeDuration::hours(2));
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
 
         let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();
 
@@ -373,7 +385,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
         publish_canonical_index_with_generated_at(tempdir.path(), now);
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
 
         let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();
 
@@ -383,7 +395,7 @@ mod tests {
     #[test]
     fn current_generation_is_due_returns_true_when_current_missing() {
         let tempdir = tempdir().unwrap();
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
 
         let due = current_generation_is_due(
             &store,
@@ -398,10 +410,10 @@ mod tests {
     #[test]
     fn current_generation_is_due_returns_true_for_invalid_current() {
         let tempdir = tempdir().unwrap();
-        let store = IndexStore::new(tempdir.path());
+        let store = IndexStore::new(tempdir.path()).unwrap();
         fs::create_dir_all(tempdir.path()).unwrap();
-        let missing = tempdir.path().join("missing");
-        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+        let missing = store.generations_dir().join("missing");
+        fs::write(store.current_file(), missing.as_str().as_bytes()).unwrap();
 
         let due = current_generation_is_due(
             &store,

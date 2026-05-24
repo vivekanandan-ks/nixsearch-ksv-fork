@@ -70,7 +70,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 }
 
 async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::PublishedGeneration> {
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
 
     match maintenance::read_current_generation(&index_store) {
         Ok(maintenance::CurrentGeneration::Found(generation)) => return Ok(generation),
@@ -244,8 +244,8 @@ mod tests {
         assert_eq!(target.source, SOURCE_FIXTURES);
         assert_eq!(target.ref_id, REF_SMALL);
 
-        let store = IndexStore::new(&index_dir);
-        assert_eq!(store.current_path().unwrap(), generation.path);
+        let store = IndexStore::new(&index_dir).unwrap();
+        assert_eq!(store.current_path().unwrap().as_std_path(), generation.path);
     }
 
     #[tokio::test]
@@ -254,16 +254,16 @@ mod tests {
         let index_dir = tempdir.path().join("indexes");
         let mut config = app_config(&index_dir);
         config.data.artifact_url = format!("file://{}", tempdir.path().join("artifacts").display());
-        let store = IndexStore::new(&index_dir);
+        let store = IndexStore::new(&index_dir).unwrap();
         store.create_generation_path().unwrap();
         let missing = store.generations_dir().join("missing-generation");
-        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+        fs::write(store.current_file(), missing.as_str().as_bytes()).unwrap();
 
         let generation = ensure_current_generation(&config).await.unwrap();
 
         assert!(generation.path.exists());
         assert_canonical_options_manifest_targets(&generation.manifest);
-        assert_eq!(store.current_path().unwrap(), generation.path);
+        assert_eq!(store.current_path().unwrap().as_std_path(), generation.path);
     }
 
     #[tokio::test]
@@ -272,16 +272,16 @@ mod tests {
         let index_dir = tempdir.path().join("indexes");
         let mut config = app_config(&index_dir);
         config.data.artifact_url = format!("file://{}", tempdir.path().join("artifacts").display());
-        let store = IndexStore::new(&index_dir);
+        let store = IndexStore::new(&index_dir).unwrap();
         let generation_without_manifest = store.create_generation_path().unwrap();
         store.publish(&generation_without_manifest).unwrap();
 
         let generation = ensure_current_generation(&config).await.unwrap();
 
         assert!(generation.path.exists());
-        assert_ne!(generation.path, generation_without_manifest);
+        assert_ne!(generation.path, generation_without_manifest.as_std_path());
         assert_canonical_options_manifest_targets(&generation.manifest);
-        assert_eq!(store.current_path().unwrap(), generation.path);
+        assert_eq!(store.current_path().unwrap().as_std_path(), generation.path);
     }
 
     #[tokio::test]
@@ -290,10 +290,10 @@ mod tests {
         let index_dir = tempdir.path().join("indexes");
         let mut config = app_config(&index_dir);
         config.server.bootstrap = false;
-        let store = IndexStore::new(&index_dir);
+        let store = IndexStore::new(&index_dir).unwrap();
         store.create_generation_path().unwrap();
         let missing = store.generations_dir().join("missing-generation");
-        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+        fs::write(store.current_file(), missing.as_str().as_bytes()).unwrap();
 
         let error = ensure_current_generation(&config).await.unwrap_err();
 

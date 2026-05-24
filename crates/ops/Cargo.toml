@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 tracing.workspace = true
 
 nix-search-config.workspace = true

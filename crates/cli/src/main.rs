@@ -168,7 +168,7 @@ async fn update(args: SelectionArgs) -> Result<()> {
         bail!("no refs matched selection");
     }
 
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
 
     let mut included_targets = current_manifest_targets(&config, &index_store)?;
     let selected_keys: BTreeSet<TargetKey> = selected_targets.iter().map(TargetKey::from).collect();
@@ -265,7 +265,7 @@ async fn index_rebuild(args: SelectionArgs) -> Result<()> {
         bail!("no refs matched selection");
     }
 
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
 
     build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await?;
@@ -274,13 +274,13 @@ async fn index_rebuild(args: SelectionArgs) -> Result<()> {
 
 fn index_inspect(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::load(args.config.as_deref()).context("failed to load config")?;
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
 
     let current_path = index_store.current_path()?;
     let manifest = index_store.current_manifest()?;
 
     println!("current index");
-    println!("  path = {}", current_path.display());
+    println!("  path = {}", current_path.as_str());
     println!("  schema_version = {}", manifest.schema_version);
     println!("  generated_at = {}", manifest.generated_at);
     println!("  documents = {}", manifest.document_count);
@@ -307,11 +307,11 @@ fn index_inspect(args: ConfigArgs) -> Result<()> {
 fn search(args: SearchArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
 
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
     let current_path = index_store.current_path()?;
 
     let index = SearchIndex::open(&current_path)
-        .with_context(|| format!("failed to open current index {}", current_path.display()))?;
+        .with_context(|| format!("failed to open current index {}", current_path.as_str()))?;
 
     let scopes = config
         .resolve_search_scopes(args.source.as_deref(), args.ref_id.as_deref())

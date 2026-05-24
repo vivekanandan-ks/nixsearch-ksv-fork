@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use anyhow::Result;
+use camino::Utf8PathBuf;
 
 use nix_search_config::AppConfig;
 use nix_search_index::{IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchIndex};
@@ -16,7 +16,7 @@ pub async fn build_and_publish_generation(
     artifact_store: &ArtifactStore,
     targets: Vec<TargetRef>,
     refresh_keys: &BTreeSet<TargetKey>,
-) -> Result<PathBuf> {
+) -> Result<Utf8PathBuf> {
     let generation_path = index_store.create_generation_path()?;
 
     let index = SearchIndex::create_or_replace(&generation_path)?;
@@ -71,7 +71,7 @@ pub async fn build_and_publish_generation(
     index_store.publish(&generation_path)?;
 
     tracing::info!(
-        generation = %generation_path.display(),
+        generation = %generation_path.as_str(),
         documents = total_documents,
         "published index generation"
     );
@@ -80,9 +80,9 @@ pub async fn build_and_publish_generation(
 }
 
 /// Regenerate all configured sources. Returns the new generation path.
-pub async fn regenerate_all(config: &AppConfig) -> Result<PathBuf> {
+pub async fn regenerate_all(config: &AppConfig) -> Result<Utf8PathBuf> {
     let store = artifact_store_from_config(config)?;
-    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_store = IndexStore::new(&config.data.index_dir)?;
     let targets = all_targets(config);
 
     if targets.is_empty() {
