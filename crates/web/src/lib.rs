@@ -195,12 +195,12 @@ mod tests {
     async fn ensure_current_generation_returns_existing_generation() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let published_path = publish_canonical_options_index(index_dir.as_std_path());
+        let published_path = publish_canonical_options_index(&index_dir);
         let config = app_config(&index_dir);
 
         let generation = ensure_current_generation(&config).await.unwrap();
 
-        assert_eq!(generation.path.as_std_path(), published_path);
+        assert_eq!(generation.path, published_path);
         assert_canonical_options_manifest_targets(&generation.manifest);
     }
 

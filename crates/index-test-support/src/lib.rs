@@ -3,32 +3,30 @@
 //! Kept separate from `nix-search-test-support` so `nix-search-index` can use
 //! the base test fixtures in its own tests without creating a dependency cycle.
 
-use std::path::{Path, PathBuf};
-
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use nix_search_core::{ArtifactKind, SearchDocument};
 use nix_search_index::{IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchIndex};
 use nix_search_test_support::{REF_SMALL, SOURCE_FIXTURES, canonical_documents};
 
-pub fn publish_canonical_index(index_root: &Path) -> PathBuf {
+pub fn publish_canonical_index(index_root: &Utf8Path) -> Utf8PathBuf {
     publish_canonical_mixed_index(index_root)
 }
 
 pub fn publish_canonical_index_with_generated_at(
-    index_root: &Path,
+    index_root: &Utf8Path,
     generated_at: time::OffsetDateTime,
-) -> PathBuf {
+) -> Utf8PathBuf {
     publish_canonical_mixed_index_with_generated_at(index_root, generated_at)
 }
 
-pub fn publish_canonical_options_index(index_root: &Path) -> PathBuf {
+pub fn publish_canonical_options_index(index_root: &Utf8Path) -> Utf8PathBuf {
     publish_canonical_options_index_with_generated_at(index_root, time::OffsetDateTime::now_utc())
 }
 
 pub fn publish_canonical_options_index_with_generated_at(
-    index_root: &Path,
+    index_root: &Utf8Path,
     generated_at: time::OffsetDateTime,
-) -> PathBuf {
+) -> Utf8PathBuf {
     let documents = canonical_documents()
         .into_iter()
         .filter(|document| matches!(document, SearchDocument::Option(_)))
@@ -48,14 +46,14 @@ pub fn publish_canonical_options_index_with_generated_at(
     )
 }
 
-pub fn publish_canonical_mixed_index(index_root: &Path) -> PathBuf {
+pub fn publish_canonical_mixed_index(index_root: &Utf8Path) -> Utf8PathBuf {
     publish_canonical_mixed_index_with_generated_at(index_root, time::OffsetDateTime::now_utc())
 }
 
 pub fn publish_canonical_mixed_index_with_generated_at(
-    index_root: &Path,
+    index_root: &Utf8Path,
     generated_at: time::OffsetDateTime,
-) -> PathBuf {
+) -> Utf8PathBuf {
     let documents = canonical_documents();
     let options_count = documents
         .iter()
@@ -92,12 +90,11 @@ pub fn publish_canonical_mixed_index_with_generated_at(
 }
 
 fn publish_documents_with_manifest_targets(
-    index_root: &Path,
+    index_root: &Utf8Path,
     generated_at: time::OffsetDateTime,
     documents: Vec<SearchDocument>,
     targets: Vec<IndexTargetManifest>,
-) -> PathBuf {
-    let index_root = Utf8Path::from_path(index_root).expect("index root must be valid UTF-8");
+) -> Utf8PathBuf {
     let store = IndexStore::new(index_root);
     let generation = store.create_generation_path().unwrap();
 
@@ -115,7 +112,7 @@ fn publish_documents_with_manifest_targets(
 
     store.write_manifest(&generation, &manifest).unwrap();
     store.publish(&generation).unwrap();
-    store.current_path().unwrap().into_std_path_buf()
+    store.current_path().unwrap()
 }
 
 pub fn assert_canonical_options_manifest_targets(manifest: &IndexGenerationManifest) {

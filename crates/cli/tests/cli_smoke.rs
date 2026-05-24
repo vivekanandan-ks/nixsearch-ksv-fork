@@ -3,12 +3,12 @@ use predicates::prelude::*;
 use tempfile::tempdir;
 
 use nix_search_index_test_support::publish_canonical_options_index;
-use nix_search_test_support::{OPTION_GIT_ENABLE, SOURCE_FIXTURES, write_config};
+use nix_search_test_support::{OPTION_GIT_ENABLE, SOURCE_FIXTURES, utf8_path_buf, write_config};
 
 #[test]
 fn check_config_accepts_valid_fixture_config() {
     let tempdir = tempdir().unwrap();
-    let index_dir = tempdir.path().join("indexes");
+    let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
     let config_path = write_config(&tempdir, &index_dir);
 
     Command::cargo_bin("nix-search")
@@ -24,7 +24,7 @@ fn check_config_accepts_valid_fixture_config() {
 #[test]
 fn search_reads_published_index_and_prints_result() {
     let tempdir = tempdir().unwrap();
-    let index_dir = tempdir.path().join("indexes");
+    let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
     let config_path = write_config(&tempdir, &index_dir);
 
     publish_canonical_options_index(&index_dir);
@@ -41,7 +41,7 @@ fn search_reads_published_index_and_prints_result() {
 #[test]
 fn index_inspect_prints_current_manifest() {
     let tempdir = tempdir().unwrap();
-    let index_dir = tempdir.path().join("indexes");
+    let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
     let config_path = write_config(&tempdir, &index_dir);
 
     publish_canonical_options_index(&index_dir);

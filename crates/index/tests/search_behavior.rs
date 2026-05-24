@@ -1,3 +1,4 @@
+use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
 use nix_search_core::{DocumentKind, SearchDocument};
@@ -13,8 +14,10 @@ use nix_search_test_support::{
 
 fn build_index(docs: Vec<SearchDocument>) -> (tempfile::TempDir, SearchIndex) {
     let tempdir = tempdir().unwrap();
+    let index_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+        .expect("test path must be valid UTF-8");
 
-    let index = SearchIndex::create_or_replace(tempdir.path()).unwrap();
+    let index = SearchIndex::create_or_replace(&index_path).unwrap();
     let mut writer = index.writer().unwrap();
 
     for doc in &docs {
@@ -23,7 +26,7 @@ fn build_index(docs: Vec<SearchDocument>) -> (tempfile::TempDir, SearchIndex) {
 
     writer.commit().unwrap();
 
-    let index = SearchIndex::open(tempdir.path()).unwrap();
+    let index = SearchIndex::open(&index_path).unwrap();
 
     (tempdir, index)
 }

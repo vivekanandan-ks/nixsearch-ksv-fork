@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -143,21 +142,21 @@ pub enum EntryLookupResult {
 }
 
 impl SearchIndex {
-    pub fn create_or_replace(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn create_or_replace(path: impl AsRef<Utf8Path>) -> Result<Self> {
         let path = path.as_ref();
 
         if path.exists() {
             fs::remove_dir_all(path)
-                .with_context(|| format!("failed to remove existing index {}", path.display()))?;
+                .with_context(|| format!("failed to remove existing index {path}"))?;
         }
 
         fs::create_dir_all(path)
-            .with_context(|| format!("failed to create index directory {}", path.display()))?;
+            .with_context(|| format!("failed to create index directory {path}"))?;
 
         let schema = build_schema();
         let fields = IndexFields::from_schema(&schema)?;
         let index = Index::create_in_dir(path, schema)
-            .with_context(|| format!("failed to create Tantivy index at {}", path.display()))?;
+            .with_context(|| format!("failed to create Tantivy index at {path}"))?;
         let reader = index.reader().context("failed to create index reader")?;
 
         Ok(Self {
@@ -167,10 +166,10 @@ impl SearchIndex {
         })
     }
 
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(path: impl AsRef<Utf8Path>) -> Result<Self> {
         let path = path.as_ref();
         let index = Index::open_in_dir(path)
-            .with_context(|| format!("failed to open Tantivy index at {}", path.display()))?;
+            .with_context(|| format!("failed to open Tantivy index at {path}"))?;
         let schema = index.schema();
         let fields = IndexFields::from_schema(&schema)?;
         let reader = index.reader().context("failed to create index reader")?;

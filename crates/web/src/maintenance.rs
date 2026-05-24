@@ -340,7 +340,7 @@ mod tests {
     fn read_current_generation_loads_manifest() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let published_path = publish_canonical_index(index_dir.as_std_path());
+        let published_path = publish_canonical_index(&index_dir);
         let store = IndexStore::new(&index_dir);
 
         let generation = read_current_generation(&store).unwrap();
@@ -348,7 +348,7 @@ mod tests {
         let CurrentGeneration::Found(generation) = generation else {
             panic!("expected published generation");
         };
-        assert_eq!(generation.path.as_std_path(), published_path);
+        assert_eq!(generation.path, published_path);
         assert_canonical_manifest_targets(&generation.manifest);
     }
 
@@ -370,10 +370,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
         let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        publish_canonical_index_with_generated_at(
-            index_dir.as_std_path(),
-            now - TimeDuration::hours(2),
-        );
+        publish_canonical_index_with_generated_at(&index_dir, now - TimeDuration::hours(2));
         let store = IndexStore::new(&index_dir);
 
         let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();
@@ -386,7 +383,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
         let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        publish_canonical_index_with_generated_at(index_dir.as_std_path(), now);
+        publish_canonical_index_with_generated_at(&index_dir, now);
         let store = IndexStore::new(&index_dir);
 
         let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();

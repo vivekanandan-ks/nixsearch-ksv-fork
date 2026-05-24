@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tempfile::TempDir;
@@ -202,9 +202,9 @@ pub fn utf8_path_buf(path: PathBuf) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(path).expect("test path must be valid UTF-8")
 }
 
-pub fn config_toml(index_dir: &Path) -> String {
+pub fn config_toml(index_dir: &Utf8Path) -> String {
     let fixture_path = workspace_fixture_path("fixtures/search-small/options.json");
-    let index_dir = toml_string(&index_dir.display().to_string());
+    let index_dir = toml_string(index_dir.as_str());
     let fixture_path = toml_string(&fixture_path.display().to_string());
 
     format!(
@@ -236,7 +236,7 @@ pub fn config_toml(index_dir: &Path) -> String {
     )
 }
 
-pub fn write_config(dir: &TempDir, index_dir: &Path) -> PathBuf {
+pub fn write_config(dir: &TempDir, index_dir: &Utf8Path) -> PathBuf {
     let path = dir.path().join("nix-search.toml");
     std::fs::write(&path, config_toml(index_dir)).unwrap();
     path
@@ -257,7 +257,7 @@ pub fn assert_contains_doc(docs: &[SearchDocument], name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_toml, toml_string};
+    use super::{config_toml, toml_string, utf8_path_buf};
 
     #[test]
     fn toml_string_escapes_special_characters() {
@@ -272,7 +272,7 @@ mod tests {
     fn config_toml_escapes_index_dir_path() {
         let tempdir = tempfile::tempdir().unwrap();
         let config_path = tempdir.path().join("nix-search.toml");
-        let index_dir = tempdir.path().join("index\"dir");
+        let index_dir = utf8_path_buf(tempdir.path().join("index\"dir"));
 
         std::fs::write(&config_path, config_toml(&index_dir)).unwrap();
 
