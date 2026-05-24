@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::Write as _;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -9,6 +11,9 @@ use tantivy::{Index, IndexReader, IndexWriter, doc};
 use time::OffsetDateTime;
 
 use nix_search_core::{ArtifactKind, DocumentKind, OptionDoc, PackageDoc, SearchDocument};
+
+#[cfg(not(unix))]
+compile_error!("nix-search currently supports Unix platforms only");
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -575,56 +580,183 @@ impl IndexStore {
         })?;
 
         let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
-        let path = self
-            .generations_dir()
-            .join(format!("generation-{timestamp}"));
 
-        fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create generation {}", path.display()))?;
+        for attempt in 0..100 {
+            let path = self.generations_dir().join(format!(
+                "generation-{}-{timestamp}-{attempt}",
+                std::process::id()
+            ));
 
-        Ok(path)
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to create generation {}", path.display())
+                    });
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "failed to create unique generation directory in {}",
+            self.generations_dir().display()
+        )
     }
 
-    // Callers must hold the maintenance/update lock before publishing.
-    // This uses a shared CURRENT.tmp path, so concurrent unlocked publishers can race.
+    // Atomically publishes generation_path as CURRENT. Update callers should still use the
+    // update lock to avoid redundant concurrent generation work.
     pub fn publish(&self, generation_path: &Path) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("failed to create index root {}", self.root.display()))?;
 
-        let generation_path = generation_path
-            .canonicalize()
-            .with_context(|| format!("failed to canonicalize {}", generation_path.display()))?;
+        let generation_path = self.validate_generation_path(generation_path)?;
 
-        let current_tmp = self.root.join("CURRENT.tmp");
+        // On Unix, rename atomically replaces CURRENT with this fully written file.
+        let current_tmp = self.create_temp_file(
+            &self.root,
+            "CURRENT.tmp",
+            generation_path.as_os_str().as_bytes(),
+        )?;
 
-        fs::write(&current_tmp, generation_path.to_string_lossy().as_bytes())
-            .with_context(|| format!("failed to write {}", current_tmp.display()))?;
+        if let Err(error) = fs::rename(&current_tmp, self.current_file()) {
+            let _ = fs::remove_file(&current_tmp);
 
-        fs::rename(&current_tmp, self.current_file()).with_context(|| {
-            format!(
-                "failed to publish current index {}",
-                self.current_file().display()
-            )
-        })?;
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to publish current index {}",
+                    self.current_file().display()
+                )
+            });
+        }
+
+        Self::sync_dir(&self.root)?;
 
         Ok(())
     }
 
+    fn validate_generation_path(&self, generation_path: &Path) -> Result<PathBuf> {
+        let generation_path = generation_path
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", generation_path.display()))?;
+
+        let generations_dir = self.generations_dir().canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize generations dir {}",
+                self.generations_dir().display()
+            )
+        })?;
+
+        if !generation_path.starts_with(&generations_dir) {
+            anyhow::bail!(
+                "generation {} is outside generations dir {}",
+                generation_path.display(),
+                generations_dir.display()
+            );
+        }
+
+        if generation_path.parent() != Some(generations_dir.as_path()) {
+            anyhow::bail!(
+                "generation {} is not a direct child of generations dir {}",
+                generation_path.display(),
+                generations_dir.display()
+            );
+        }
+
+        if !generation_path.is_dir() {
+            anyhow::bail!(
+                "generation {} is not a directory",
+                generation_path.display()
+            );
+        }
+
+        Ok(generation_path)
+    }
+
+    fn create_temp_file(&self, dir: &Path, prefix: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
+
+        for attempt in 0..100 {
+            let temp_path = dir.join(format!(
+                "{prefix}.{}.{}.{}",
+                std::process::id(),
+                timestamp,
+                attempt
+            ));
+
+            let mut file = match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to create {}", temp_path.display()));
+                }
+            };
+
+            if let Err(error) = file.write_all(bytes) {
+                let _ = fs::remove_file(&temp_path);
+
+                return Err(error)
+                    .with_context(|| format!("failed to write {}", temp_path.display()));
+            }
+
+            if let Err(error) = file.sync_all() {
+                let _ = fs::remove_file(&temp_path);
+
+                return Err(error)
+                    .with_context(|| format!("failed to sync {}", temp_path.display()));
+            }
+
+            return Ok(temp_path);
+        }
+
+        anyhow::bail!(
+            "failed to create unique temporary {prefix} file in {}",
+            dir.display()
+        )
+    }
+
+    fn sync_dir(path: &Path) -> Result<()> {
+        fs::File::open(path)
+            .with_context(|| format!("failed to open directory {}", path.display()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync directory {}", path.display()))
+    }
+
     pub fn current_path(&self) -> Result<PathBuf> {
-        let raw = fs::read_to_string(self.current_file()).with_context(|| {
+        self.try_current_path()?.with_context(|| {
             format!(
                 "failed to read current index file {}; run `nix-search update` first",
                 self.current_file().display()
             )
-        })?;
+        })
+    }
 
-        let path = PathBuf::from(raw.trim());
+    pub fn try_current_path(&self) -> Result<Option<PathBuf>> {
+        let raw = match fs::read(self.current_file()) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read current index file {}",
+                        self.current_file().display()
+                    )
+                });
+            }
+        };
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(raw));
 
         if path.as_os_str().is_empty() {
             anyhow::bail!("current index file is empty");
         }
 
-        Ok(path)
+        self.validate_generation_path(&path).map(Some)
     }
 
     pub fn manifest_path(&self, generation_path: &Path) -> PathBuf {
@@ -640,8 +772,17 @@ impl IndexStore {
         let bytes = serde_json::to_vec_pretty(manifest)
             .context("failed to serialize index generation manifest")?;
 
-        fs::write(&path, bytes)
-            .with_context(|| format!("failed to write index metadata {}", path.display()))?;
+        let temp_path =
+            self.create_temp_file(generation_path, "index-manifest.json.tmp", &bytes)?;
+
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+
+            return Err(error)
+                .with_context(|| format!("failed to write index metadata {}", path.display()));
+        }
+
+        Self::sync_dir(generation_path)?;
 
         Ok(())
     }
@@ -661,11 +802,11 @@ impl IndexStore {
     }
 
     pub fn try_current_manifest(&self) -> Result<Option<IndexGenerationManifest>> {
-        if !self.current_file().exists() {
+        let Some(current) = self.try_current_path()? else {
             return Ok(None);
-        }
+        };
 
-        self.current_manifest().map(Some)
+        self.read_manifest(&current).map(Some)
     }
 }
 
@@ -682,9 +823,17 @@ pub struct IndexGenerationManifest {
 
 impl IndexGenerationManifest {
     pub fn new(document_count: usize, targets: Vec<IndexTargetManifest>) -> Self {
+        Self::with_generated_at(document_count, targets, OffsetDateTime::now_utc())
+    }
+
+    pub fn with_generated_at(
+        document_count: usize,
+        targets: Vec<IndexTargetManifest>,
+        generated_at: OffsetDateTime,
+    ) -> Self {
         Self {
             schema_version: INDEX_SCHEMA_VERSION,
-            generated_at: OffsetDateTime::now_utc(),
+            generated_at,
             document_count,
             targets,
         }
@@ -703,10 +852,15 @@ pub struct IndexTargetManifest {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt as _;
+
     use tempfile::tempdir;
 
     use nix_search_core::ArtifactKind;
-    use nix_search_test_support::{REF_SMALL, SOURCE_FIXTURES};
+
+    const SOURCE_FIXTURES: &str = "fixtures";
+    const REF_SMALL: &str = "small";
 
     #[test]
     fn index_store_publishes_current_generation() {
@@ -724,13 +878,235 @@ mod tests {
     }
 
     #[test]
+    fn index_store_creates_distinct_generation_paths() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+
+        let first = store.create_generation_path().unwrap();
+        let second = store.create_generation_path().unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn index_store_publish_updates_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+
+        let first = store.create_generation_path().unwrap();
+        let second = store.create_generation_path().unwrap();
+
+        store.publish(&first).unwrap();
+        store.publish(&second).unwrap();
+
+        assert_eq!(
+            store.current_path().unwrap(),
+            second.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn index_store_publish_removes_temporary_current_file_on_success() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        let generation = store.create_generation_path().unwrap();
+
+        store.publish(&generation).unwrap();
+
+        let temporary_current_files = fs::read_dir(tempdir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("CURRENT.tmp.")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(temporary_current_files.is_empty());
+    }
+
+    #[test]
+    fn index_store_publish_rejects_paths_outside_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path().join("indexes"));
+        store.create_generation_path().unwrap();
+        let external_generation = tempdir.path().join("external-generation");
+        fs::create_dir(&external_generation).unwrap();
+
+        let error = store.publish(&external_generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is outside generations dir"));
+    }
+
+    #[test]
+    fn index_store_publish_rejects_generations_dir_itself() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        store.create_generation_path().unwrap();
+
+        let error = store.publish(&store.generations_dir()).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a direct child"));
+    }
+
+    #[test]
+    fn index_store_publish_rejects_nested_generation_path() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        let generation = store.create_generation_path().unwrap();
+        let nested = generation.join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let error = store.publish(&nested).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a direct child"));
+    }
+
+    #[test]
+    fn index_store_publish_rejects_file_under_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        store.create_generation_path().unwrap();
+        let file = store.generations_dir().join("generation-file");
+        fs::write(&file, b"not a directory").unwrap();
+
+        let error = store.publish(&file).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a directory"));
+    }
+
+    #[test]
+    fn index_store_current_path_preserves_whitespace() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        fs::create_dir_all(store.generations_dir()).unwrap();
+        let path = store
+            .generations_dir()
+            .join("generation with trailing space ");
+        fs::create_dir(&path).unwrap();
+        fs::write(store.current_file(), path.as_os_str().as_bytes()).unwrap();
+
+        assert_eq!(store.current_path().unwrap(), path.canonicalize().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn index_store_reads_non_utf8_current_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        fs::create_dir_all(store.generations_dir()).unwrap();
+        let path = store
+            .generations_dir()
+            .join(OsString::from_vec(b"generation-\xff".to_vec()));
+        fs::create_dir(&path).unwrap();
+        fs::write(store.current_file(), path.as_os_str().as_bytes()).unwrap();
+
+        assert_eq!(store.current_path().unwrap(), path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn index_store_current_path_rejects_paths_outside_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path().join("indexes"));
+        store.create_generation_path().unwrap();
+        let external_generation = tempdir.path().join("external-generation");
+        fs::create_dir(&external_generation).unwrap();
+        fs::write(
+            store.current_file(),
+            external_generation.as_os_str().as_bytes(),
+        )
+        .unwrap();
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("is outside generations dir"));
+    }
+
+    #[test]
+    fn index_store_current_path_rejects_nested_generation_path() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        let generation = store.create_generation_path().unwrap();
+        let nested = generation.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(store.current_file(), nested.as_os_str().as_bytes()).unwrap();
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a direct child"));
+    }
+
+    #[test]
+    fn index_store_current_path_rejects_missing_generation_path() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        store.create_generation_path().unwrap();
+        let missing = store.generations_dir().join("missing-generation");
+        fs::write(store.current_file(), missing.as_os_str().as_bytes()).unwrap();
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to canonicalize"));
+    }
+
+    #[test]
+    fn index_store_current_path_rejects_file_under_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        store.create_generation_path().unwrap();
+        let file = store.generations_dir().join("generation-file");
+        fs::write(&file, b"not a directory").unwrap();
+        fs::write(store.current_file(), file.as_os_str().as_bytes()).unwrap();
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a directory"));
+    }
+
+    #[test]
+    fn index_store_try_current_path_returns_none_when_current_is_missing() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+
+        assert_eq!(store.try_current_path().unwrap(), None);
+    }
+
+    #[test]
+    fn index_store_current_path_errors_with_update_hint_when_current_is_missing() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("run `nix-search update` first"));
+    }
+
+    #[test]
+    fn index_store_current_path_errors_when_current_is_empty() {
+        let tempdir = tempdir().unwrap();
+        let store = super::IndexStore::new(tempdir.path());
+        fs::write(store.current_file(), b"").unwrap();
+
+        let error = store.current_path().unwrap_err();
+
+        assert!(format!("{error:#}").contains("current index file is empty"));
+    }
+
+    #[test]
     fn index_store_writes_and_reads_generation_manifest() {
         let tempdir = tempdir().unwrap();
         let store = super::IndexStore::new(tempdir.path());
 
         let generation = store.create_generation_path().unwrap();
 
-        let manifest = super::IndexGenerationManifest::new(
+        let manifest = super::IndexGenerationManifest::with_generated_at(
             10,
             vec![super::IndexTargetManifest {
                 source: SOURCE_FIXTURES.to_owned(),
@@ -740,6 +1116,7 @@ mod tests {
                 artifact_hash: Some("abc123".into()),
                 revision: None,
             }],
+            time::OffsetDateTime::UNIX_EPOCH,
         );
 
         store.write_manifest(&generation, &manifest).unwrap();
@@ -751,6 +1128,19 @@ mod tests {
         assert_eq!(loaded.targets.len(), 1);
         assert_eq!(loaded.targets[0].source, SOURCE_FIXTURES);
         assert_eq!(loaded.targets[0].ref_id, REF_SMALL);
+
+        let temporary_manifest_files = fs::read_dir(&generation)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("index-manifest.json.tmp.")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(temporary_manifest_files.is_empty());
     }
 
     #[test]

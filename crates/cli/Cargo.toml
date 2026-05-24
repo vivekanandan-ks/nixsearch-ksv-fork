@@ -21,8 +21,7 @@ nix-search-web.workspace = true
 nix-search-ops.workspace = true
 
 [dev-dependencies]
-nix-search-core.workspace = true
-nix-search-index.workspace = true
+nix-search-index-test-support.workspace = true
 nix-search-test-support.workspace = true
 
 assert_cmd.workspace = true

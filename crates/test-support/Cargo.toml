@@ -9,3 +9,4 @@ tempfile.workspace = true
 
 nix-search-config.workspace = true
 nix-search-core.workspace = true
+toml.workspace = true

@@ -26,6 +26,16 @@ pub const PACKAGE_GIT: &str = "git";
 pub const PACKAGE_RIPGREP: &str = "ripgrep";
 pub const PACKAGE_PYTHON_REQUESTS: &str = "python3Packages.requests";
 
+fn workspace_fixture_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative)
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
+}
+
 pub fn ingest_context() -> IngestContext {
     IngestContext {
         source: SOURCE_FIXTURES.to_owned(),
@@ -177,7 +187,7 @@ pub fn app_config(index_dir: impl Into<PathBuf>) -> AppConfig {
                         strip_prefixes: Vec::new(),
                     }),
                     producer: ProducerConfig::ExistingFile {
-                        path: PathBuf::from("fixtures/search-small/options.json"),
+                        path: workspace_fixture_path("fixtures/search-small/options.json"),
                         artifact: ArtifactKind::OptionsJson,
                     },
                 }],
@@ -188,11 +198,15 @@ pub fn app_config(index_dir: impl Into<PathBuf>) -> AppConfig {
 }
 
 pub fn config_toml(index_dir: &Path) -> String {
+    let fixture_path = workspace_fixture_path("fixtures/search-small/options.json");
+    let index_dir = toml_string(&index_dir.display().to_string());
+    let fixture_path = toml_string(&fixture_path.display().to_string());
+
     format!(
         r#"
    [data]
    artifact_url = "file://./data/artifacts"
-   index_dir = "{}"
+   index_dir = {}
 
    [server]
    listen = "127.0.0.1:0"
@@ -210,10 +224,10 @@ pub fn config_toml(index_dir: &Path) -> String {
 
    [sources.fixtures.refs.small.producer]
    type = "existing-file"
-   path = "fixtures/search-small/options.json"
+   path = {}
    artifact = "options-json"
-   "#,
-        index_dir.display()
+    "#,
+        index_dir, fixture_path
     )
 }
 
@@ -234,4 +248,31 @@ pub fn assert_contains_doc(docs: &[SearchDocument], name: &str) {
         "expected docs to contain {name:?}; got {:?}",
         docs.iter().map(SearchDocument::name).collect::<Vec<_>>()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{config_toml, toml_string};
+
+    #[test]
+    fn toml_string_escapes_special_characters() {
+        let value = "quote\" slash\\ newline\n";
+        let document = format!("value = {}", toml_string(value));
+        let parsed: toml::Value = toml::from_str(&document).unwrap();
+
+        assert_eq!(parsed["value"].as_str(), Some(value));
+    }
+
+    #[test]
+    fn config_toml_escapes_index_dir_path() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("nix-search.toml");
+        let index_dir = tempdir.path().join("index\"dir");
+
+        std::fs::write(&config_path, config_toml(&index_dir)).unwrap();
+
+        let config = nix_search_config::AppConfig::load(Some(&config_path)).unwrap();
+
+        assert_eq!(config.data.index_dir, index_dir);
+    }
 }

@@ -72,9 +72,20 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    match maintenance::read_current_generation(&index_store)? {
-        maintenance::CurrentGeneration::Found(generation) => return Ok(generation),
-        maintenance::CurrentGeneration::Missing => {}
+    match maintenance::read_current_generation(&index_store) {
+        Ok(maintenance::CurrentGeneration::Found(generation)) => return Ok(generation),
+        Ok(maintenance::CurrentGeneration::Missing) => {}
+        Err(error) => {
+            if !config.server.bootstrap {
+                return Err(error).context(
+                    "failed to read current index generation; run `nix-search update` first",
+                );
+            }
+
+            tracing::warn!(
+                "failed to read current index generation; bootstrap will rebuild it: {error:#}"
+            );
+        }
     }
 
     if !config.server.bootstrap {
@@ -98,12 +109,17 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
         .await
         .context("failed to join maintenance lock task")??;
 
-    match maintenance::read_current_generation(&index_store)? {
-        maintenance::CurrentGeneration::Found(generation) => {
+    match maintenance::read_current_generation(&index_store) {
+        Ok(maintenance::CurrentGeneration::Found(generation)) => {
             tracing::info!("current index was created by another process while waiting for lock");
             return Ok(generation);
         }
-        maintenance::CurrentGeneration::Missing => {}
+        Ok(maintenance::CurrentGeneration::Missing) => {}
+        Err(error) => {
+            tracing::warn!(
+                "current index generation is still unreadable after acquiring lock; rebuilding it: {error:#}"
+            );
+        }
     }
 
     generate::regenerate_all(config)
@@ -159,5 +175,128 @@ fn log_startup_maintenance_state(
         }
     } else {
         tracing::info!("scheduled regeneration disabled");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use nix_search_index::IndexStore;
+    use nix_search_index_test_support::{
+        assert_canonical_options_manifest_targets, publish_canonical_options_index,
+    };
+    use nix_search_test_support::{REF_SMALL, SOURCE_FIXTURES, app_config};
+    use tempfile::tempdir;
+
+    use super::ensure_current_generation;
+
+    #[tokio::test]
+    async fn ensure_current_generation_returns_existing_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let published_path = publish_canonical_options_index(&index_dir);
+        let config = app_config(&index_dir);
+
+        let generation = ensure_current_generation(&config).await.unwrap();
+
+        assert_eq!(generation.path, published_path);
+        assert_canonical_options_manifest_targets(&generation.manifest);
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_errors_when_bootstrap_disabled() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.server.bootstrap = false;
+
+        let error = ensure_current_generation(&config).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("run `nix-search update` first"));
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_errors_when_no_refs_are_configured() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.sources.clear();
+
+        let error = ensure_current_generation(&config).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("no configured refs"));
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_bootstraps_missing_index() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.data.artifact_url = format!("file://{}", tempdir.path().join("artifacts").display());
+
+        let generation = ensure_current_generation(&config).await.unwrap();
+
+        assert!(generation.path.exists());
+        assert!(generation.manifest.document_count > 0);
+        assert_eq!(generation.manifest.targets.len(), 1);
+        let target = &generation.manifest.targets[0];
+        assert_eq!(target.source, SOURCE_FIXTURES);
+        assert_eq!(target.ref_id, REF_SMALL);
+
+        let store = IndexStore::new(&index_dir);
+        assert_eq!(store.current_path().unwrap(), generation.path);
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_bootstraps_missing_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.data.artifact_url = format!("file://{}", tempdir.path().join("artifacts").display());
+        let store = IndexStore::new(&index_dir);
+        store.create_generation_path().unwrap();
+        let missing = store.generations_dir().join("missing-generation");
+        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+
+        let generation = ensure_current_generation(&config).await.unwrap();
+
+        assert!(generation.path.exists());
+        assert_canonical_options_manifest_targets(&generation.manifest);
+        assert_eq!(store.current_path().unwrap(), generation.path);
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_bootstraps_generation_with_missing_manifest() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.data.artifact_url = format!("file://{}", tempdir.path().join("artifacts").display());
+        let store = IndexStore::new(&index_dir);
+        let generation_without_manifest = store.create_generation_path().unwrap();
+        store.publish(&generation_without_manifest).unwrap();
+
+        let generation = ensure_current_generation(&config).await.unwrap();
+
+        assert!(generation.path.exists());
+        assert_ne!(generation.path, generation_without_manifest);
+        assert_canonical_options_manifest_targets(&generation.manifest);
+        assert_eq!(store.current_path().unwrap(), generation.path);
+    }
+
+    #[tokio::test]
+    async fn ensure_current_generation_errors_on_invalid_current_when_bootstrap_disabled() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = tempdir.path().join("indexes");
+        let mut config = app_config(&index_dir);
+        config.server.bootstrap = false;
+        let store = IndexStore::new(&index_dir);
+        store.create_generation_path().unwrap();
+        let missing = store.generations_dir().join("missing-generation");
+        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+
+        let error = ensure_current_generation(&config).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("run `nix-search update` first"));
     }
 }

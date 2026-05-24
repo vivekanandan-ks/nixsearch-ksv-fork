@@ -5,6 +5,7 @@ members = [
   "crates/config",
   "crates/core",
   "crates/index",
+  "crates/index-test-support",
   "crates/ingest",
   "crates/ops",
   "crates/source",
@@ -36,6 +37,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+toml = "0.8"
 tantivy = "0.26.1"
 tokio = { version = "1", features = [
   "macros",
@@ -62,6 +64,7 @@ sha2 = "0.11"
 nix-search-core = { path = "crates/core" }
 nix-search-ingest = { path = "crates/ingest" }
 nix-search-index = { path = "crates/index" }
+nix-search-index-test-support = { path = "crates/index-test-support" }
 nix-search-config = { path = "crates/config" }
 nix-search-store = { path = "crates/store" }
 nix-search-source = { path = "crates/source" }

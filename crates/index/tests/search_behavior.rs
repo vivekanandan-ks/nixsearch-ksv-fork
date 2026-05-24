@@ -4,6 +4,7 @@ use nix_search_core::{DocumentKind, SearchDocument};
 use nix_search_index::{
     EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions, SearchScope,
 };
+
 use nix_search_test_support::{
     OPTION_GIT_ENABLE, OPTION_SYSTEMD_BOOT_ENABLE, OPTION_TAILSCALE_ENABLE, PACKAGE_GIT,
     PACKAGE_RIPGREP, REF_SMALL, SOURCE_FIXTURES, canonical_documents, ingest_context_for,

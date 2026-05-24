@@ -1,10 +1,8 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use time::OffsetDateTime;
 
 use nix_search_config::AppConfig;
@@ -60,11 +58,26 @@ async fn run_loop(config: Arc<AppConfig>, index_path: Arc<RwLock<PathBuf>>, inte
             Ok(CurrentGeneration::Found(generation)) => generation,
             Ok(CurrentGeneration::Missing) => {
                 tracing::warn!("current index disappeared during maintenance loop");
-                tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+
+                if !regeneration_enabled {
+                    tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+                    continue;
+                }
+
+                let outcome = run_scheduled_regeneration(&config, interval).await;
+                sleep_after_regeneration_outcome(outcome, interval).await;
+
                 continue;
             }
             Err(error) => {
                 tracing::warn!("failed to read current index generation: {error:#}");
+
+                if regeneration_enabled {
+                    let outcome = run_scheduled_regeneration(&config, interval).await;
+                    sleep_after_regeneration_outcome(outcome, interval).await;
+                    continue;
+                }
+
                 tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
                 continue;
             }
@@ -90,26 +103,31 @@ async fn run_loop(config: Arc<AppConfig>, index_path: Arc<RwLock<PathBuf>>, inte
             continue;
         }
 
-        match run_scheduled_regeneration(&config).await {
-            MaintenanceOutcome::Completed => {
-                continue;
-            }
-            MaintenanceOutcome::LockBusy => {
-                tracing::info!("scheduled regeneration skipped; maintenance lock is held");
-                let delay = clamp_duration(interval, MIN_LOCK_BUSY_RETRY, MAX_LOCK_BUSY_RETRY)
-                    .min(RECONCILE_INTERVAL);
-                tokio::time::sleep(delay).await;
-            }
-            MaintenanceOutcome::Failed => {
-                let delay = clamp_duration(interval, MIN_FAILURE_RETRY, MAX_FAILURE_RETRY)
-                    .min(RECONCILE_INTERVAL);
-                tokio::time::sleep(delay).await;
-            }
+        let outcome = run_scheduled_regeneration(&config, interval).await;
+        sleep_after_regeneration_outcome(outcome, interval).await;
+    }
+}
+
+async fn sleep_after_regeneration_outcome(outcome: MaintenanceOutcome, interval: Duration) {
+    match outcome {
+        MaintenanceOutcome::Completed => {
+            // The next loop iteration will reconcile against the just-published generation.
+        }
+        MaintenanceOutcome::LockBusy => {
+            tracing::info!("scheduled regeneration skipped; maintenance lock is held");
+            let delay = clamp_duration(interval, MIN_LOCK_BUSY_RETRY, MAX_LOCK_BUSY_RETRY)
+                .min(RECONCILE_INTERVAL);
+            tokio::time::sleep(delay).await;
+        }
+        MaintenanceOutcome::Failed => {
+            let delay = clamp_duration(interval, MIN_FAILURE_RETRY, MAX_FAILURE_RETRY)
+                .min(RECONCILE_INTERVAL);
+            tokio::time::sleep(delay).await;
         }
     }
 }
 
-async fn run_scheduled_regeneration(config: &AppConfig) -> MaintenanceOutcome {
+async fn run_scheduled_regeneration(config: &AppConfig, interval: Duration) -> MaintenanceOutcome {
     let update_lock = match lock::try_acquire_update_lock(&config.data.index_dir) {
         Ok(Some(update_lock)) => update_lock,
         Ok(None) => return MaintenanceOutcome::LockBusy,
@@ -118,6 +136,21 @@ async fn run_scheduled_regeneration(config: &AppConfig) -> MaintenanceOutcome {
             return MaintenanceOutcome::Failed;
         }
     };
+
+    let index_store = IndexStore::new(&config.data.index_dir);
+    match current_generation_is_due(&index_store, interval, OffsetDateTime::now_utc()) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                "scheduled regeneration skipped; current index was refreshed before lock acquisition"
+            );
+            return MaintenanceOutcome::Completed;
+        }
+        Err(error) => {
+            tracing::error!("failed to verify scheduled regeneration due state: {error:#}");
+            return MaintenanceOutcome::Failed;
+        }
+    }
 
     let start = Instant::now();
 
@@ -140,27 +173,31 @@ async fn run_scheduled_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     }
 }
 
-pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<CurrentGeneration> {
-    let current_file = index_store.current_file();
+pub(crate) fn current_generation_is_due(
+    index_store: &IndexStore,
+    interval: Duration,
+    now: OffsetDateTime,
+) -> Result<bool> {
+    match read_current_generation(index_store) {
+        Ok(CurrentGeneration::Found(generation)) => {
+            let Some(next_due) = next_due(generation.manifest.generated_at, interval) else {
+                bail!("failed to compute next scheduled regeneration time")
+            };
 
-    let raw = match fs::read_to_string(&current_file) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(CurrentGeneration::Missing),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to read current index file {}",
-                    current_file.display()
-                )
-            });
+            Ok(now >= next_due)
         }
-    };
-
-    let path = PathBuf::from(raw.trim());
-
-    if path.as_os_str().is_empty() {
-        bail!("current index file is empty")
+        Ok(CurrentGeneration::Missing) => Ok(true),
+        Err(error) => {
+            tracing::warn!("treating unreadable current index generation as due: {error:#}");
+            Ok(true)
+        }
     }
+}
+
+pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<CurrentGeneration> {
+    let Some(path) = index_store.try_current_path()? else {
+        return Ok(CurrentGeneration::Missing);
+    };
 
     let manifest = index_store.read_manifest(&path)?;
 
@@ -210,11 +247,22 @@ pub(crate) fn clamp_duration(value: Duration, min: Duration, max: Duration) -> D
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::{Arc, RwLock};
+    use std::time::Duration;
 
+    use nix_search_index::IndexStore;
+    use nix_search_index_test_support::{
+        assert_canonical_manifest_targets, publish_canonical_index,
+        publish_canonical_index_with_generated_at,
+    };
+    use tempfile::tempdir;
     use time::Duration as TimeDuration;
 
-    use super::{clamp_duration, duration_until, next_due, reconcile_served_generation};
+    use super::{
+        CurrentGeneration, clamp_duration, current_generation_is_due, duration_until, next_due,
+        read_current_generation, reconcile_served_generation,
+    };
 
     #[test]
     fn next_due_adds_interval() {
@@ -269,5 +317,99 @@ mod tests {
         reconcile_served_generation(&path, std::path::Path::new("/current"));
 
         assert_eq!(*path.read().unwrap(), std::path::PathBuf::from("/current"));
+    }
+
+    #[test]
+    fn read_current_generation_returns_missing_when_current_absent() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(tempdir.path());
+
+        let generation = read_current_generation(&store).unwrap();
+
+        assert!(matches!(generation, CurrentGeneration::Missing));
+    }
+
+    #[test]
+    fn read_current_generation_loads_manifest() {
+        let tempdir = tempdir().unwrap();
+        let published_path = publish_canonical_index(tempdir.path());
+        let store = IndexStore::new(tempdir.path());
+
+        let generation = read_current_generation(&store).unwrap();
+
+        let CurrentGeneration::Found(generation) = generation else {
+            panic!("expected published generation");
+        };
+        assert_eq!(generation.path, published_path);
+        assert_canonical_manifest_targets(&generation.manifest);
+    }
+
+    #[test]
+    fn read_current_generation_errors_on_empty_current() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(tempdir.path());
+        fs::create_dir_all(tempdir.path()).unwrap();
+        fs::write(store.current_file(), "").unwrap();
+
+        let error = read_current_generation(&store).unwrap_err();
+
+        assert!(format!("{error:#}").contains("current index file is empty"));
+    }
+
+    #[test]
+    fn current_generation_is_due_returns_true_for_stale_generation() {
+        let tempdir = tempdir().unwrap();
+        let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
+        publish_canonical_index_with_generated_at(tempdir.path(), now - TimeDuration::hours(2));
+        let store = IndexStore::new(tempdir.path());
+
+        let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();
+
+        assert!(due);
+    }
+
+    #[test]
+    fn current_generation_is_due_returns_false_for_fresh_generation() {
+        let tempdir = tempdir().unwrap();
+        let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
+        publish_canonical_index_with_generated_at(tempdir.path(), now);
+        let store = IndexStore::new(tempdir.path());
+
+        let due = current_generation_is_due(&store, Duration::from_secs(60 * 60), now).unwrap();
+
+        assert!(!due);
+    }
+
+    #[test]
+    fn current_generation_is_due_returns_true_when_current_missing() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(tempdir.path());
+
+        let due = current_generation_is_due(
+            &store,
+            Duration::from_secs(60 * 60),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert!(due);
+    }
+
+    #[test]
+    fn current_generation_is_due_returns_true_for_invalid_current() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(tempdir.path());
+        fs::create_dir_all(tempdir.path()).unwrap();
+        let missing = tempdir.path().join("missing");
+        fs::write(store.current_file(), missing.to_string_lossy().as_bytes()).unwrap();
+
+        let due = current_generation_is_due(
+            &store,
+            Duration::from_secs(60 * 60),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert!(due);
     }
 }

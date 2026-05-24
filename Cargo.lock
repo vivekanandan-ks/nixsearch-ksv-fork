@@ -1487,6 +1487,7 @@ dependencies = [
  "nix-search-config",
  "nix-search-core",
  "nix-search-index",
+ "nix-search-index-test-support",
  "nix-search-ingest",
  "nix-search-ops",
  "nix-search-source",
@@ -1532,6 +1533,16 @@ dependencies = [
  "serde_json",
  "tantivy",
  "tempfile",
+ "time",
+]
+
+[[package]]
+name = "nix-search-index-test-support"
+version = "0.1.0"
+dependencies = [
+ "nix-search-core",
+ "nix-search-index",
+ "nix-search-test-support",
  "time",
 ]
 
@@ -1603,6 +1614,7 @@ dependencies = [
  "nix-search-config",
  "nix-search-core",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -1617,10 +1629,12 @@ dependencies = [
  "nix-search-config",
  "nix-search-core",
  "nix-search-index",
+ "nix-search-index-test-support",
  "nix-search-ops",
  "nix-search-test-support",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "tower-http",
