@@ -2,10 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use nix_search_config::{AppConfig, ProducerConfig};
+use nix_search_config::{
+    AppConfig, DownloadCompression as ConfigDownloadCompression, ProducerConfig,
+};
 use nix_search_core::ArtifactKind;
 use nix_search_source::{
-    ChannelOptionsJsonProducer, ChannelPackagesJsonProducer, EvalModulesProducer,
+    ChannelOptionsJsonProducer, ChannelPackagesJsonProducer,
+    DownloadCompression as SourceDownloadCompression, DownloadProducer, EvalModulesProducer,
     ExistingFileProducer, NixBuildOptionsJsonProducer, ProduceRequest, ProducedArtifact, Producer,
 };
 use nix_search_store::{ArtifactRef, ArtifactStore};
@@ -84,6 +87,27 @@ pub async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result
             })
         }
 
+        ProducerConfig::Download {
+            url,
+            artifact,
+            revision_url,
+            compression,
+        } => {
+            let producer = DownloadProducer::new(
+                url,
+                *artifact,
+                revision_url.clone(),
+                source_download_compression(*compression),
+            );
+
+            producer.produce(store, &request).await.with_context(|| {
+                format!(
+                    "failed to download artifact for {}/{}",
+                    target.source_id, target.ref_config.id
+                )
+            })
+        }
+
         unsupported => bail!(
             "producer {:?} is configured but not implemented yet",
             unsupported.kind()
@@ -127,6 +151,15 @@ pub fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
         ProducerConfig::Download { artifact, .. } => *artifact,
         ProducerConfig::CustomCommand { artifact, .. } => *artifact,
         ProducerConfig::FlakeOutput { .. } => ArtifactKind::FlakeInfoJson,
+    }
+}
+
+fn source_download_compression(
+    compression: ConfigDownloadCompression,
+) -> SourceDownloadCompression {
+    match compression {
+        ConfigDownloadCompression::None => SourceDownloadCompression::None,
+        ConfigDownloadCompression::Brotli => SourceDownloadCompression::Brotli,
     }
 }
 

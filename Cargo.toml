@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive"] }
 datastar = { version = "0.3", features = ["axum"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
+httpmock = "0.8"
 object_store = "0.13"
 predicates = "3"
 reqwest = "0.13"

@@ -20,4 +20,6 @@ nix-search-store.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+httpmock.workspace = true
+
 nix-search-test-support.workspace = true

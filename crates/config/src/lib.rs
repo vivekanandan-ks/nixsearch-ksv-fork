@@ -612,6 +612,10 @@ pub enum ProducerConfig {
     Download {
         url: String,
         artifact: ArtifactKind,
+        #[serde(default)]
+        revision_url: Option<String>,
+        #[serde(default)]
+        compression: DownloadCompression,
     },
 
     CustomCommand {
@@ -623,6 +627,14 @@ pub enum ProducerConfig {
         #[serde(rename = "ref")]
         source_ref: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DownloadCompression {
+    #[default]
+    None,
+    Brotli,
 }
 
 impl ProducerConfig {
@@ -675,8 +687,14 @@ impl ProducerConfig {
                 }
             }
 
-            Self::Download { url, .. } => {
+            Self::Download {
+                url, revision_url, ..
+            } => {
                 validate_producer_non_empty(source_id, ref_id, "url", url)?;
+
+                if let Some(revision_url) = revision_url {
+                    validate_producer_non_empty(source_id, ref_id, "revision_url", revision_url)?;
+                }
             }
 
             Self::CustomCommand { command, .. } => {
@@ -794,7 +812,7 @@ mod tests {
 
     use nix_search_core::{ArtifactKind, SourceLinkConfig};
 
-    use crate::{NIXOS_COLOR, NIXPKGS_COLOR};
+    use crate::{DownloadCompression, NIXOS_COLOR, NIXPKGS_COLOR};
 
     use super::{AppConfig, ProducerConfig, ProducerKind, SourceKind};
 
@@ -998,6 +1016,112 @@ mod tests {
             }
             other => panic!("unexpected producer: {other:?}"),
         }
+    }
+
+    #[test]
+    fn loads_download_producer() {
+        let config = load_toml(
+            r#"
+            [sources.fixtures]
+            name = "Fixtures"
+            kind = "options"
+            [sources.fixtures.refs.small.producer]
+            type = "download"
+            url = "https://example.com/options.json"
+            artifact = "options-json"
+            "#,
+        );
+        let producer = &config.sources[FIXTURES_SOURCE].refs[0].producer;
+        assert_eq!(producer.kind(), ProducerKind::Download);
+        match producer {
+            ProducerConfig::Download {
+                url,
+                artifact,
+                revision_url,
+                compression,
+            } => {
+                assert_eq!(url, "https://example.com/options.json");
+                assert_eq!(*artifact, ArtifactKind::OptionsJson);
+                assert_eq!(revision_url, &None);
+                assert_eq!(*compression, DownloadCompression::None);
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loads_download_producer_with_revision_and_compression() {
+        let config = load_toml(
+            r#"
+            [sources.fixtures]
+            name = "Fixtures"
+            kind = "options"
+
+            [sources.fixtures.refs.small.producer]
+            type = "download"
+            url = "https://example.com/options.json.br"
+            revision_url = "https://example.com/revision"
+            artifact = "options-json"
+            compression = "brotli"
+            "#,
+        );
+
+        let producer = &config.sources[FIXTURES_SOURCE].refs[0].producer;
+
+        match producer {
+            ProducerConfig::Download {
+                url,
+                artifact,
+                revision_url,
+                compression,
+            } => {
+                assert_eq!(url, "https://example.com/options.json.br");
+                assert_eq!(*artifact, ArtifactKind::OptionsJson);
+                assert_eq!(
+                    revision_url.as_deref(),
+                    Some("https://example.com/revision")
+                );
+                assert_eq!(*compression, DownloadCompression::Brotli);
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_download_url() {
+        let error = load_toml_error(
+            r#"
+            [sources.fixtures]
+            name = "Fixtures"
+            kind = "options"
+
+            [sources.fixtures.refs.small.producer]
+            type = "download"
+            url = ""
+            artifact = "options-json"
+            "#,
+        );
+
+        assert_error_contains(&error, "url must not be empty");
+    }
+
+    #[test]
+    fn rejects_empty_download_revision_url() {
+        let error = load_toml_error(
+            r#"
+            [sources.fixtures]
+            name = "Fixtures"
+            kind = "options"
+
+            [sources.fixtures.refs.small.producer]
+            type = "download"
+            url = "https://example.com/options.json"
+            revision_url = ""
+            artifact = "options-json"
+            "#,
+        );
+
+        assert_error_contains(&error, "revision_url must not be empty");
     }
 
     #[test]
