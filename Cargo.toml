@@ -1,18 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-  "crates/cli",
-  "crates/config",
-  "crates/core",
-  "crates/index",
-  "crates/index-test-support",
-  "crates/ingest",
-  "crates/ops",
-  "crates/source",
-  "crates/store",
-  "crates/test-support",
-  "crates/web",
-]
+members = ["crates/*"]
 metadata.crane.name = "nix-search"
 
 [workspace.package]
