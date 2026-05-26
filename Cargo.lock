@@ -1692,10 +1692,12 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "figment",
+ "indexmap",
  "nixsearch-core",
  "serde",
  "tempfile",
  "thiserror",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]

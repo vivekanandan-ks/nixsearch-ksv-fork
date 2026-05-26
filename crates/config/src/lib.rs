@@ -5,6 +5,7 @@ use std::time::Duration;
 use camino::Utf8PathBuf;
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -41,14 +42,14 @@ const HJEM_RUM_COLOR: &str = "#ec4899";
 pub struct AppConfig {
     pub data: DataConfig,
     pub server: ServerConfig,
-    pub sources: BTreeMap<String, SourceConfig>,
+    pub sources: IndexMap<String, SourceConfig>,
 }
 
 impl AppConfig {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut figment = Figment::from(Serialized::defaults(Self::default()));
 
-        if let Some(path) = path {
+        let source_order = if let Some(path) = path {
             if !path.exists() {
                 return Err(ConfigError::Validation(format!(
                     "config file does not exist: {}",
@@ -57,16 +58,31 @@ impl AppConfig {
             }
 
             figment = figment.merge(Toml::file(path));
-        }
+            source_key_order_from_toml(path)
+        } else {
+            Vec::new()
+        };
 
         figment = figment.merge(Env::prefixed("NIXSEARCH_").split("__"));
 
         let raw: RawAppConfig = figment.extract()?;
-        let config = raw.into_app_config()?;
+        let mut config = raw.into_app_config()?;
+
+        if !source_order.is_empty() {
+            config.reorder_sources(&source_order);
+        }
 
         config.validate()?;
 
         Ok(config)
+    }
+
+    fn reorder_sources(&mut self, order: &[String]) {
+        self.sources.sort_by(|a, _, b, _| {
+            let pos_a = order.iter().position(|k| k == a).unwrap_or(usize::MAX);
+            let pos_b = order.iter().position(|k| k == b).unwrap_or(usize::MAX);
+            pos_a.cmp(&pos_b)
+        });
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -144,12 +160,12 @@ impl AppConfig {
 struct RawAppConfig {
     data: DataConfig,
     server: ServerConfig,
-    sources: BTreeMap<String, RawSourceConfig>,
+    sources: IndexMap<String, RawSourceConfig>,
 }
 
 impl RawAppConfig {
     fn into_app_config(self) -> Result<AppConfig> {
-        let mut sources = BTreeMap::new();
+        let mut sources = IndexMap::new();
 
         for (source_id, source) in self.sources {
             sources.insert(source_id.clone(), source.into_source_config(&source_id)?);
@@ -584,7 +600,7 @@ impl RawSourceConfig {
         let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
         Ok(SourceConfig {
-            name: self.name.or_else(|| Some("Hjem Rum".to_owned())),
+            name: self.name.or_else(|| Some("Hjem-Rum".to_owned())),
             color: self.color.or_else(|| Some(HJEM_RUM_COLOR.to_owned())),
             kind: SourceKind::Options,
             default_ref,
@@ -630,6 +646,24 @@ fn github_source_links_with_strip_prefixes(
         strip_prefixes: strip_prefixes.into_iter().map(ToOwned::to_owned).collect(),
     }
 }
+
+fn source_key_order_from_toml(path: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+
+    let table: toml::Table = match content.parse() {
+        Ok(table) => table,
+        Err(_) => return Vec::new(),
+    };
+
+    match table.get("sources").and_then(|v| v.as_table()) {
+        Some(sources) => sources.keys().cloned().collect(),
+        None => Vec::new(),
+    }
+}
+
 fn reject_conflicting_kind(
     configured: Option<SourceKind>,
     expected: SourceKind,
@@ -1310,6 +1344,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_source_order_from_config_file() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("config crate should live under crates/config");
+        let path = repo_root.join("nixsearch.example.toml");
+
+        let config = AppConfig::load(Some(&path)).unwrap();
+        let source_ids: Vec<&str> = config.sources.keys().map(|s| s.as_str()).collect();
+
+        assert_eq!(
+            source_ids,
+            vec![
+                "nixpkgs",
+                "nixos",
+                "home-manager",
+                "darwin",
+                "hjem",
+                "hjem-rum",
+                "fixtures",
+                "eval-fixture",
+            ]
+        );
+    }
+
+    #[test]
     fn loads_existing_file_producer() {
         let config = load_toml(fixture_existing_file_source_toml());
         let producer = &config.sources[FIXTURES_SOURCE].refs[0].producer;
@@ -1870,7 +1931,6 @@ mod tests {
         let config = load_toml(
             r#"
             [sources.darwin]
-            name = "nix-darwin"
             preset = "nix-darwin-options"
             preset_refs = ["master"]
             "#,
@@ -1878,7 +1938,7 @@ mod tests {
 
         let source = &config.sources["darwin"];
 
-        assert_eq!(source.name.as_deref(), Some("nix-darwin"));
+        assert_eq!(source.name.as_deref(), Some("Darwin"));
         assert_eq!(source.kind, SourceKind::Options);
         assert_eq!(source.color.as_deref(), Some(NIX_DARWIN_COLOR));
         assert_eq!(source.refs.len(), 1);
@@ -1951,7 +2011,6 @@ mod tests {
         let config = load_toml(
             r#"
             [sources.hjem]
-            name = "Hjem"
             preset = "hjem-options"
             preset_refs = ["main"]
             "#,
@@ -1986,14 +2045,13 @@ mod tests {
         let config = load_toml(
             r#"
             [sources.hjem-rum]
-            name = "Hjem Rum"
             preset = "hjem-rum-options"
             preset_refs = ["main"]
             "#,
         );
 
         let source = &config.sources["hjem-rum"];
-        assert_eq!(source.name.as_deref(), Some("Hjem Rum"));
+        assert_eq!(source.name.as_deref(), Some("Hjem-Rum"));
         assert_eq!(source.kind, SourceKind::Options);
         assert_eq!(source.color.as_deref(), Some(HJEM_RUM_COLOR));
 

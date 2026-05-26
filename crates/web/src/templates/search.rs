@@ -18,20 +18,18 @@ pub fn render_form(
 
     html! {
         form.search-form action=(form_action) method="get" {
+            @if has_multiple_sources {
+                (render_source_tabs(config, source_filter))
+            }
+
             div.search-bar-row {
-                div.search-input-wrap {
-                    div.ref-radios data-nixsearch-ref-container="" {
-                        (render_ref_radios(config, source_filter, ""))
-                    }
+                input type="search" name="q" value=(q)
+                    placeholder="Search packages and options…"
+                    autocomplete="off" autofocus
+                    data-nixsearch-input="q";
 
-                    input type="search" name="q" value=(q)
-                        placeholder="Search packages and options…"
-                        autocomplete="off" autofocus
-                        data-nixsearch-input="q";
-                }
-
-                @if has_multiple_sources {
-                    (render_source_tabs(config, source_filter))
+                div.ref-radios data-nixsearch-ref-container="" {
+                    (render_ref_radios(config, source_filter, ""))
                 }
             }
 
@@ -62,13 +60,9 @@ fn render_source_tabs(config: &AppConfig, selected: &SourceFilter) -> Markup {
                     }
                 }
             }
-            button.source-tabs-overflow type="button"
-                data-nixsearch-overflow-toggle=""
-                aria-label="More sources"
-                hidden {
-                "▾"
-            }
-            div.source-tabs-dropdown hidden data-nixsearch-overflow-menu="" {}
+            select.source-tabs-overflow-select
+                hidden
+                data-nixsearch-overflow-select="" {}
         }
     }
 }

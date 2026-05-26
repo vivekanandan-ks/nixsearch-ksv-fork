@@ -65,38 +65,28 @@ body {
   letter-spacing: -0.01em;
   flex-shrink: 0;
   align-self: flex-end;
-  padding-bottom: 0.5rem;
+  padding-bottom: 0.55rem;
 }
 
 /* ─── Search form layout ─── */
 
 .search-form {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
-  gap: 0.75rem;
+  gap: 0.3rem;
 }
 
 .search-bar-row {
   display: flex;
-  align-items: stretch;
-  flex: 1;
-  min-width: 0;
+  align-items: center;
   gap: 0.75rem;
 }
 
-.search-input-wrap {
+.search-bar-row input[type="search"] {
   width: 50%;
   flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 0.3rem;
-}
-
-.search-input-wrap input[type="search"] {
-  width: 100%;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
@@ -108,11 +98,11 @@ body {
   transition: border-color 0.15s;
 }
 
-.search-input-wrap input[type="search"]:focus {
+.search-bar-row input[type="search"]:focus {
   border-color: var(--accent);
 }
 
-.search-input-wrap input[type="search"]::placeholder {
+.search-bar-row input[type="search"]::placeholder {
   color: var(--text-dim);
 }
 
@@ -124,7 +114,6 @@ body {
   gap: 0.5rem;
   min-height: 1.4rem;
   flex-wrap: wrap;
-  padding-left: 0.75rem;
 }
 
 .ref-radio-label {
@@ -175,21 +164,16 @@ body {
 /* ─── Source tabs (pendaflex) ─── */
 
 .source-tabs-container {
-  flex: 1;
-  min-width: 0;
   display: flex;
   align-items: center;
   position: relative;
-  align-self: flex-end;
 }
 
 .source-tabs {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 2px;
   overflow: hidden;
-  flex: 1;
-  min-width: 0;
 }
 
 .source-tab {
@@ -231,58 +215,24 @@ body {
   border-radius: 2px 2px 0 0;
 }
 
-/* ─── Source tabs overflow dropdown ─── */
+/* ─── Source tabs overflow (native select) ─── */
 
-.source-tabs-overflow {
-  all: unset;
-  cursor: pointer;
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  padding: 0.3rem 0.5rem 0.4rem;
-  border-radius: 6px 6px 0 0;
-  border: 1px solid transparent;
-  border-bottom: none;
-  position: relative;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s;
-}
-
-.source-tabs-overflow:hover {
-  color: var(--text);
-  background: var(--surface);
-}
-
-.source-tabs-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 110;
-  background: var(--surface);
+.source-tabs-overflow-select {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 0.3rem 0;
-  min-width: 140px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
-}
-
-.source-tabs-dropdown button {
-  all: unset;
-  display: block;
-  width: 100%;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--tab-color, var(--text-dim));
+  background: var(--bg);
+  color: var(--text);
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.1s;
+  outline: none;
+  flex-shrink: 0;
 }
 
-.source-tabs-dropdown button:hover {
-  background: color-mix(in srgb, var(--tab-color, var(--text-dim)) 12%, transparent);
-}
-
-.source-tabs-dropdown button[data-active] {
-  font-weight: 700;
+.source-tabs-overflow-select:focus {
+  border-color: var(--accent);
 }
 
 /* ─── Hidden elements ─── */
@@ -610,6 +560,8 @@ a:hover {
 
   .site-title {
     order: -1;
+    padding-bottom: 0;
+    align-self: center;
   }
 
   .search-form {
@@ -620,15 +572,11 @@ a:hover {
   .search-bar-row {
     flex-direction: column;
     align-items: stretch;
-    gap: 0.5rem;
+    gap: 0.4rem;
   }
 
-  .search-input-wrap {
+  .search-bar-row input[type="search"] {
     width: 100%;
-  }
-
-  .source-tabs-container {
-    align-self: auto;
   }
 
   .source-tabs {

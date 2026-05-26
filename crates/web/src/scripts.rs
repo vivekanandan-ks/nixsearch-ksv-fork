@@ -273,70 +273,80 @@ pub fn navigation_script() -> String {
 
         function computeTabOverflow() {
           const tabsNav = document.querySelector('.source-tabs');
-          const overflowBtn = document.querySelector('[data-nixsearch-overflow-toggle]');
-          const dropdownEl = document.querySelector('[data-nixsearch-overflow-menu]');
-          if (!tabsNav || !overflowBtn || !dropdownEl) return;
+          const overflowSelect = document.querySelector('[data-nixsearch-overflow-select]');
+          if (!tabsNav || !overflowSelect) return;
 
           const tabs = Array.from(tabsNav.querySelectorAll('.source-tab'));
           if (tabs.length === 0) return;
 
-          // Reset: show all tabs, hide overflow elements
+          // Reset: show all tabs, hide overflow select
           tabs.forEach((tab) => { tab.style.display = ""; });
-          overflowBtn.hidden = true;
-          dropdownEl.hidden = true;
-          dropdownEl.innerHTML = "";
+          overflowSelect.hidden = true;
+          overflowSelect.innerHTML = "";
 
-          // Measure available width (account for overflow button)
-          const containerWidth = tabsNav.offsetWidth;
+          // Check if tabs actually overflow the container
+          if (tabsNav.scrollWidth <= tabsNav.clientWidth) return;
+
+          // Tabs overflow — figure out which ones fit.
+          // Show the select first so we can account for its width.
+          overflowSelect.hidden = false;
+          const selectWidth = overflowSelect.offsetWidth + 8; // 8px breathing room
+          const availableWidth = tabsNav.clientWidth - selectWidth;
+
           let totalWidth = 0;
           let overflowIndex = -1;
 
-          // Reserve space for the overflow button
-          const btnWidth = 32;
-
           for (let i = 0; i < tabs.length; i++) {
             totalWidth += tabs[i].offsetWidth + 2; // 2px gap
-            if (totalWidth > containerWidth - btnWidth && i > 0) {
+            if (totalWidth > availableWidth && i > 0) {
               overflowIndex = i;
               break;
             }
           }
 
-          if (overflowIndex === -1) return; // All tabs fit
-
-          // Hide overflowing tabs and populate dropdown
-          overflowBtn.hidden = false;
-          const overflowTabs = tabs.slice(overflowIndex);
-          overflowTabs.forEach((tab) => { tab.style.display = "none"; });
-
-          dropdownEl.innerHTML = overflowTabs
-            .map((tab) => {
-              const sourceId = tab.dataset.nixsearchSource || "";
-              const label = tab.textContent.trim();
-              const color = getComputedStyle(tab).getPropertyValue("--tab-color").trim();
-              const active = tab.hasAttribute("data-active") ? ' data-active=""' : "";
-              return `<button type="button" data-nixsearch-source="${sourceId}" style="--tab-color: ${color};"${active}>${label}</button>`;
-            })
-            .join("");
-        }
-
-        // ─── Overflow dropdown toggle ───
-
-        document.addEventListener("click", (evt) => {
-          const toggle = evt.target.closest('[data-nixsearch-overflow-toggle]');
-          if (toggle) {
-            evt.preventDefault();
-            evt.stopPropagation();
-            const dropdown = document.querySelector('[data-nixsearch-overflow-menu]');
-            if (dropdown) dropdown.hidden = !dropdown.hidden;
+          if (overflowIndex === -1) {
+            // Everything fits after all (edge case)
+            overflowSelect.hidden = true;
             return;
           }
 
-          // Close dropdown on outside click
-          if (!evt.target.closest('[data-nixsearch-overflow-menu]')) {
-            const dropdown = document.querySelector('[data-nixsearch-overflow-menu]');
-            if (dropdown) dropdown.hidden = true;
+          // Hide overflowing tabs and populate native select
+          const overflowTabs = tabs.slice(overflowIndex);
+          overflowTabs.forEach((tab) => { tab.style.display = "none"; });
+
+          const activeSource = currentSourceFromTabs();
+          let hasActiveInOverflow = false;
+
+          overflowSelect.innerHTML = '<option value="" disabled selected>More…</option>' +
+            overflowTabs
+              .map((tab) => {
+                const sourceId = tab.dataset.nixsearchSource || "";
+                const label = tab.textContent.trim();
+                const isActive = tab.hasAttribute("data-active");
+                if (isActive) hasActiveInOverflow = true;
+                return `<option value="${sourceId}"${isActive ? " selected" : ""}>${label}</option>`;
+              })
+              .join("");
+
+          // If active source is in overflow, select it
+          if (hasActiveInOverflow) {
+            overflowSelect.value = activeSource;
           }
+        }
+
+        // ─── Overflow select change handler ───
+
+        document.addEventListener("change", (evt) => {
+          const el = evt.target;
+          if (!el.matches || !el.matches('[data-nixsearch-overflow-select]')) return;
+
+          const sourceId = el.value;
+          setActiveSourceTab(sourceId);
+          populateRefRadios(sourceId);
+          navigate(buildSearchUrlFromInputs());
+
+          // Reset the select label after navigation
+          setTimeout(computeTabOverflow, 60);
         });
 
         // Run overflow detection on load and resize
