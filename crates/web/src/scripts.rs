@@ -121,13 +121,17 @@ pub fn navigation_script() -> String {
           return qs ? path + "?" + qs : path;
         }
 
-        function navigate(url, { push = true } = {}) {
+        function navigate(url, { push = true, syncInputs = false } = {}) {
           const next = new URL(url, window.location.href);
           const target = next.pathname + next.search;
           const current = currentPublicUrl();
 
           if (push && current !== target) {
             history.pushState(null, "", target);
+          }
+
+          if (syncInputs) {
+            syncInputsFromUrl();
           }
 
           reconcile(current);
@@ -217,7 +221,7 @@ pub fn navigation_script() -> String {
           if (link.rel && link.rel.includes("external")) return;
 
           evt.preventDefault();
-          navigate(url.toString());
+          navigate(url.toString(), { syncInputs: true });
         });
 
         // ─── Modal backdrop click ───
