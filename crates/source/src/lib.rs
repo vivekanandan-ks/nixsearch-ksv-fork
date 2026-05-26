@@ -592,8 +592,24 @@ fn eval_modules_expression(input: EvalModulesExpression<'_>) -> String {
         r#"
 let
   self = builtins.getFlake {source_ref};
-  pkgs = import <nixpkgs> {{ }};
+  nixpkgs = if self ? inputs && self.inputs ? nixpkgs then self.inputs.nixpkgs else null;
+  pkgs =
+    if nixpkgs != null
+    then nixpkgs.legacyPackages.${{builtins.currentSystem}}
+    else import <nixpkgs> {{ }};
   lib = pkgs.lib;
+  utils =
+    if nixpkgs != null
+    then import "${{nixpkgs}}/nixos/lib/utils.nix" {{
+      inherit lib;
+      config = {{ }};
+      pkgs = null;
+    }}
+    else import <nixpkgs/nixos/lib/utils.nix> {{
+      inherit lib;
+      config = {{ }};
+      pkgs = null;
+    }};
 
   explicitInputs = {{
 {explicit_inputs}
@@ -619,13 +635,26 @@ let
 
   eval = lib.evalModules {{
     specialArgs = {{
-      inherit pkgs lib;
-      inputs = (self.inputs or {{}}) // explicitInputs;
+      inherit pkgs lib utils;
+      inputs = {{ self = self; }} // (self.inputs or {{}}) // explicitInputs;
       self = self;
     }};
 
     modules = [
 {modules}
+      ({{ lib, ... }}: {{
+        options.users = lib.mkOption {{
+          internal = true;
+          type = lib.types.anything;
+        }};
+
+        config.users.users."<username>" = {{
+          home = "/home/<username>";
+        }};
+        config.users.users."‹username›" = {{
+          home = "/home/‹username›";
+        }};
+      }})
       ({{ lib, ... }}: {{
         options._module.args = lib.mkOption {{
           internal = true;
@@ -1441,8 +1470,13 @@ mod tests {
         assert!(expression.contains("builtins.getFlake"));
         assert!(expression.contains("lib.evalModules"));
         assert!(expression.contains("specialArgs"));
-        assert!(expression.contains("inherit pkgs lib;"));
-        assert!(expression.contains("inputs = (self.inputs or {}) // explicitInputs;"));
+        assert!(expression.contains("inherit pkgs lib utils;"));
+        assert!(expression.contains("self.inputs.nixpkgs"));
+        assert!(expression.contains("legacyPackages.${builtins.currentSystem}"));
+        assert!(
+            expression
+                .contains("inputs = { self = self; } // (self.inputs or {}) // explicitInputs;")
+        );
         assert!(expression.contains("config._module.check = false;"));
         assert!(expression.contains("pkgs.nixosOptionsDoc"));
     }

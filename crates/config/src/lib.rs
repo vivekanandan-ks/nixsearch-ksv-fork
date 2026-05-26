@@ -566,7 +566,7 @@ impl RawSourceConfig {
                     inputs: BTreeMap::new(),
                     modules: vec![
                         EvalModuleConfig::FlakeAttr {
-                            flake: "self.inputs.hjem".to_owned(),
+                            flake: "inputs.hjem".to_owned(),
                             attr: "nixosModules.default".to_owned(),
                         },
                         EvalModuleConfig::ModuleListOption {
@@ -2012,7 +2012,7 @@ mod tests {
 
                 match &modules[0] {
                     EvalModuleConfig::FlakeAttr { flake, attr } => {
-                        assert_eq!(flake, "self.inputs.hjem");
+                        assert_eq!(flake, "inputs.hjem");
                         assert_eq!(attr, "nixosModules.default");
                     }
                     other => panic!("unexpected module: {other:?}"),
