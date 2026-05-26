@@ -441,7 +441,7 @@ impl RawSourceConfig {
         let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
 
         Ok(SourceConfig {
-            name: self.name.or_else(|| Some("NixOS Options".to_owned())),
+            name: self.name.or_else(|| Some("NixOS".to_owned())),
             color: self.color.or_else(|| Some(NIXOS_COLOR.to_owned())),
             kind: SourceKind::Options,
             default_ref,
