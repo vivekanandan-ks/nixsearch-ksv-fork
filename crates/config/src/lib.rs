@@ -63,7 +63,7 @@ impl AppConfig {
             Vec::new()
         };
 
-        figment = figment.merge(Env::prefixed("NIXSEARCH_").split("__"));
+        figment = figment.merge(Env::prefixed("NIXSEARCH_").ignore(&["config"]).split("__"));
 
         let raw: RawAppConfig = figment.extract()?;
         let mut config = raw.into_app_config()?;

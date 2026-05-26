@@ -71,14 +71,14 @@ enum IndexCommand {
 #[derive(Debug, Args)]
 struct ConfigArgs {
     /// Path to config file. If omitted, only defaults and env vars are loaded.
-    #[arg(long)]
+    #[arg(long, env = "NIXSEARCH_CONFIG")]
     config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 struct SelectionArgs {
     /// Path to config file.
-    #[arg(long)]
+    #[arg(long, env = "NIXSEARCH_CONFIG")]
     config: PathBuf,
 
     /// Restrict to one source.
@@ -96,7 +96,7 @@ struct SearchArgs {
     query: String,
 
     /// Path to config file.
-    #[arg(long)]
+    #[arg(long, env = "NIXSEARCH_CONFIG")]
     config: PathBuf,
 
     /// Restrict to one source.

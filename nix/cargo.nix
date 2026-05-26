@@ -115,6 +115,8 @@
       };
 
       devShells.default = craneLib.devShell {
+        NIXSEARCH_CONFIG = "./nixsearch.example.toml";
+
         packages = with pkgs; [ watchexec ];
       };
     };

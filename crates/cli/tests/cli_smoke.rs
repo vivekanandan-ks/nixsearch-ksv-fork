@@ -22,6 +22,22 @@ fn check_config_accepts_valid_fixture_config() {
 }
 
 #[test]
+fn check_config_accepts_config_from_env() {
+    let tempdir = tempdir().unwrap();
+    let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+    let config_path = write_config(&tempdir, &index_dir);
+
+    Command::cargo_bin("nixsearch")
+        .unwrap()
+        .arg("check-config")
+        .env("NIXSEARCH_CONFIG", &config_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("configuration is valid"))
+        .stdout(predicate::str::contains("sources = 1"));
+}
+
+#[test]
 fn search_reads_published_index_and_prints_result() {
     let tempdir = tempdir().unwrap();
     let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
@@ -33,6 +49,23 @@ fn search_reads_published_index_and_prints_result() {
         .unwrap()
         .args(["search", OPTION_GIT_ENABLE, "--config"])
         .arg(&config_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(OPTION_GIT_ENABLE));
+}
+
+#[test]
+fn search_accepts_config_from_env() {
+    let tempdir = tempdir().unwrap();
+    let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+    let config_path = write_config(&tempdir, &index_dir);
+
+    publish_canonical_options_index(&index_dir);
+
+    Command::cargo_bin("nixsearch")
+        .unwrap()
+        .args(["search", OPTION_GIT_ENABLE])
+        .env("NIXSEARCH_CONFIG", &config_path)
         .assert()
         .success()
         .stdout(predicate::str::contains(OPTION_GIT_ENABLE));

@@ -14,7 +14,7 @@ async-trait = "0.1"
 assert_cmd = "2"
 axum = "0.8"
 brotli = "8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 datastar = { version = "0.3", features = ["axum"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
