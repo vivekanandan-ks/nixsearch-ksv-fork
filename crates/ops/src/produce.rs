@@ -37,12 +37,18 @@ pub async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result
 
         ProducerConfig::NixBuildOptionsJson {
             source_ref,
+            nix_path_name,
             attribute,
             import_path,
             output_path,
         } => {
-            let producer =
-                NixBuildOptionsJsonProducer::new(source_ref, attribute, import_path, output_path);
+            let producer = NixBuildOptionsJsonProducer::new(
+                source_ref,
+                nix_path_name,
+                attribute,
+                import_path,
+                output_path,
+            );
 
             producer.produce(store, &request).await.with_context(|| {
                 format!(

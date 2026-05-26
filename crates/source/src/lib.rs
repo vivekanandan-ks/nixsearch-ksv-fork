@@ -195,6 +195,7 @@ impl Producer for DownloadProducer {
 #[derive(Debug, Clone)]
 pub struct NixBuildOptionsJsonProducer {
     source_ref: String,
+    nix_path_name: String,
     attribute: String,
     import_path: String,
     output_path: String,
@@ -204,12 +205,14 @@ pub struct NixBuildOptionsJsonProducer {
 impl NixBuildOptionsJsonProducer {
     pub fn new(
         source_ref: impl Into<String>,
+        nix_path_name: impl Into<String>,
         attribute: impl Into<String>,
         import_path: impl Into<String>,
         output_path: impl Into<String>,
     ) -> Self {
         Self {
             source_ref: source_ref.into(),
+            nix_path_name: nix_path_name.into(),
             attribute: attribute.into(),
             import_path: import_path.into(),
             output_path: output_path.into(),
@@ -226,7 +229,7 @@ impl Producer for NixBuildOptionsJsonProducer {
         request: &ProduceRequest,
     ) -> Result<ProducedArtifact> {
         let nix_path_source = normalize_nix_path_source(&self.source_ref);
-        let expression = format!("<nixpkgs/{}>", self.import_path);
+        let expression = format!("<{}/{}>", self.nix_path_name, self.import_path);
 
         let output = Command::new("nix-build")
             .arg("--no-build-output")
@@ -235,7 +238,7 @@ impl Producer for NixBuildOptionsJsonProducer {
             .arg(&self.attribute)
             .arg("--no-out-link")
             .arg("-I")
-            .arg(format!("nixpkgs={nix_path_source}"))
+            .arg(format!("{}={nix_path_source}", self.nix_path_name))
             .output()
             .await
             .with_context(|| {
@@ -502,7 +505,7 @@ let
   eval = lib.evalModules {{
     specialArgs = {{
       inherit pkgs lib;
-      inputs = self.inputs or {{}} // explicitInputs;
+      inputs = (self.inputs or {{}}) // explicitInputs;
       self = self;
     }};
 

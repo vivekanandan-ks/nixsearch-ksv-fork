@@ -467,6 +467,7 @@ impl RawSourceConfig {
                 source_links: Some(home_manager_source_links(&ref_id)),
                 producer: ProducerConfig::NixBuildOptionsJson {
                     source_ref: format!("github:nix-community/home-manager/{ref_id}"),
+                    nix_path_name: "home-manager".to_owned(),
                     attribute: "docs.json".to_owned(),
                     import_path: "default.nix".to_owned(),
                     output_path: "share/doc/home-manager/options.json".to_owned(),
@@ -503,6 +504,7 @@ impl RawSourceConfig {
                 source_links: Some(nix_darwin_source_links(&ref_id)),
                 producer: ProducerConfig::NixBuildOptionsJson {
                     source_ref: format!("github:nix-darwin/nix-darwin/{ref_id}"),
+                    nix_path_name: "darwin".to_owned(),
                     attribute: "docs.optionsJSON".to_owned(),
                     import_path: "release.nix".to_owned(),
                     output_path: "share/doc/darwin/options.json".to_owned(),
@@ -784,6 +786,8 @@ pub enum ProducerConfig {
     NixBuildOptionsJson {
         #[serde(rename = "ref")]
         source_ref: String,
+        #[serde(default = "default_nix_build_nix_path_name")]
+        nix_path_name: String,
         attribute: String,
         import_path: String,
         output_path: String,
@@ -851,6 +855,10 @@ fn default_eval_module_flake() -> String {
     "self".to_owned()
 }
 
+fn default_nix_build_nix_path_name() -> String {
+    "nixpkgs".to_owned()
+}
+
 impl ProducerConfig {
     fn validate(&self, source_id: &str, ref_id: &str) -> Result<()> {
         match self {
@@ -878,11 +886,13 @@ impl ProducerConfig {
 
             Self::NixBuildOptionsJson {
                 source_ref,
+                nix_path_name,
                 attribute,
                 import_path,
                 output_path,
             } => {
                 validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
+                validate_nix_path_name(source_id, ref_id, nix_path_name)?;
                 validate_producer_non_empty(source_id, ref_id, "attribute", attribute)?;
                 validate_producer_non_empty(source_id, ref_id, "import_path", import_path)?;
                 validate_producer_non_empty(source_id, ref_id, "output_path", output_path)?;
@@ -1053,6 +1063,25 @@ fn validate_producer_non_empty(
     Ok(())
 }
 
+fn validate_nix_path_name(source_id: &str, ref_id: &str, value: &str) -> Result<()> {
+    validate_producer_non_empty(source_id, ref_id, "nix_path_name", value)?;
+
+    if value.contains('/')
+        || value.contains('=')
+        || value.contains('<')
+        || value.contains('>')
+        || value.chars().any(char::is_whitespace)
+    {
+        return producer_error(
+            source_id,
+            ref_id,
+            "nix_path_name must not contain '/', '=', '<', '>', or whitespace",
+        );
+    }
+
+    Ok(())
+}
+
 fn producer_error<T>(source_id: &str, ref_id: &str, message: &str) -> Result<T> {
     Err(ConfigError::Validation(format!(
         "sources.{source_id}.refs.{ref_id}: {message}"
@@ -1215,6 +1244,13 @@ mod tests {
             options.refs[0].producer.kind(),
             ProducerKind::NixBuildOptionsJson
         );
+
+        match &options.refs[0].producer {
+            ProducerConfig::NixBuildOptionsJson { nix_path_name, .. } => {
+                assert_eq!(nix_path_name, "nixpkgs");
+            }
+            other => panic!("unexpected producer: {other:?}"),
+        }
 
         let packages = &config.sources[NIXPKGS_SOURCE];
         assert_eq!(packages.name.as_deref(), Some("Nixpkgs"));
@@ -1671,11 +1707,13 @@ mod tests {
         match &ref_config.producer {
             ProducerConfig::NixBuildOptionsJson {
                 source_ref,
+                nix_path_name,
                 attribute,
                 import_path,
                 output_path,
             } => {
                 assert_eq!(source_ref, "github:nix-community/home-manager/master");
+                assert_eq!(nix_path_name, "home-manager");
                 assert_eq!(attribute, "docs.json");
                 assert_eq!(import_path, "default.nix");
                 assert_eq!(output_path, "share/doc/home-manager/options.json");
@@ -1758,11 +1796,13 @@ mod tests {
         match &ref_config.producer {
             ProducerConfig::NixBuildOptionsJson {
                 source_ref,
+                nix_path_name,
                 attribute,
                 import_path,
                 output_path,
             } => {
                 assert_eq!(source_ref, "github:nix-darwin/nix-darwin/master");
+                assert_eq!(nix_path_name, "darwin");
                 assert_eq!(attribute, "docs.optionsJSON");
                 assert_eq!(import_path, "release.nix");
                 assert_eq!(output_path, "share/doc/darwin/options.json");
