@@ -186,6 +186,22 @@ body {
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
+  padding-bottom: 6px;
+  margin-bottom: -6px;
+}
+
+.source-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.source-tabs::-webkit-scrollbar-track {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.source-tabs::-webkit-scrollbar-thumb {
+  background: var(--text-dim);
+  border-radius: 999px;
 }
 
 .source-tab {
