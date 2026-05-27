@@ -1,13 +1,16 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser};
-use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _};
+use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query};
+use tantivy::schema::{
+    Field, IndexRecordOption, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _,
+};
 use tantivy::tokenizer::TokenStream as _;
-use tantivy::{Index, IndexReader, IndexWriter, Term, doc};
+use tantivy::{DocAddress, Index, IndexReader, IndexWriter, Score, Searcher, Term, doc};
 use time::OffsetDateTime;
 
 use nixsearch_core::{ArtifactKind, DocumentKind, OptionDoc, PackageDoc, SearchDocument};
@@ -196,125 +199,273 @@ impl SearchIndex {
 
     pub fn search(&self, options: SearchOptions) -> Result<SearchResult> {
         let searcher = self.reader.searcher();
+        let candidate_limit = rerank_candidate_limit(options.limit, options.offset);
+        let diversify_sources = options.scopes.len() > 1;
+        let analysis = QueryAnalysis::new(&self.index, self.fields.name_text, &options.query)?;
 
-        let mut parser = QueryParser::for_index(
-            &self.index,
-            vec![
-                self.fields.name_exact,
-                self.fields.name_groups,
-                self.fields.name_text,
-                self.fields.name_root,
-                self.fields.name_leaf,
-                self.fields.description,
-                self.fields.option_set,
-                self.fields.parents,
-                self.fields.option_type,
-                self.fields.attribute_exact,
-                self.fields.attribute_text,
-                self.fields.package_set,
-                self.fields.platforms,
-                self.fields.main_program,
-            ],
-        );
+        let (candidates, total) = if diversify_sources {
+            let mut candidates = Vec::new();
+            let mut total = 0;
 
-        parser.set_field_boost(self.fields.name_exact, 20.0);
-        parser.set_field_boost(self.fields.name_groups, 15.0);
-        parser.set_field_boost(self.fields.name_text, 10.0);
-        parser.set_field_boost(self.fields.name_root, 8.0);
-        parser.set_field_boost(self.fields.name_leaf, 6.0);
-        parser.set_field_boost(self.fields.attribute_exact, 25.0);
-        parser.set_field_boost(self.fields.attribute_text, 12.0);
-        parser.set_field_boost(self.fields.main_program, 20.0);
-        parser.set_field_boost(self.fields.option_set, 3.0);
-        parser.set_field_boost(self.fields.parents, 2.0);
-        parser.set_field_boost(self.fields.package_set, 2.0);
-        parser.set_field_boost(self.fields.option_type, 1.5);
-        parser.set_field_boost(self.fields.platforms, 1.0);
-        parser.set_field_boost(self.fields.description, 1.0);
-
-        let exact_query = parser
-            .parse_query(&options.query)
-            .with_context(|| format!("failed to parse query {:?}", options.query))?;
-
-        let mut text_clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
-            vec![(
-                tantivy::query::Occur::Should,
-                Box::new(BoostQuery::new(exact_query, 1.0)),
-            )];
-
-        if let Some(fuzzy_query) = build_fuzzy_query(&self.index, &options.query, &self.fields)? {
-            text_clauses.push((Occur::Should, fuzzy_query));
-        }
-
-        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![(
-            tantivy::query::Occur::Must,
-            Box::new(tantivy::query::BooleanQuery::new(text_clauses)),
-        )];
-
-        if !options.scopes.is_empty() {
-            let mut scope_clauses = Vec::with_capacity(options.scopes.len());
-
-            for scope in options.scopes {
-                let source_query: Box<dyn tantivy::query::Query> =
-                    Box::new(tantivy::query::TermQuery::new(
-                        tantivy::Term::from_field_text(self.fields.source, &scope.source),
-                        tantivy::schema::IndexRecordOption::Basic,
-                    ));
-
-                let ref_query: Box<dyn tantivy::query::Query> =
-                    Box::new(tantivy::query::TermQuery::new(
-                        tantivy::Term::from_field_text(self.fields.ref_id, &scope.ref_id),
-                        tantivy::schema::IndexRecordOption::Basic,
-                    ));
-
-                let pair_query: Box<dyn tantivy::query::Query> =
-                    Box::new(tantivy::query::BooleanQuery::new(vec![
-                        (tantivy::query::Occur::Must, source_query),
-                        (tantivy::query::Occur::Must, ref_query),
-                    ]));
-
-                scope_clauses.push((tantivy::query::Occur::Should, pair_query));
+            for scope in &options.scopes {
+                let (mut scope_candidates, scope_total) = self.search_candidates(
+                    &searcher,
+                    &options.query,
+                    std::slice::from_ref(scope),
+                    candidate_limit,
+                )?;
+                total += scope_total;
+                candidates.append(&mut scope_candidates);
             }
 
-            clauses.push((
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::BooleanQuery::new(scope_clauses)),
-            ));
-        }
+            (candidates, total)
+        } else {
+            self.search_candidates(&searcher, &options.query, &options.scopes, candidate_limit)?
+        };
 
-        let query = tantivy::query::BooleanQuery::new(clauses);
+        let hits = rerank_candidates(
+            candidates,
+            &analysis,
+            diversify_sources,
+            options.offset,
+            options.limit,
+        );
+
+        Ok(SearchResult { hits, total })
+    }
+
+    fn search_candidates(
+        &self,
+        searcher: &Searcher,
+        query_text: &str,
+        scopes: &[SearchScope],
+        limit: usize,
+    ) -> Result<(Vec<SearchCandidate>, usize)> {
+        let query = self.build_query(query_text, scopes)?;
 
         let (top_docs, total) = searcher
             .search(
-                &query,
-                &(
-                    TopDocs::with_limit(options.limit)
-                        .and_offset(options.offset)
-                        .order_by_score(),
-                    Count,
-                ),
+                &*query,
+                &(TopDocs::with_limit(limit).order_by_score(), Count),
             )
             .context("search failed")?;
 
-        let mut hits = Vec::with_capacity(top_docs.len());
+        let mut candidates = Vec::with_capacity(top_docs.len());
 
         for (score, address) in top_docs {
-            let retrieved: TantivyDocument = searcher
-                .doc(address)
-                .context("failed to retrieve search result document")?;
-
-            let stored_json = retrieved
-                .get_first(self.fields.stored_json)
-                .and_then(|value| value.as_str())
-                .context("search result did not contain stored_json")?;
-
-            let document = serde_json::from_str(stored_json)
-                .context("failed to deserialize stored search document")?;
-
-            hits.push(SearchHit { score, document });
+            candidates.push(SearchCandidate {
+                score,
+                document: self.document_at_with_searcher(searcher, address)?,
+            });
         }
 
-        Ok(SearchResult { hits, total })
+        Ok((candidates, total))
+    }
+
+    fn build_query(&self, query_text: &str, scopes: &[SearchScope]) -> Result<Box<dyn Query>> {
+        let text_query = self.build_text_query(query_text)?;
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
+
+        if !scopes.is_empty() {
+            let mut scope_clauses = Vec::with_capacity(scopes.len());
+
+            for scope in scopes {
+                let source_query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
+                    Term::from_field_text(self.fields.source, &scope.source),
+                    tantivy::schema::IndexRecordOption::Basic,
+                ));
+
+                let ref_query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
+                    Term::from_field_text(self.fields.ref_id, &scope.ref_id),
+                    tantivy::schema::IndexRecordOption::Basic,
+                ));
+
+                let pair_query: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, source_query),
+                    (Occur::Must, ref_query),
+                ]));
+
+                scope_clauses.push((Occur::Should, pair_query));
+            }
+
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(scope_clauses))));
+        }
+
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
+
+    fn build_text_query(&self, query_text: &str) -> Result<Box<dyn Query>> {
+        let mut text_clauses = self.build_exact_text_clauses(query_text)?;
+
+        if let Some(fuzzy_query) = build_fuzzy_query(&self.index, query_text, &self.fields)? {
+            text_clauses.push((Occur::Should, fuzzy_query));
+        }
+
+        Ok(Box::new(BooleanQuery::new(text_clauses)))
+    }
+
+    fn build_exact_text_clauses(&self, query_text: &str) -> Result<Vec<(Occur, Box<dyn Query>)>> {
+        let mut clauses = Vec::new();
+        let raw = query_text.trim();
+
+        if !raw.is_empty() {
+            for value in dedup_preserving_order(vec![raw.to_owned(), raw.to_lowercase()]) {
+                self.add_string_field_clauses(&mut clauses, &value);
+            }
+        }
+
+        let mut terms = tokenized_query_terms(&self.index, self.fields.name_text, query_text)?;
+        let compact = compact_identifier(query_text);
+
+        if !compact.is_empty() {
+            terms.push(compact);
+        }
+
+        for term in dedup_preserving_order(terms) {
+            self.add_token_field_clauses(&mut clauses, &term);
+        }
+
+        Ok(clauses)
+    }
+
+    fn add_string_field_clauses(&self, clauses: &mut Vec<(Occur, Box<dyn Query>)>, value: &str) {
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_exact,
+            value,
+            20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_groups,
+            value,
+            15.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_root,
+            value,
+            8.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_leaf,
+            value,
+            6.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.attribute_exact,
+            value,
+            25.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.main_program,
+            value,
+            20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.option_set,
+            value,
+            3.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.parents,
+            value,
+            2.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.package_set,
+            value,
+            2.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.platforms,
+            value,
+            1.0,
+            IndexRecordOption::Basic,
+        );
+    }
+
+    fn add_token_field_clauses(&self, clauses: &mut Vec<(Occur, Box<dyn Query>)>, term: &str) {
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_text,
+            term,
+            10.0,
+            IndexRecordOption::WithFreqs,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.attribute_text,
+            term,
+            12.0,
+            IndexRecordOption::WithFreqs,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.description,
+            term,
+            1.0,
+            IndexRecordOption::WithFreqs,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.option_type,
+            term,
+            1.5,
+            IndexRecordOption::WithFreqs,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_root,
+            term,
+            8.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.name_leaf,
+            term,
+            6.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.main_program,
+            term,
+            20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.option_set,
+            term,
+            3.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.package_set,
+            term,
+            2.0,
+            IndexRecordOption::Basic,
+        );
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<SearchDocument>> {
@@ -392,9 +543,16 @@ impl SearchIndex {
         }
     }
 
-    fn document_at(&self, address: tantivy::DocAddress) -> Result<SearchDocument> {
+    fn document_at(&self, address: DocAddress) -> Result<SearchDocument> {
         let searcher = self.reader.searcher();
+        self.document_at_with_searcher(&searcher, address)
+    }
 
+    fn document_at_with_searcher(
+        &self,
+        searcher: &Searcher,
+        address: DocAddress,
+    ) -> Result<SearchDocument> {
         let retrieved: TantivyDocument = searcher
             .doc(address)
             .context("failed to retrieve entry document")?;
@@ -529,6 +687,593 @@ fn add_name_parts(
     }
 }
 
+fn add_boosted_term_clause(
+    clauses: &mut Vec<(Occur, Box<dyn Query>)>,
+    field: Field,
+    value: &str,
+    boost: Score,
+    index_record_option: IndexRecordOption,
+) {
+    if value.is_empty() {
+        return;
+    }
+
+    let query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
+        Term::from_field_text(field, value),
+        index_record_option,
+    ));
+
+    clauses.push((Occur::Should, Box::new(BoostQuery::new(query, boost))));
+}
+
+#[derive(Debug)]
+struct SearchCandidate {
+    score: Score,
+    document: SearchDocument,
+}
+
+#[derive(Debug)]
+struct RankedCandidate {
+    base_score: Score,
+    final_score: Score,
+    source: String,
+    cluster_key: Option<String>,
+    cluster_explicit: bool,
+    document: SearchDocument,
+}
+
+#[derive(Debug)]
+struct QueryAnalysis {
+    normalized: String,
+    compact: String,
+    terms: Vec<String>,
+    structured_terms: Vec<String>,
+}
+
+impl QueryAnalysis {
+    fn new(index: &Index, field: Field, query: &str) -> Result<Self> {
+        let normalized = query.trim().to_lowercase();
+        let compact = compact_identifier(query);
+        let structured_terms = identifier_terms(query);
+
+        let mut terms = tokenized_query_terms(index, field, query)?;
+        terms.extend(structured_terms.clone());
+
+        if !compact.is_empty() {
+            terms.push(compact.clone());
+        }
+
+        Ok(Self {
+            normalized,
+            compact,
+            terms: dedup_preserving_order(terms),
+            structured_terms,
+        })
+    }
+
+    fn contains_term(&self, term: &str) -> bool {
+        self.terms.iter().any(|candidate| candidate == term)
+    }
+
+    fn is_structured(&self) -> bool {
+        self.structured_terms.len() >= 2
+    }
+}
+
+fn rerank_candidate_limit(limit: usize, offset: usize) -> usize {
+    let target = offset.saturating_add(limit).max(1);
+    target.saturating_mul(4).max(200).min(5_000)
+}
+
+fn rerank_candidates(
+    candidates: Vec<SearchCandidate>,
+    analysis: &QueryAnalysis,
+    diversify_sources: bool,
+    offset: usize,
+    limit: usize,
+) -> Vec<SearchHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut remaining = candidates
+        .into_iter()
+        .map(|candidate| {
+            let source = candidate.document.common().source.clone();
+            let cluster_key = duplicate_cluster_key(&candidate.document);
+            let cluster_explicit = duplicate_cluster_explicit(&candidate.document, analysis);
+            let base_score = domain_relevance_score(candidate.score, &candidate.document, analysis);
+
+            RankedCandidate {
+                base_score,
+                final_score: base_score,
+                source,
+                cluster_key,
+                cluster_explicit,
+                document: candidate.document,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let needed = offset.saturating_add(limit);
+    let mut selected = Vec::with_capacity(needed.min(remaining.len()));
+    let mut source_counts: HashMap<String, usize> = HashMap::new();
+    let mut cluster_counts: HashMap<String, usize> = HashMap::new();
+
+    while selected.len() < needed && !remaining.is_empty() {
+        let mut best_index = 0;
+        let mut best_score = f32::NEG_INFINITY;
+
+        for (index, candidate) in remaining.iter().enumerate() {
+            let adjusted_score = adjusted_candidate_score(
+                candidate,
+                diversify_sources,
+                &source_counts,
+                &cluster_counts,
+            );
+
+            if adjusted_score > best_score
+                || (adjusted_score == best_score
+                    && candidate_sort_key(candidate) < candidate_sort_key(&remaining[best_index]))
+            {
+                best_index = index;
+                best_score = adjusted_score;
+            }
+        }
+
+        let mut candidate = remaining.swap_remove(best_index);
+        candidate.final_score = best_score;
+
+        *source_counts.entry(candidate.source.clone()).or_default() += 1;
+
+        if let Some(cluster_key) = &candidate.cluster_key {
+            *cluster_counts.entry(cluster_key.clone()).or_default() += 1;
+        }
+
+        selected.push(candidate);
+    }
+
+    selected
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|candidate| SearchHit {
+            score: candidate.final_score,
+            document: candidate.document,
+        })
+        .collect()
+}
+
+fn adjusted_candidate_score(
+    candidate: &RankedCandidate,
+    diversify_sources: bool,
+    source_counts: &HashMap<String, usize>,
+    cluster_counts: &HashMap<String, usize>,
+) -> Score {
+    let source_count = source_counts.get(&candidate.source).copied().unwrap_or(0);
+    let source_factor = if diversify_sources {
+        1.0 / (1.0 + source_count as Score * 0.18)
+    } else {
+        1.0
+    };
+
+    let cluster_count = candidate
+        .cluster_key
+        .as_ref()
+        .and_then(|key| cluster_counts.get(key))
+        .copied()
+        .unwrap_or(0);
+
+    candidate.base_score
+        * source_factor
+        * duplicate_cluster_factor(cluster_count, candidate.cluster_explicit)
+}
+
+fn duplicate_cluster_factor(count: usize, explicit: bool) -> Score {
+    if count == 0 {
+        return 1.0;
+    }
+
+    if explicit {
+        return 1.0 / (1.0 + count as Score * 0.15);
+    }
+
+    match count {
+        1 => 0.45,
+        2 => 0.25,
+        _ => 0.15,
+    }
+}
+
+fn candidate_sort_key(candidate: &RankedCandidate) -> (&str, &str) {
+    (candidate.source.as_str(), candidate.document.name())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredMatchTier {
+    Unstructured,
+    PathPrefix,
+    AllTermsInPath,
+    PartialPath,
+    NoPathMatch,
+}
+
+impl StructuredMatchTier {
+    fn score_bonus(self) -> Score {
+        match self {
+            Self::Unstructured => 0.0,
+            Self::PathPrefix => 500.0,
+            Self::AllTermsInPath => 260.0,
+            Self::PartialPath => -120.0,
+            Self::NoPathMatch => -180.0,
+        }
+    }
+}
+
+fn domain_relevance_score(
+    original_score: Score,
+    document: &SearchDocument,
+    analysis: &QueryAnalysis,
+) -> Score {
+    let mut score = original_score.max(0.0).ln_1p() * 4.0;
+    let common = document.common();
+    let name = common.name.to_lowercase();
+    let name_compact = compact_identifier(&common.name);
+    let name_terms = identifier_terms(&common.name);
+    let path_terms = document_path_terms(document);
+    let structured_tier = structured_match_tier(analysis, &path_terms);
+
+    score += structured_tier.score_bonus();
+
+    if structured_tier == StructuredMatchTier::PathPrefix {
+        score -= structured_path_depth_penalty(document, analysis);
+    }
+
+    if name == analysis.normalized {
+        score += 90.0;
+    }
+
+    if !analysis.compact.is_empty() && name_compact == analysis.compact {
+        score += 80.0;
+    }
+
+    if !analysis.normalized.is_empty() && name.starts_with(&analysis.normalized) {
+        score += 35.0;
+    }
+
+    if all_query_terms_match(&analysis.structured_terms, &name_terms) {
+        score += 18.0;
+    }
+
+    match document {
+        SearchDocument::Option(option) => {
+            let segments = if option.loc.is_empty() {
+                common
+                    .name_parts
+                    .segments
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            } else {
+                option.loc.iter().map(String::as_str).collect::<Vec<_>>()
+            };
+
+            score += option_name_score(analysis, &segments);
+        }
+
+        SearchDocument::Package(package) => {
+            score += package_name_score(analysis, package);
+        }
+    }
+
+    score.max(0.0)
+}
+
+fn structured_match_tier(analysis: &QueryAnalysis, path_terms: &[String]) -> StructuredMatchTier {
+    if !analysis.is_structured() {
+        return StructuredMatchTier::Unstructured;
+    }
+
+    if starts_with_query_terms(path_terms, &analysis.structured_terms) {
+        return StructuredMatchTier::PathPrefix;
+    }
+
+    if all_query_terms_match_path(&analysis.structured_terms, path_terms) {
+        return StructuredMatchTier::AllTermsInPath;
+    }
+
+    if analysis.structured_terms.iter().any(|term| {
+        path_terms
+            .iter()
+            .any(|path_term| path_term_matches_query_term(path_term, term))
+    }) {
+        return StructuredMatchTier::PartialPath;
+    }
+
+    StructuredMatchTier::NoPathMatch
+}
+
+fn starts_with_query_terms(values: &[String], prefix: &[String]) -> bool {
+    values.len() >= prefix.len()
+        && values
+            .iter()
+            .zip(prefix)
+            .all(|(value, prefix)| path_term_matches_query_term(value, prefix))
+}
+
+fn all_query_terms_match_path(query_terms: &[String], path_terms: &[String]) -> bool {
+    !query_terms.is_empty()
+        && query_terms.iter().all(|term| {
+            path_terms
+                .iter()
+                .any(|path_term| path_term_matches_query_term(path_term, term))
+        })
+}
+
+fn path_term_matches_query_term(path_term: &str, query_term: &str) -> bool {
+    path_term == query_term
+        || (query_term.chars().count() >= 3 && path_term.starts_with(query_term))
+}
+
+fn structured_path_depth_penalty(document: &SearchDocument, analysis: &QueryAnalysis) -> Score {
+    let depth = document_path_depth(document);
+    let query_depth = analysis.structured_terms.len();
+    depth.saturating_sub(query_depth) as Score * 3.0
+}
+
+fn document_path_terms(document: &SearchDocument) -> Vec<String> {
+    document_path_segments(document)
+        .into_iter()
+        .flat_map(|segment| identifier_terms(&segment))
+        .collect()
+}
+
+fn document_path_depth(document: &SearchDocument) -> usize {
+    document_path_segments(document).len()
+}
+
+fn document_path_segments(document: &SearchDocument) -> Vec<String> {
+    match document {
+        SearchDocument::Option(option) if !option.loc.is_empty() => option.loc.clone(),
+        SearchDocument::Option(option) => option.common.name_parts.segments.clone(),
+        SearchDocument::Package(package) => package
+            .attribute
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    }
+}
+
+fn option_name_score(analysis: &QueryAnalysis, segments: &[&str]) -> Score {
+    let normalized_segments = segments
+        .iter()
+        .map(|segment| segment.to_lowercase())
+        .collect::<Vec<_>>();
+    let expanded_terms = segments
+        .iter()
+        .flat_map(|segment| identifier_terms(segment))
+        .collect::<Vec<_>>();
+
+    let mut score = 0.0;
+
+    for term in &analysis.terms {
+        if normalized_segments.iter().any(|segment| segment == term) {
+            score += 52.0;
+        } else if expanded_terms.iter().any(|segment| segment == term) {
+            score += 34.0;
+        }
+    }
+
+    if all_query_terms_match(&analysis.structured_terms, &expanded_terms) {
+        score += 20.0;
+    }
+
+    score
+}
+
+fn package_name_score(analysis: &QueryAnalysis, package: &PackageDoc) -> Score {
+    let mut score = 0.0;
+    let attribute = package.attribute.to_lowercase();
+    let attribute_compact = compact_identifier(&package.attribute);
+    let leaf = package
+        .attribute
+        .rsplit('.')
+        .next()
+        .unwrap_or(&package.attribute);
+    let leaf_normalized = leaf.to_lowercase();
+    let leaf_terms = identifier_terms(leaf);
+    let nested = package.package_set.is_some();
+    let package_set_explicit = package
+        .package_set
+        .as_deref()
+        .is_some_and(|package_set| query_mentions_package_set(analysis, package_set));
+
+    if attribute == analysis.normalized {
+        score += 110.0;
+    }
+
+    if !analysis.compact.is_empty() && attribute_compact == analysis.compact {
+        score += 90.0;
+    }
+
+    if leaf_normalized == analysis.normalized {
+        score += if nested && !package_set_explicit {
+            34.0
+        } else {
+            70.0
+        };
+    }
+
+    for term in &analysis.terms {
+        if leaf_terms.iter().any(|leaf_term| leaf_term == term) {
+            score += if nested && !package_set_explicit {
+                18.0
+            } else {
+                32.0
+            };
+        }
+    }
+
+    if let Some(main_program) = &package.main_program {
+        if main_program.to_lowercase() == analysis.normalized {
+            score += 85.0;
+        }
+    }
+
+    if package_set_explicit {
+        score += 35.0;
+    } else if nested {
+        score -= 6.0;
+    }
+
+    score
+}
+
+fn all_query_terms_match(query_terms: &[String], document_terms: &[String]) -> bool {
+    let meaningful_terms = query_terms
+        .iter()
+        .filter(|term| term.chars().count() > 1)
+        .collect::<Vec<_>>();
+
+    !meaningful_terms.is_empty()
+        && meaningful_terms.iter().all(|term| {
+            document_terms
+                .iter()
+                .any(|document_term| document_term == *term)
+        })
+}
+
+fn duplicate_cluster_key(document: &SearchDocument) -> Option<String> {
+    let SearchDocument::Package(package) = document else {
+        return None;
+    };
+
+    let package_set = package.package_set.as_deref()?;
+    let leaf = package.attribute.rsplit('.').next()?;
+
+    Some(format!(
+        "{}:{}:{}",
+        package.common.source.as_str(),
+        package_set_family(package_set),
+        compact_identifier(leaf)
+    ))
+}
+
+fn duplicate_cluster_explicit(document: &SearchDocument, analysis: &QueryAnalysis) -> bool {
+    let SearchDocument::Package(package) = document else {
+        return false;
+    };
+
+    let Some(package_set) = package.package_set.as_deref() else {
+        return false;
+    };
+
+    query_mentions_package_set(analysis, package_set)
+}
+
+fn query_mentions_package_set(analysis: &QueryAnalysis, package_set: &str) -> bool {
+    let package_set_compact = compact_identifier(package_set);
+    let family = package_set_family(package_set);
+    let family_compact = compact_identifier(&family);
+
+    if !analysis.compact.is_empty()
+        && (analysis.compact.contains(&package_set_compact)
+            || analysis.compact.contains(&family_compact))
+    {
+        return true;
+    }
+
+    let family_terms = identifier_terms(&family)
+        .into_iter()
+        .filter(|term| term.chars().any(|ch| ch.is_alphabetic()))
+        .collect::<Vec<_>>();
+
+    !family_terms.is_empty() && family_terms.iter().all(|term| analysis.contains_term(term))
+}
+
+fn package_set_family(package_set: &str) -> String {
+    let mut family = package_set;
+
+    while let Some((prefix, suffix)) = family.rsplit_once('_') {
+        if suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            family = prefix;
+        } else {
+            break;
+        }
+    }
+
+    family.to_owned()
+}
+
+fn tokenized_query_terms(index: &Index, field: Field, query: &str) -> Result<Vec<String>> {
+    let mut analyzer = index
+        .tokenizer_for_field(field)
+        .context("failed to get tokenizer for query field")?;
+    let mut token_stream = analyzer.token_stream(query);
+    let mut terms = Vec::new();
+
+    token_stream.process(&mut |token| {
+        terms.push(token.text.clone());
+    });
+
+    Ok(terms)
+}
+
+fn identifier_terms(value: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lowercase = false;
+
+    for ch in value.chars() {
+        if !ch.is_alphanumeric() {
+            push_identifier_term(&mut terms, &mut current);
+            previous_was_lowercase = false;
+            continue;
+        }
+
+        if ch.is_uppercase() && previous_was_lowercase {
+            push_identifier_term(&mut terms, &mut current);
+        }
+
+        for lowercase in ch.to_lowercase() {
+            current.push(lowercase);
+        }
+        previous_was_lowercase = ch.is_lowercase();
+    }
+
+    push_identifier_term(&mut terms, &mut current);
+    dedup_preserving_order(terms)
+}
+
+fn push_identifier_term(terms: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        terms.push(std::mem::take(current));
+    }
+}
+
+fn compact_identifier(value: &str) -> String {
+    let mut compact = String::new();
+
+    for ch in value.chars().filter(|ch| ch.is_alphanumeric()) {
+        compact.extend(ch.to_lowercase());
+    }
+
+    compact
+}
+
+fn dedup_preserving_order(terms: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+
+    for term in terms {
+        if !deduped.contains(&term) {
+            deduped.push(term);
+        }
+    }
+
+    deduped
+}
+
 fn build_fuzzy_query(
     index: &Index,
     query: &str,
@@ -565,44 +1310,14 @@ fn build_fuzzy_query(
 }
 
 fn fuzzy_query_terms(index: &Index, field: Field, query: &str) -> Result<Vec<String>> {
-    let mut terms = Vec::new();
+    let mut terms = tokenized_query_terms(index, field, query)?;
+    let compact = compact_identifier(query);
 
-    let mut analyzer = index
-        .tokenizer_for_field(field)
-        .context("failed to get tokenizer for fuzzy query field")?;
-    let mut token_stream = analyzer.token_stream(query);
-
-    token_stream.process(&mut |token| {
-        terms.push(token.text.clone());
-    });
-
-    if let Some(compact) = compact_query_term(query) {
+    if !compact.is_empty() {
         terms.push(compact);
     }
 
-    let mut deduped = Vec::new();
-
-    for term in terms {
-        if !deduped.contains(&term) {
-            deduped.push(term);
-        }
-    }
-
-    Ok(deduped)
-}
-
-fn compact_query_term(query: &str) -> Option<String> {
-    let mut compact = String::new();
-
-    for ch in query.chars().filter(|ch| ch.is_alphanumeric()) {
-        compact.extend(ch.to_lowercase());
-    }
-
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
+    Ok(dedup_preserving_order(terms))
 }
 
 fn add_fuzzy_field_clause(

@@ -8,8 +8,8 @@ use nixsearch_index::{
 
 use nixsearch_test_support::{
     OPTION_GIT_ENABLE, OPTION_SYSTEMD_BOOT_ENABLE, OPTION_TAILSCALE_ENABLE, PACKAGE_GIT,
-    PACKAGE_RIPGREP, REF_SMALL, SOURCE_FIXTURES, canonical_documents, ingest_context_for,
-    option_doc_for, package_doc_for, package_doc_with_main_program,
+    PACKAGE_RIPGREP, REF_SMALL, SOURCE_FIXTURES, SOURCE_NIXOS, SOURCE_NIXPKGS, canonical_documents,
+    ingest_context_for, option_doc_for, package_doc_for, package_doc_with_main_program,
 };
 
 fn build_index(docs: Vec<SearchDocument>) -> (tempfile::TempDir, SearchIndex) {
@@ -46,6 +46,12 @@ fn names(hits: &[SearchHit]) -> Vec<&str> {
     hits.iter().map(|hit| hit.document.name()).collect()
 }
 
+fn source_names(hits: &[SearchHit]) -> Vec<(&str, &str)> {
+    hits.iter()
+        .map(|hit| (hit.document.common().source.as_str(), hit.document.name()))
+        .collect()
+}
+
 fn assert_contains(hits: &[SearchHit], name: &str) {
     assert!(
         hits.iter().any(|hit| hit.document.name() == name),
@@ -69,6 +75,34 @@ fn assert_ranks_before(hits: &[SearchHit], before: &str, after: &str) {
         before_index < after_index,
         "expected {before:?} to rank before {after:?}; got {:?}",
         names(hits)
+    );
+}
+
+fn assert_source_name_ranks_before(
+    hits: &[SearchHit],
+    before_source: &str,
+    before_name: &str,
+    after_source: &str,
+    after_name: &str,
+) {
+    let pairs = source_names(hits);
+    let before_index = pairs
+        .iter()
+        .position(|pair| *pair == (before_source, before_name))
+        .unwrap_or_else(|| {
+            panic!("missing expected hit ({before_source:?}, {before_name:?}); got {pairs:?}")
+        });
+
+    let after_index = pairs
+        .iter()
+        .position(|pair| *pair == (after_source, after_name))
+        .unwrap_or_else(|| {
+            panic!("missing expected hit ({after_source:?}, {after_name:?}); got {pairs:?}")
+        });
+
+    assert!(
+        before_index < after_index,
+        "expected ({before_source:?}, {before_name:?}) to rank before ({after_source:?}, {after_name:?}); got {pairs:?}"
     );
 }
 
@@ -216,6 +250,181 @@ fn package_main_program_query_finds_package() {
     let hits = search(&index, "rg");
 
     assert_contains(&hits, PACKAGE_RIPGREP);
+}
+
+#[test]
+fn all_scope_search_surfaces_relevant_options_among_package_results() {
+    const SOURCE_HOME_MANAGER: &str = "home-manager";
+
+    let nixpkgs_context = ingest_context_for(SOURCE_NIXPKGS, REF_SMALL);
+    let nixos_context = ingest_context_for(SOURCE_NIXOS, REF_SMALL);
+    let home_manager_context = ingest_context_for(SOURCE_HOME_MANAGER, REF_SMALL);
+
+    let docs = vec![
+        package_doc_with_main_program(&nixpkgs_context, "git", "Git package.", "git"),
+        package_doc_for(&nixpkgs_context, "rubyPackages.git", "Ruby Git package."),
+        package_doc_for(
+            &nixpkgs_context,
+            "rubyPackages_3_4.git",
+            "Ruby 3.4 Git package.",
+        ),
+        package_doc_for(
+            &nixpkgs_context,
+            "rubyPackages_4_0.git",
+            "Ruby 4.0 Git package.",
+        ),
+        package_doc_for(&nixpkgs_context, "git-doc", "Git documentation package."),
+        option_doc_for(&nixos_context, OPTION_GIT_ENABLE, "NixOS Git option."),
+        option_doc_for(
+            &home_manager_context,
+            OPTION_GIT_ENABLE,
+            "Home Manager Git option.",
+        ),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let result = index
+        .search(SearchOptions {
+            query: "git".to_owned(),
+            limit: 6,
+            scopes: vec![
+                SearchScope {
+                    source: SOURCE_NIXPKGS.to_owned(),
+                    ref_id: REF_SMALL.to_owned(),
+                },
+                SearchScope {
+                    source: SOURCE_NIXOS.to_owned(),
+                    ref_id: REF_SMALL.to_owned(),
+                },
+                SearchScope {
+                    source: SOURCE_HOME_MANAGER.to_owned(),
+                    ref_id: REF_SMALL.to_owned(),
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let pairs = source_names(&result.hits);
+
+    assert_eq!(pairs.first().copied(), Some((SOURCE_NIXPKGS, "git")));
+    assert!(
+        pairs
+            .iter()
+            .take(6)
+            .any(|pair| pair.0 != SOURCE_NIXPKGS && pair.1 == OPTION_GIT_ENABLE),
+        "expected first results to include a relevant non-nixpkgs option; got {pairs:?}"
+    );
+    assert_source_name_ranks_before(
+        &result.hits,
+        SOURCE_NIXOS,
+        OPTION_GIT_ENABLE,
+        SOURCE_NIXPKGS,
+        "rubyPackages_3_4.git",
+    );
+}
+
+#[test]
+fn source_search_demotes_repeated_package_set_variants() {
+    let context = ingest_context_for(SOURCE_NIXPKGS, REF_SMALL);
+    let docs = vec![
+        package_doc_with_main_program(&context, "git", "Git package.", "git"),
+        package_doc_for(&context, "rubyPackages.git", "Ruby Git package."),
+        package_doc_for(&context, "rubyPackages_3_4.git", "Ruby 3.4 Git package."),
+        package_doc_for(&context, "rubyPackages_4_0.git", "Ruby 4.0 Git package."),
+        package_doc_for(&context, "git-doc", "Git documentation package."),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "git");
+
+    assert_ranks_before(&hits, "git", "rubyPackages.git");
+    assert_ranks_before(&hits, "git-doc", "rubyPackages_3_4.git");
+}
+
+#[test]
+fn package_set_query_keeps_package_set_result_prominent() {
+    let context = ingest_context_for(SOURCE_NIXPKGS, REF_SMALL);
+    let docs = vec![
+        package_doc_with_main_program(&context, "git", "Git package.", "git"),
+        package_doc_for(&context, "rubyPackages.git", "Ruby Git package."),
+        package_doc_for(&context, "rubyPackages_3_4.git", "Ruby 3.4 Git package."),
+        package_doc_for(&context, "rubyPackages_4_0.git", "Ruby 4.0 Git package."),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "rubyPackages git");
+
+    assert_eq!(
+        hits.first().map(|hit| hit.document.name()),
+        Some("rubyPackages.git")
+    );
+}
+
+#[test]
+fn structured_option_query_prefers_path_prefix_matches() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![
+        option_doc_for(&context, "services.git-sync.enable", "Git sync service."),
+        option_doc_for(
+            &context,
+            "services.gitDaemon.package",
+            "Git daemon package.",
+        ),
+        option_doc_for(
+            &context,
+            "services.gitlab-runner.services",
+            "GitLab Runner services.",
+        ),
+        option_doc_for(&context, OPTION_GIT_ENABLE, "Git program option."),
+        option_doc_for(
+            &context,
+            "hjem.users.<username>.systemd.services",
+            "User services.",
+        ),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "services.git");
+
+    assert_ranks_before(&hits, "services.git-sync.enable", OPTION_GIT_ENABLE);
+    assert_ranks_before(
+        &hits,
+        "services.gitDaemon.package",
+        "hjem.users.<username>.systemd.services",
+    );
+    assert_ranks_before(
+        &hits,
+        "services.gitlab-runner.services",
+        "hjem.users.<username>.systemd.services",
+    );
+}
+
+#[test]
+fn structured_option_query_prefers_shallower_path_prefix_matches() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![
+        option_doc_for(&context, "services.git-sync.enable", "Git sync service."),
+        option_doc_for(
+            &context,
+            "services.git-sync.repositories.<name>.extraPackages",
+            "Extra packages available to git-sync.",
+        ),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "services.git");
+
+    assert_ranks_before(
+        &hits,
+        "services.git-sync.enable",
+        "services.git-sync.repositories.<name>.extraPackages",
+    );
 }
 
 #[test]
