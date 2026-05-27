@@ -253,7 +253,10 @@ pub fn navigation_script() -> String {
           if (!tab.hasAttribute("data-nixsearch-source")) return;
 
           evt.preventDefault();
-          const sourceId = tab.dataset.nixsearchSource || "";
+          let sourceId = tab.dataset.nixsearchSource || "";
+          if (sourceId && sourceId === currentSourceFromTabs()) {
+            sourceId = "";
+          }
           setActiveSourceTab(sourceId);
           populateRefRadios(sourceId);
 
