@@ -132,6 +132,75 @@ fn fuzzy_option_leaf_prefix_query_finds_option_name() {
 }
 
 #[test]
+fn fuzzy_option_leaf_query_allows_two_edits_for_long_terms() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![option_doc_for(
+        &context,
+        "environment.systemPackages",
+        "Fixture option.",
+    )];
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "stemPackages");
+
+    assert_contains(&hits, "environment.systemPackages");
+}
+
+#[test]
+fn fuzzy_option_leaf_query_handles_transposed_letters() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![option_doc_for(
+        &context,
+        "environment.systemPackages",
+        "Fixture option.",
+    )];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "systmePackages");
+
+    assert_contains(&hits, "environment.systemPackages");
+}
+
+#[test]
+fn compact_fuzzy_query_finds_split_camel_case_option_name() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![option_doc_for(
+        &context,
+        "environment.systemPackages",
+        "Fixture option.",
+    )];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "system packages");
+
+    assert_contains(&hits, "environment.systemPackages");
+}
+
+#[test]
+fn short_query_does_not_fuzzy_match_nearby_option_name() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![option_doc_for(
+        &context,
+        "services.rug.enable",
+        "Fixture option.",
+    )];
+
+    let (_tempdir, index) = build_index(docs);
+
+    let hits = search(&index, "rg");
+
+    assert!(
+        !hits
+            .iter()
+            .any(|hit| hit.document.name() == "services.rug.enable"),
+        "short fuzzy query should not match nearby option name; got {:?}",
+        names(&hits)
+    );
+}
+
+#[test]
 fn package_attribute_query_finds_package() {
     let (_tempdir, index) = build_index(canonical_documents());
 

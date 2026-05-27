@@ -4,9 +4,10 @@ use std::io::Write as _;
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BoostQuery, QueryParser};
+use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser};
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value as _};
-use tantivy::{Index, IndexReader, IndexWriter, doc};
+use tantivy::tokenizer::TokenStream as _;
+use tantivy::{Index, IndexReader, IndexWriter, Term, doc};
 use time::OffsetDateTime;
 
 use nixsearch_core::{ArtifactKind, DocumentKind, OptionDoc, PackageDoc, SearchDocument};
@@ -241,38 +242,8 @@ impl SearchIndex {
                 Box::new(BoostQuery::new(exact_query, 1.0)),
             )];
 
-        let mut fuzzy_parser = QueryParser::for_index(
-            &self.index,
-            vec![
-                self.fields.name_text,
-                self.fields.name_leaf,
-                self.fields.name_groups,
-                self.fields.attribute_text,
-                self.fields.main_program,
-            ],
-        );
-
-        fuzzy_parser.set_field_boost(self.fields.name_text, 10.0);
-        fuzzy_parser.set_field_boost(self.fields.name_leaf, 6.0);
-        fuzzy_parser.set_field_boost(self.fields.name_groups, 5.0);
-        fuzzy_parser.set_field_boost(self.fields.attribute_text, 12.0);
-        fuzzy_parser.set_field_boost(self.fields.main_program, 8.0);
-
-        for field in [
-            self.fields.name_text,
-            self.fields.name_leaf,
-            self.fields.name_groups,
-            self.fields.attribute_text,
-            self.fields.main_program,
-        ] {
-            fuzzy_parser.set_field_fuzzy(field, true, 1, true);
-        }
-
-        if let Ok(fuzzy_query) = fuzzy_parser.parse_query(&options.query) {
-            text_clauses.push((
-                tantivy::query::Occur::Should,
-                Box::new(BoostQuery::new(fuzzy_query, 0.25)),
-            ));
+        if let Some(fuzzy_query) = build_fuzzy_query(&self.index, &options.query, &self.fields)? {
+            text_clauses.push((Occur::Should, fuzzy_query));
         }
 
         let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![(
@@ -556,6 +527,122 @@ fn add_name_parts(
     for group in &common.name_parts.groups {
         document.add_text(fields.name_groups, group);
     }
+}
+
+fn build_fuzzy_query(
+    index: &Index,
+    query: &str,
+    fields: &IndexFields,
+) -> Result<Option<Box<dyn Query>>> {
+    let terms = fuzzy_query_terms(index, fields.name_text, query)?;
+
+    let mut term_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+    for term in terms {
+        let Some(distance) = fuzzy_distance(&term) else {
+            continue;
+        };
+
+        let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        add_fuzzy_field_clause(&mut field_clauses, fields.name_text, &term, distance, 10.0);
+        add_fuzzy_field_clause(
+            &mut field_clauses,
+            fields.attribute_text,
+            &term,
+            distance,
+            12.0,
+        );
+
+        term_clauses.push((Occur::Should, Box::new(BooleanQuery::new(field_clauses))));
+    }
+
+    if term_clauses.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(Box::new(BooleanQuery::new(term_clauses))))
+}
+
+fn fuzzy_query_terms(index: &Index, field: Field, query: &str) -> Result<Vec<String>> {
+    let mut terms = Vec::new();
+
+    let mut analyzer = index
+        .tokenizer_for_field(field)
+        .context("failed to get tokenizer for fuzzy query field")?;
+    let mut token_stream = analyzer.token_stream(query);
+
+    token_stream.process(&mut |token| {
+        terms.push(token.text.clone());
+    });
+
+    if let Some(compact) = compact_query_term(query) {
+        terms.push(compact);
+    }
+
+    let mut deduped = Vec::new();
+
+    for term in terms {
+        if !deduped.contains(&term) {
+            deduped.push(term);
+        }
+    }
+
+    Ok(deduped)
+}
+
+fn compact_query_term(query: &str) -> Option<String> {
+    let mut compact = String::new();
+
+    for ch in query.chars().filter(|ch| ch.is_alphanumeric()) {
+        compact.extend(ch.to_lowercase());
+    }
+
+    if compact.is_empty() {
+        None
+    } else {
+        Some(compact)
+    }
+}
+
+fn add_fuzzy_field_clause(
+    clauses: &mut Vec<(Occur, Box<dyn Query>)>,
+    field: Field,
+    term: &str,
+    distance: u8,
+    field_boost: f32,
+) {
+    let fuzzy_query: Box<dyn Query> = Box::new(FuzzyTermQuery::new_prefix(
+        Term::from_field_text(field, term),
+        distance,
+        true,
+    ));
+
+    clauses.push((
+        Occur::Should,
+        Box::new(BoostQuery::new(
+            fuzzy_query,
+            fuzzy_boost(distance, field_boost),
+        )),
+    ));
+}
+
+fn fuzzy_distance(term: &str) -> Option<u8> {
+    match term.chars().count() {
+        0..=3 => None,
+        4..=7 => Some(1),
+        _ => Some(2),
+    }
+}
+
+fn fuzzy_boost(distance: u8, field_boost: f32) -> f32 {
+    let distance_boost = match distance {
+        0 => 1.0,
+        1 => 0.25,
+        _ => 0.10,
+    };
+
+    field_boost * distance_boost
 }
 
 fn build_schema() -> Schema {
