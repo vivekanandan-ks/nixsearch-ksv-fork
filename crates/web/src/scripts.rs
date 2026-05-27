@@ -350,6 +350,10 @@ pub fn navigation_script() -> String {
           if (form.method && form.method.toLowerCase() !== "get") return;
 
           evt.preventDefault();
+
+          const q = form.querySelector('[data-nixsearch-input="q"]');
+          if (q) q.blur();
+
           navigate(buildSearchUrlFromInputs());
         });
 
