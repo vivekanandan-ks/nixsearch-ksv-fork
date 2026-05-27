@@ -334,14 +334,16 @@ html.modal-open body {
 /* ─── Sticky footer ─── */
 
 .footer {
+  --footer-bleed: 4rem;
+
   position: fixed;
-  bottom: 0;
+  bottom: calc(-1 * var(--footer-bleed));
   left: 0;
   right: 0;
   z-index: 100;
   background: var(--header-bg);
   border-top: 1px solid var(--border);
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 1rem calc(0.5rem + var(--footer-bleed));
 }
 
 .footer-inner {
