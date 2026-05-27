@@ -41,22 +41,6 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                         }
                     }))
                 }
-                @let flags: Vec<(&str, bool)> = [
-                    ("Read only", option.read_only),
-                    ("Internal", option.internal),
-                    ("Visible", option.visible),
-                ].into_iter()
-                    .filter_map(|(name, value)| value.map(|v| (name, v)))
-                    .collect();
-                @if !flags.is_empty() {
-                    (section("Flags", html! {
-                        ul {
-                            @for (name, value) in &flags {
-                                li { (name) ": " (value) }
-                            }
-                        }
-                    }))
-                }
             }
         }
 
