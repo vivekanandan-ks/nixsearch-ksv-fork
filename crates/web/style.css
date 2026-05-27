@@ -630,6 +630,11 @@ dialog::backdrop {
   font-size: 0.8rem;
 }
 
+.entry-section .tag-list.code-tags li {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+}
+
 pre {
   overflow-x: auto;
   background: var(--bg);

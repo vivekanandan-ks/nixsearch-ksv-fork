@@ -68,7 +68,6 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                 @let summary: Vec<(&str, &str)> = [
                     ("pname", package.pname.as_deref()),
                     ("version", package.version.as_deref()),
-                    ("main program", package.main_program.as_deref()),
                 ].into_iter()
                     .filter_map(|(k, v)| v.map(|val| (k, val)))
                     .collect();
@@ -83,6 +82,12 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                             }
                         }
                     }))
+                }
+                @if let Some(main_program) = &package.main_program {
+                    (code_tags_section("Main Program", std::slice::from_ref(main_program)))
+                }
+                @if !package.programs.is_empty() {
+                    (code_tags_section("Programs", &package.programs))
                 }
                 @if let Some(long_description) = &package.long_description {
                     (section("Long description", html! { p { (long_description) } }))
@@ -190,6 +195,19 @@ fn maintainers_section(maintainers: &[Maintainer]) -> Markup {
                         .or(maintainer.email.as_deref())
                         .unwrap_or("unknown");
                     li { (label) }
+                }
+            }
+        },
+    )
+}
+
+fn code_tags_section(title: &str, values: &[String]) -> Markup {
+    section(
+        title,
+        html! {
+            ul.tag-list.code-tags {
+                @for value in values {
+                    li { code { (value) } }
                 }
             }
         },

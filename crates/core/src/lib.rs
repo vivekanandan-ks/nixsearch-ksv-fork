@@ -410,6 +410,7 @@ pub struct PackageDoc {
     pub licenses: Vec<License>,
     pub maintainers: Vec<Maintainer>,
     pub main_program: Option<String>,
+    pub programs: Vec<String>,
     pub position: Option<String>,
     pub broken: Option<bool>,
 }
@@ -431,6 +432,7 @@ impl PackageDoc {
             licenses: Vec::new(),
             maintainers: Vec::new(),
             main_program: None,
+            programs: Vec::new(),
             position: None,
             broken: None,
         }

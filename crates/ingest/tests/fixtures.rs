@@ -62,5 +62,6 @@ fn parses_search_small_packages_fixture() {
         .unwrap();
 
     assert_eq!(ripgrep.main_program.as_deref(), Some("rg"));
+    assert_eq!(ripgrep.programs, ["rg"]);
     assert_eq!(ripgrep.platforms, ["x86_64-linux"]);
 }

@@ -134,6 +134,13 @@ struct RawPackage {
     version: Option<String>,
 
     #[serde(default)]
+    #[serde(alias = "package_programs")]
+    programs: Vec<String>,
+
+    #[serde(default, alias = "package_mainProgram")]
+    main_program: Option<String>,
+
+    #[serde(default)]
     meta: RawPackageMeta,
 }
 
@@ -219,7 +226,8 @@ fn convert_package(attribute: String, raw: RawPackage, context: &IngestContext) 
         .maintainers
         .map(maintainers_from_json_value)
         .unwrap_or_default();
-    doc.main_program = raw.meta.main_program;
+    doc.main_program = raw.meta.main_program.or(raw.main_program);
+    doc.programs = raw.programs;
     doc.position = raw.meta.position;
     doc.broken = raw.meta.broken;
 
