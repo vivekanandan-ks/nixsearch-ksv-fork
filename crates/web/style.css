@@ -440,14 +440,6 @@ html.modal-open body {
   text-decoration-color: var(--source-color, var(--accent));
 }
 
-.entry-name::after,
-a.entry-desc::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  cursor: pointer;
-}
-
 .source-tag {
   font-family: inherit;
   font-weight: 600;
