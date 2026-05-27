@@ -90,7 +90,7 @@ fn render_entry(request: &PageRequest, document: &SearchDocument, config: &AppCo
                                 }
                             }
                         }
-                        a.entry-close href=(close_href) data-role="entry-close" { "✕ Close" }
+                        a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
                     }
                     (detail::render(document, config))
                 }
@@ -109,7 +109,7 @@ fn render_error(request: &PageRequest, message: &str) -> Markup {
                 article.entry {
                     header {
                         h2 { "Error" }
-                        a.entry-close href=(close_href) data-role="entry-close" { "✕ Close" }
+                        a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
                     }
                     div.results-error { (message) }
                 }
@@ -132,7 +132,7 @@ fn render_ambiguous(
                 article.entry {
                     header {
                         h2 { "Multiple entries found" }
-                        a.entry-close href=(close_href) data-role="entry-close" { "✕ Close" }
+                        a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
                     }
                     p { "This name exists in multiple forms. Choose one:" }
                     ul {
