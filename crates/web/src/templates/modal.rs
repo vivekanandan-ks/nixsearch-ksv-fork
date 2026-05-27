@@ -6,7 +6,7 @@ use nixsearch_index::{EntryLookup, EntryLookupResult, SearchIndex};
 
 use crate::AppState;
 use crate::request::{LinkOrigin, PageQuery, PageRequest, parse_document_kind, resolve_entry_ref};
-use crate::urls::{close_url_for, entry_url_for, ref_id_for_link};
+use crate::urls::{close_url_for, entry_url_for, ref_id_for_link, search_url_for};
 
 use super::{detail, source_tag};
 
@@ -66,6 +66,13 @@ fn render_empty() -> Markup {
 fn render_entry(request: &PageRequest, document: &SearchDocument, config: &AppConfig) -> Markup {
     let common = document.common();
     let close_href = close_url_for(request);
+    let source_href = search_url_for(
+        Some(&common.source),
+        &PageQuery {
+            q: request.query.q.clone(),
+            ..PageQuery::default()
+        },
+    );
 
     html! {
         div #entry-modal-container {
@@ -76,8 +83,8 @@ fn render_entry(request: &PageRequest, document: &SearchDocument, config: &AppCo
                         div {
                             h2 { (common.name) }
                             div.meta {
-                                (source_tag::render(config, &common.source))
-                                " " (common.kind.as_str()) " · " (common.ref_id)
+                                (source_tag::render_link(config, &common.source, &source_href))
+                                (common.kind.as_str()) " · " (common.ref_id)
                                 @if let Some(revision) = &common.revision {
                                     " · " code { (&revision[..revision.len().min(8)]) }
                                 }

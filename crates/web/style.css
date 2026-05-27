@@ -447,6 +447,14 @@ html.modal-open body {
   color: var(--source-color, var(--src-default));
 }
 
+.source-tag-link {
+  text-decoration: none;
+}
+
+.source-tag-link:hover {
+  text-decoration: underline;
+}
+
 .source-sep {
   color: var(--text-dim);
   font-weight: 400;
@@ -568,6 +576,10 @@ dialog::backdrop {
   color: var(--text-dim);
   font-size: 0.8rem;
   margin-top: 0.25rem;
+}
+
+.entry header .meta .source-sep {
+  margin: 0 0.25em;
 }
 
 .entry-close {

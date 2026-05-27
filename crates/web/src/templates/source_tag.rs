@@ -20,6 +20,20 @@ pub fn render(config: &AppConfig, source_id: &str) -> Markup {
     }
 }
 
+pub fn render_link(config: &AppConfig, source_id: &str, href: &str) -> Markup {
+    let color = color_for_source(config, source_id);
+
+    html! {
+        a.source-tag.source-tag-link
+            href=(href)
+            data-source=(source_id)
+            style=(format!("--source-color: {color};")) {
+            (source_id)
+        }
+        span.source-sep { "/" }
+    }
+}
+
 pub fn color_for_source(config: &AppConfig, source_id: &str) -> String {
     if let Some(color) = config
         .sources
