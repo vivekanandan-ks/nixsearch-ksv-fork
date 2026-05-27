@@ -170,11 +170,13 @@ fn render_hit_row(
     );
 
     let desc = summary.unwrap_or("");
+    let source_color = source_tag::color_for_source(config, &common.source);
 
     html! {
         tr data-href=(entry_href) {
             td.col-name title=(common.name) {
-                a.entry-name href=(entry_href) {
+                a.entry-name href=(entry_href)
+                    style=(format!("--source-color: {source_color};")) {
                     @if show_source {
                         (source_tag::render(config, &common.source))
                     }

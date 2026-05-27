@@ -432,7 +432,7 @@ body {
 
 .entry-name:hover {
   text-decoration: underline;
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--source-color, var(--accent));
 }
 
 .entry-name::after,
