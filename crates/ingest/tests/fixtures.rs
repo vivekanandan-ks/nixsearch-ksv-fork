@@ -1,4 +1,4 @@
-use nixsearch_core::SearchDocument;
+use nixsearch_core::document::SearchDocument;
 use nixsearch_ingest::{parse_options_json, parse_packages_json};
 use nixsearch_test_support::{
     OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, OPTION_SYSTEMD_BOOT_ENABLE, OPTION_TAILSCALE_ENABLE,

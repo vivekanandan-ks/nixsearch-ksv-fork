@@ -8,7 +8,7 @@ use camino::Utf8PathBuf;
 use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;

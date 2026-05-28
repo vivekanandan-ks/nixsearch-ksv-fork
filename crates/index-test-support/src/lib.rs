@@ -4,7 +4,8 @@
 //! the base test fixtures in its own tests without creating a dependency cycle.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use nixsearch_core::{ArtifactKind, SearchDocument};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::document::SearchDocument;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
 use nixsearch_index::store::IndexStore;

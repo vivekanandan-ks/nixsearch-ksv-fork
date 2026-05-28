@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tantivy::schema::TantivyDocument;
 use tantivy::{IndexWriter, doc};
 
-use nixsearch_core::{CommonDoc, OptionDoc, PackageDoc, SearchDocument};
+use nixsearch_core::document::{CommonDoc, OptionDoc, PackageDoc, SearchDocument};
 
 use crate::schema::IndexFields;
 

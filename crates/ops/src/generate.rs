@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
 use nixsearch_index::store::IndexStore;

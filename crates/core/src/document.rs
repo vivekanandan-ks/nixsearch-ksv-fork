@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::{Declaration, IngestContext, NameParts, Repo, make_document_id};
+use crate::ingest::IngestContext;
+use crate::name::{NameParts, make_document_id};
+use crate::source_link::{Declaration, Repo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -192,7 +194,7 @@ impl SearchDocument {
 
 #[cfg(test)]
 mod tests {
-    use crate::IngestContext;
+    use crate::ingest::IngestContext;
 
     use super::{CommonDoc, DocumentKind, PackageDoc};
 

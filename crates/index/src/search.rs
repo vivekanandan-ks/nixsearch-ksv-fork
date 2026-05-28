@@ -7,7 +7,7 @@ use tantivy::collector::{Count, TopDocs};
 use tantivy::schema::{TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher};
 
-use nixsearch_core::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
 use crate::schema::{IndexFields, build_schema};

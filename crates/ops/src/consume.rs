@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 
 use nixsearch_config::source::SourceKind;
-use nixsearch_core::{ArtifactKind, SearchDocument};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::document::SearchDocument;
 use nixsearch_source::artifact::ProducedArtifact;
 use nixsearch_source::consumer::{Consumer, OptionsJsonConsumer, PackagesJsonConsumer};
 use nixsearch_store::ArtifactStore;

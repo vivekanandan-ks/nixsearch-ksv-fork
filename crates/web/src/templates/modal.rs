@@ -1,7 +1,7 @@
 use maud::{Markup, html};
 
-use nixsearch_config::AppConfig;
-use nixsearch_core::SearchDocument;
+use nixsearch_config::app::AppConfig;
+use nixsearch_core::document::SearchDocument;
 use nixsearch_index::search::{EntryLookup, EntryLookupResult, SearchIndex};
 
 use crate::AppState;

@@ -6,8 +6,5 @@ pub mod server;
 pub mod source;
 mod validation;
 
-pub use app::AppConfig;
-pub use error::{ConfigError, Result};
-
 #[cfg(test)]
 mod tests;

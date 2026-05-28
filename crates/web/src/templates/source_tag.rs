@@ -1,6 +1,6 @@
 use maud::{Markup, html};
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 
 const DEFAULT_SOURCE_COLOR: &str = "#94a3b8";
 

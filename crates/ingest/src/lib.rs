@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use nixsearch_core::{
-    Declaration, IngestContext, License, Maintainer, OptionDoc, PackageDoc, SearchDocument,
-};
+use nixsearch_core::document::{License, Maintainer, OptionDoc, PackageDoc, SearchDocument};
+use nixsearch_core::ingest::IngestContext;
+use nixsearch_core::source_link::Declaration;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -307,7 +307,7 @@ fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use nixsearch_core::SearchDocument;
+    use nixsearch_core::document::SearchDocument;
     use nixsearch_test_support::{OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, ingest_context};
 
     use super::parse_options_json;

@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use time::OffsetDateTime;
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;

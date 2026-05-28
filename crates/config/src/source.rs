@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use nixsearch_core::{ArtifactKind, SourceLinkConfig};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::source_link::SourceLinkConfig;
 
 use crate::error::{ConfigError, Result};
 use crate::producer::{EvalModuleConfig, EvalModuleRefConfig, ProducerConfig};

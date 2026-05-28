@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use nixsearch_core::{ArtifactKind, IngestContext, SearchDocument};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::document::SearchDocument;
+use nixsearch_core::ingest::IngestContext;
 use nixsearch_ingest::{parse_options_json, parse_packages_json};
 use nixsearch_store::ArtifactStore;
 
@@ -88,7 +90,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use nixsearch_core::ArtifactKind;
+    use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_store::ArtifactStore;
     use nixsearch_test_support::{
         OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, REF_SMALL, SOURCE_FIXTURES,

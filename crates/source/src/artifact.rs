@@ -1,4 +1,5 @@
-use nixsearch_core::{ArtifactKind, IngestContext};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::ingest::IngestContext;
 use nixsearch_store::{ArtifactMetadata, ArtifactRef};
 
 #[derive(Debug, Clone)]

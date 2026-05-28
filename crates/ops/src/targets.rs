@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_index::manifest::IndexTargetManifest;
 use nixsearch_index::store::IndexStore;

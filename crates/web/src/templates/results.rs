@@ -1,7 +1,8 @@
 use maud::{Markup, html};
 
-use nixsearch_config::AppConfig;
-use nixsearch_core::{CommonDoc, SearchDocument, SourceLinkConfig};
+use nixsearch_config::app::AppConfig;
+use nixsearch_core::document::{CommonDoc, SearchDocument};
+use nixsearch_core::source_link::SourceLinkConfig;
 
 use nixsearch_index::search::SearchHit;
 
@@ -205,9 +206,9 @@ pub fn source_link_config_for_document<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nixsearch_core::{
-        Declaration, IngestContext, OptionDoc, SearchDocument, SourceLinkResolver,
-    };
+    use nixsearch_core::document::{OptionDoc, SearchDocument};
+    use nixsearch_core::ingest::IngestContext;
+    use nixsearch_core::source_link::{Declaration, SourceLinkResolver};
 
     #[test]
     fn resolves_source_link_when_available() {

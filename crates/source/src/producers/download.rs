@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_store::{ArtifactMetadataInput, ArtifactStore};
 
 use crate::artifact::{ProduceRequest, ProducedArtifact};
@@ -148,7 +148,7 @@ mod tests {
     use httpmock::prelude::*;
     use tempfile::tempdir;
 
-    use nixsearch_core::ArtifactKind;
+    use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_store::ArtifactStore;
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
 

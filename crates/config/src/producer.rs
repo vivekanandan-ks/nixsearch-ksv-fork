@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 
 use crate::error::Result;
 use crate::validation::{

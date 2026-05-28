@@ -1,7 +1,8 @@
 use maud::{Markup, html};
 
-use nixsearch_config::AppConfig;
-use nixsearch_core::{License, Maintainer, SearchDocument, SourceLinkResolver};
+use nixsearch_config::app::AppConfig;
+use nixsearch_core::document::{License, Maintainer, SearchDocument};
+use nixsearch_core::source_link::SourceLinkResolver;
 
 use super::results::source_link_config_for_document;
 

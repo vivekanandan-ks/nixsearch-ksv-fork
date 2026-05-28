@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use camino::Utf8PathBuf;
 use tempfile::{TempDir, tempdir};
 
-use nixsearch_core::{ArtifactKind, SourceLinkConfig};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::source_link::SourceLinkConfig;
 
-use crate::AppConfig;
+use crate::app::AppConfig;
 use crate::producer::{DownloadCompression, EvalModuleConfig, ProducerConfig, ProducerKind};
 use crate::source::{
     HJEM_COLOR, HJEM_RUM_COLOR, HOME_MANAGER_COLOR, NIX_DARWIN_COLOR, NIXOS_COLOR, NIXPKGS_COLOR,

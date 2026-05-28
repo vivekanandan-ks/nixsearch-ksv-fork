@@ -1,6 +1,6 @@
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_index::search::SearchResult;
 
 use crate::AppState;

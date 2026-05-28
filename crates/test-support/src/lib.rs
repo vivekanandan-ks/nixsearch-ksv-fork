@@ -3,15 +3,15 @@ use std::path::PathBuf;
 use camino::{Utf8Path, Utf8PathBuf};
 use tempfile::TempDir;
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_config::data::DataConfig;
 use nixsearch_config::producer::ProducerConfig;
 use nixsearch_config::server::ServerConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
-use nixsearch_core::{
-    ArtifactKind, Declaration, IngestContext, OptionDoc, PackageDoc, SearchDocument,
-    SourceLinkConfig,
-};
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::document::{OptionDoc, PackageDoc, SearchDocument};
+use nixsearch_core::ingest::IngestContext;
+use nixsearch_core::source_link::{Declaration, SourceLinkConfig};
 
 pub const SOURCE_FIXTURES: &str = "fixtures";
 pub const SOURCE_NIXOS: &str = "nixos";
@@ -278,7 +278,7 @@ mod tests {
 
         std::fs::write(&config_path, config_toml(&index_dir)).unwrap();
 
-        let config = nixsearch_config::AppConfig::load(Some(&config_path)).unwrap();
+        let config = nixsearch_config::app::AppConfig::load(Some(&config_path)).unwrap();
 
         assert_eq!(config.data.index_dir, index_dir);
     }

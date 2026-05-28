@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_store::{ArtifactMetadataInput, ArtifactStore};
 
 use crate::artifact::{ProduceRequest, ProducedArtifact};
@@ -302,7 +302,8 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use nixsearch_core::{ArtifactKind, SearchDocument};
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::SearchDocument;
     use nixsearch_store::ArtifactStore;
 
     use crate::artifact::ProduceRequest;

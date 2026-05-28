@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::process::Command;
 
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_store::{ArtifactMetadataInput, ArtifactStore};
 
 use crate::artifact::{ProduceRequest, ProducedArtifact};

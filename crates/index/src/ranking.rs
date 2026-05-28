@@ -4,7 +4,7 @@ use anyhow::Result;
 use tantivy::schema::Field;
 use tantivy::{Index, Score};
 
-use nixsearch_core::{PackageDoc, SearchDocument};
+use nixsearch_core::document::{PackageDoc, SearchDocument};
 
 use crate::search::SearchHit;
 use crate::tokenize::{

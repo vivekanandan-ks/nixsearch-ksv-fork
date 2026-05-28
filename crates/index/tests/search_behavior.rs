@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
-use nixsearch_core::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::search::{
     EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions, SearchScope,
 };

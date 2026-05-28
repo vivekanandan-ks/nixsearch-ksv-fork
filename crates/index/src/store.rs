@@ -276,7 +276,7 @@ mod tests {
     use camino::Utf8PathBuf;
     use tempfile::{TempDir, tempdir};
 
-    use nixsearch_core::ArtifactKind;
+    use nixsearch_core::artifact::ArtifactKind;
 
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
     use crate::store::IndexStore;

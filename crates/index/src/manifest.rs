@@ -1,6 +1,6 @@
 use time::OffsetDateTime;
 
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 
 use crate::schema::INDEX_SCHEMA_VERSION;
 

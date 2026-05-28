@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 use nixsearch_config::producer::{
     DownloadCompression as ConfigDownloadCompression, EvalModuleConfig, EvalModuleRefConfig,
     ProducerConfig,
 };
-use nixsearch_core::ArtifactKind;
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_source::artifact::{ProduceRequest, ProducedArtifact};
 use nixsearch_source::producers::{
     ChannelOptionsJsonProducer, ChannelPackagesJsonProducer,

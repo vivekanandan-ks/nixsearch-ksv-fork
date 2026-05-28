@@ -1,6 +1,6 @@
 use maud::{Markup, html};
 
-use nixsearch_config::AppConfig;
+use nixsearch_config::app::AppConfig;
 
 use crate::request::{PageQuery, SourceFilter, non_empty};
 use crate::urls::{ref_id_for_link, search_url_for};

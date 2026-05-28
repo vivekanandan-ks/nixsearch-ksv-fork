@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Repo;
+use crate::source_link::Repo;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestContext {
