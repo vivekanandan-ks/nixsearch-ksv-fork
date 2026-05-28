@@ -15,7 +15,7 @@ use nixsearch_ops::produce::{
     artifact_store_from_config, latest_artifact_ref_for_target, produce_target,
 };
 use nixsearch_ops::targets::{TargetKey, current_manifest_targets, select_targets};
-use nixsearch_source::ProducedArtifact;
+use nixsearch_source::artifact::ProducedArtifact;
 
 #[derive(Debug, Parser)]
 #[command(name = "nixsearch")]

@@ -8,11 +8,12 @@ use nixsearch_config::producer::{
     ProducerConfig,
 };
 use nixsearch_core::ArtifactKind;
-use nixsearch_source::{
+use nixsearch_source::artifact::{ProduceRequest, ProducedArtifact};
+use nixsearch_source::producers::{
     ChannelOptionsJsonProducer, ChannelPackagesJsonProducer,
     DownloadCompression as SourceDownloadCompression, DownloadProducer, EvalModule, EvalModuleRef,
     EvalModulesProducer, ExistingFileProducer, FlakeFileProducer, NixBuildOptionsJsonProducer,
-    ProduceRequest, ProducedArtifact, Producer,
+    Producer,
 };
 use nixsearch_store::{ArtifactRef, ArtifactStore};
 

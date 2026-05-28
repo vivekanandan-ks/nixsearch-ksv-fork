@@ -76,7 +76,8 @@ mod tests {
     use nixsearch_store::ArtifactStore;
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
 
-    use crate::{ExistingFileProducer, ProduceRequest, Producer};
+    use crate::artifact::ProduceRequest;
+    use crate::producers::{ExistingFileProducer, Producer};
 
     #[tokio::test]
     async fn existing_file_producer_writes_artifact_to_store() {

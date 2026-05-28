@@ -264,7 +264,7 @@ async fn fetch_channel_git_revision(channel: &str) -> Result<Option<String>> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::{ChannelOptionsJsonProducer, ChannelPackagesJsonProducer};
+    use crate::producers::{ChannelOptionsJsonProducer, ChannelPackagesJsonProducer};
 
     use super::merge_package_programs;
 

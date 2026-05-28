@@ -305,10 +305,9 @@ mod tests {
     use nixsearch_core::{ArtifactKind, SearchDocument};
     use nixsearch_store::ArtifactStore;
 
-    use crate::{
-        Consumer, EvalModule, EvalModuleRef, EvalModulesProducer, OptionsJsonConsumer,
-        ProduceRequest, Producer,
-    };
+    use crate::artifact::ProduceRequest;
+    use crate::consumer::{Consumer, OptionsJsonConsumer};
+    use crate::producers::{EvalModule, EvalModuleRef, EvalModulesProducer, Producer};
 
     use super::{EvalModulesExpression, eval_modules_expression};
 

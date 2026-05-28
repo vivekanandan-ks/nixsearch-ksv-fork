@@ -152,7 +152,8 @@ mod tests {
     use nixsearch_store::ArtifactStore;
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
 
-    use crate::{DownloadCompression, DownloadProducer, ProduceRequest, Producer};
+    use crate::artifact::ProduceRequest;
+    use crate::producers::{DownloadCompression, DownloadProducer, Producer};
 
     #[tokio::test]
     async fn download_producer_writes_artifact_to_store() {

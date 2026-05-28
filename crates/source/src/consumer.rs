@@ -94,7 +94,9 @@ mod tests {
         OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, REF_SMALL, SOURCE_FIXTURES,
     };
 
-    use crate::{Consumer, ExistingFileProducer, OptionsJsonConsumer, ProduceRequest, Producer};
+    use crate::artifact::ProduceRequest;
+    use crate::consumer::{Consumer, OptionsJsonConsumer};
+    use crate::producers::{ExistingFileProducer, Producer};
 
     #[tokio::test]
     async fn options_json_consumer_reads_produced_artifact() {
