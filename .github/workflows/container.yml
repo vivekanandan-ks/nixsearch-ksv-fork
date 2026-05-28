@@ -125,7 +125,7 @@ jobs:
     name: Update Komodo stack
     needs: manifest
     runs-on: ubuntu-latest
-    environment: proudction
+    environment: production
 
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
 
@@ -137,6 +137,9 @@ jobs:
           KOMODO_API_URL: ${{ vars.KOMODO_API_URL }}
           KOMODO_STACK_NAME: ${{ vars.KOMODO_STACK_NAME }}
         run: |
+          : "${KOMODO_API_URL:?KOMODO_API_URL is not set}"
+          : "${KOMODO_STACK_NAME:?KOMODO_STACK_NAME is not set}"
+
           api_url="${KOMODO_API_URL%/}"
 
           jq -n --arg stack "$KOMODO_STACK_NAME" \
