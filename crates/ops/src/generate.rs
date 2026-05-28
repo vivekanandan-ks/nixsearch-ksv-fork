@@ -4,7 +4,9 @@ use anyhow::Result;
 use camino::Utf8PathBuf;
 
 use nixsearch_config::AppConfig;
-use nixsearch_index::{IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchIndex};
+use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
+use nixsearch_index::search::SearchIndex;
+use nixsearch_index::store::IndexStore;
 use nixsearch_store::ArtifactStore;
 
 use crate::consume::consume_target;

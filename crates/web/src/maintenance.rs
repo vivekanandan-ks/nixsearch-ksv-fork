@@ -7,7 +7,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use time::OffsetDateTime;
 
 use nixsearch_config::AppConfig;
-use nixsearch_index::{IndexGenerationManifest, IndexStore};
+use nixsearch_index::manifest::IndexGenerationManifest;
+use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
 use nixsearch_ops::targets::{TargetKey, all_targets};
@@ -309,7 +310,7 @@ mod tests {
     use std::time::Duration;
 
     use camino::Utf8PathBuf;
-    use nixsearch_index::IndexStore;
+    use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         assert_canonical_manifest_targets, publish_canonical_index,
         publish_canonical_index_with_generated_at,

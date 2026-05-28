@@ -278,7 +278,8 @@ mod tests {
 
     use nixsearch_core::ArtifactKind;
 
-    use crate::{IndexGenerationManifest, IndexStore, IndexTargetManifest};
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::store::IndexStore;
 
     const SOURCE_FIXTURES: &str = "fixtures";
     const REF_SMALL: &str = "small";

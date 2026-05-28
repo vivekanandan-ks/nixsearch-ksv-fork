@@ -3,7 +3,7 @@ use maud::{Markup, html};
 use nixsearch_config::AppConfig;
 use nixsearch_core::{CommonDoc, SearchDocument, SourceLinkConfig};
 
-use nixsearch_index::SearchHit;
+use nixsearch_index::search::SearchHit;
 
 use crate::DEFAULT_LIMIT;
 use crate::request::{LinkOrigin, PageQuery, PageRequest, normalized_query};

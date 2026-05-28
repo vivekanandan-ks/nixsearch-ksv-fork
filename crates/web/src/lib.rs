@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::AppConfig;
-use nixsearch_index::IndexStore;
+use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
 
@@ -218,7 +218,7 @@ fn log_startup_maintenance_state(
 mod tests {
     use std::fs;
 
-    use nixsearch_index::IndexStore;
+    use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         assert_canonical_options_manifest_targets, publish_canonical_options_index,
     };

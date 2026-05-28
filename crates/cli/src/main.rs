@@ -7,7 +7,8 @@ use clap::{Args, Parser, Subcommand};
 use nixsearch_config::AppConfig;
 use nixsearch_config::source::SourceConfig;
 use nixsearch_core::{CommonDoc, SearchDocument, SourceLinkConfig, SourceLinkResolver};
-use nixsearch_index::{IndexStore, SearchHit, SearchIndex, SearchOptions, SearchScope};
+use nixsearch_index::search::{SearchHit, SearchIndex, SearchOptions, SearchScope};
+use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate::build_and_publish_generation;
 use nixsearch_ops::lock::acquire_update_lock;
 use nixsearch_ops::produce::{

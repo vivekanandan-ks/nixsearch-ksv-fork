@@ -5,7 +5,9 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use nixsearch_core::{ArtifactKind, SearchDocument};
-use nixsearch_index::{IndexGenerationManifest, IndexStore, IndexTargetManifest, SearchIndex};
+use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
+use nixsearch_index::search::SearchIndex;
+use nixsearch_index::store::IndexStore;
 use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES, canonical_documents};
 
 pub fn publish_canonical_index(index_root: &Utf8Path) -> Utf8PathBuf {

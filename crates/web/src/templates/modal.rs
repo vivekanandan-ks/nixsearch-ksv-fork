@@ -2,7 +2,7 @@ use maud::{Markup, html};
 
 use nixsearch_config::AppConfig;
 use nixsearch_core::SearchDocument;
-use nixsearch_index::{EntryLookup, EntryLookupResult, SearchIndex};
+use nixsearch_index::search::{EntryLookup, EntryLookupResult, SearchIndex};
 
 use crate::AppState;
 use crate::request::{LinkOrigin, PageQuery, PageRequest, parse_document_kind, resolve_entry_ref};

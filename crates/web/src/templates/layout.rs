@@ -1,7 +1,7 @@
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use nixsearch_config::AppConfig;
-use nixsearch_index::SearchResult;
+use nixsearch_index::search::SearchResult;
 
 use crate::AppState;
 use crate::RECONCILE_EVENTS_URL;
