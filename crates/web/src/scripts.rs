@@ -164,7 +164,6 @@ pub fn navigation_script() -> String {
             if (results && !results.classList.contains("results-loading")) {
               setLoading(false);
               initializeVirtualResults();
-              observeSentinel();
               scheduleVisiblePageSync();
             }
           });
@@ -464,40 +463,13 @@ pub fn navigation_script() -> String {
 
         // ─── Infinite scroll ───
         const MORE_URL = "__MORE_RESULTS_URL__";
-        let loadingMore = false;
-        let loadMoreObserver = null;
 
         function pageForOffset(offset) {
           return Math.floor(Math.max(0, offset) / PAGE_SIZE) + 1;
         }
 
-        function observeSentinel() {
-          if (loadMoreObserver) {
-            loadMoreObserver.disconnect();
-            loadMoreObserver = null;
-          }
-
-          if (virtualResults) return;
-
-          const sentinel = document.querySelector("#load-more-sentinel .load-more-trigger");
-          if (!sentinel) return;
-
-          loadMoreObserver = new IntersectionObserver((entries) => {
-            for (const entry of entries) {
-              if (entry.isIntersecting && !loadingMore) {
-                loadMoreObserver.disconnect();
-                loadMoreObserver = null;
-                loadMore(entry.target);
-              }
-            }
-          }, { rootMargin: "200px" });
-
-          loadMoreObserver.observe(sentinel);
-        }
-
-        async function fetchMoreResults(offset, pageUrl = currentPublicUrl(), limit) {
+        async function fetchMoreResults(offset, pageUrl = currentPublicUrl()) {
           let url = `${MORE_URL}?url=${encodeURIComponent(pageUrl)}&offset=${offset}`;
-          if (limit) url += `&limit=${encodeURIComponent(limit)}`;
           const res = await fetch(url);
           return await res.json();
         }
@@ -523,7 +495,6 @@ pub fn navigation_script() -> String {
           const rows = Array.from(tbody.querySelectorAll("tr[data-result-page]"));
           const total = parseInt(results.dataset.total || "0", 10);
           const startOffset = parseInt(results.dataset.startOffset || "0", 10);
-          const loadedCount = parseInt(results.dataset.loadedCount || String(rows.length), 10);
           const rowHeight = measureResultRowHeight(rows);
 
           if (!Number.isFinite(total) || total <= 0 || !rowHeight || rows.length === 0) {
@@ -538,12 +509,12 @@ pub fn navigation_script() -> String {
             total,
             rowHeight,
             startOffset,
-            endOffset: Math.min(total, startOffset + loadedCount),
+            endOffset: Math.min(total, startOffset + rows.length),
             requestUrl: currentPublicUrl(),
             topSpacer: createVirtualSpacer("top"),
             bottomSpacer: createVirtualSpacer("bottom"),
             topSpacerHeight: startOffset * rowHeight,
-            bottomSpacerHeight: (total - Math.min(total, startOffset + loadedCount)) * rowHeight,
+            bottomSpacerHeight: (total - Math.min(total, startOffset + rows.length)) * rowHeight,
             loadingRow: null,
             loadingSpacer: null,
           };
@@ -852,47 +823,6 @@ pub fn navigation_script() -> String {
           resetVirtualSpacerHeights();
         }
 
-        async function loadMore(trigger) {
-          const offset = trigger.dataset.offset;
-          if (!offset) return;
-
-          loadingMore = true;
-
-          try {
-            const data = await fetchMoreResults(offset);
-
-            if (data.error) {
-              console.error("Load more failed:", data.error);
-              return;
-            }
-
-            // Preserve scroll position during DOM mutations
-            const scrollY = window.scrollY;
-
-            const tbody = document.getElementById("results-body");
-            if (tbody && data.rows) {
-              tbody.insertAdjacentHTML("beforeend", data.rows);
-            }
-
-            const sentinelEl = document.getElementById("load-more-sentinel");
-            if (sentinelEl) {
-              if (data.sentinel) {
-                sentinelEl.outerHTML = data.sentinel;
-              } else {
-                sentinelEl.remove();
-              }
-            }
-
-            window.scrollTo(0, scrollY);
-            scheduleVisiblePageSync();
-          } catch (e) {
-            console.error("Failed to load more results:", e);
-          } finally {
-            loadingMore = false;
-            observeSentinel();
-          }
-        }
-
         (() => {
           const dialog = document.getElementById("entry-modal");
           if (dialog && !dialog.open) dialog.showModal();
@@ -905,7 +835,6 @@ pub fn navigation_script() -> String {
         const initialPage = currentPageFromUrl();
         initializeVirtualResults();
         scrollToResultPage(initialPage);
-        observeSentinel();
         scheduleVisiblePageSync();
         window.addEventListener("scroll", () => {
           scheduleVisiblePageSync();
@@ -919,7 +848,6 @@ pub fn navigation_script() -> String {
         window.addEventListener(RECONCILE_EVENT, () => {
           setTimeout(() => {
             initializeVirtualResults();
-            observeSentinel();
             scheduleVisiblePageSync();
           }, 50);
         });

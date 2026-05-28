@@ -29,7 +29,6 @@ pub struct StateQuery {
 pub struct MoreQuery {
     url: String,
     offset: usize,
-    limit: Option<usize>,
 }
 
 pub async fn health() -> &'static str {
@@ -154,8 +153,7 @@ pub async fn more_results(
         }
     };
 
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).max(1);
-    let search_result = run_search(&state, &request, query.offset, limit);
+    let search_result = run_search(&state, &request, query.offset, DEFAULT_LIMIT);
 
     match search_result {
         Ok(result) => {
@@ -165,15 +163,8 @@ pub async fn more_results(
                 &state.config,
                 query.offset,
             );
-            let sentinel_html = templates::results::render_sentinel_update(
-                &result.hits,
-                query.offset,
-                result.total,
-            );
-
             Json(serde_json::json!({
                 "rows": rows_html,
-                "sentinel": sentinel_html,
                 "total": result.total
             }))
         }

@@ -44,9 +44,7 @@ pub fn render(
     html! {
         div #results aria-live="polite"
             data-total=(total)
-            data-page-size=(DEFAULT_LIMIT)
-            data-start-offset=(offset)
-            data-loaded-count=(hits.len()) {
+            data-start-offset=(offset) {
             div.results-status {
                 strong { (total) }
                 " result" @if total != 1 { "s" }
@@ -65,9 +63,6 @@ pub fn render(
                         (render_hit_row(request, hit, config, show_source, result_page))
                     }
                 }
-            }
-            @if offset + hits.len() < total {
-                (render_load_more_sentinel(offset + hits.len()))
             }
             @if page > 1 || offset + hits.len() < total {
                 noscript {
@@ -112,22 +107,6 @@ pub fn render_rows_only(
     markup.into_string()
 }
 
-/// Renders the updated sentinel div (either a new trigger or empty if no more results).
-pub fn render_sentinel_update(hits: &[SearchHit], offset: usize, total: usize) -> String {
-    let next_offset = offset + hits.len();
-
-    let markup = if !hits.is_empty() && next_offset < total {
-        render_load_more_sentinel(next_offset)
-    } else {
-        // Empty sentinel — no more results to load
-        html! {
-            div #load-more-sentinel {}
-        }
-    };
-
-    markup.into_string()
-}
-
 pub fn render_empty() -> Markup {
     html! {
         div #results.results-empty {
@@ -140,22 +119,6 @@ pub fn render_error(error: &str) -> Markup {
     html! {
         div #results.results-error {
             strong { "Search failed:" } " " (error)
-        }
-    }
-}
-
-fn render_load_more_sentinel(offset: usize) -> Markup {
-    html! {
-        div #load-more-sentinel {
-            (render_load_more_sentinel_inner(offset))
-        }
-    }
-}
-
-fn render_load_more_sentinel_inner(offset: usize) -> Markup {
-    html! {
-        div.load-more-trigger data-offset=(offset) {
-            ""
         }
     }
 }
@@ -282,14 +245,6 @@ mod tests {
             result.as_deref(),
             Some("https://github.com/example/repo/blob/abc123/module.nix#L4")
         );
-    }
-
-    #[test]
-    fn sentinel_update_stops_after_empty_page() {
-        let html = render_sentinel_update(&[], 1_000, 1_010);
-
-        assert!(html.contains("load-more-sentinel"));
-        assert!(!html.contains("load-more-trigger"));
     }
 
     #[test]
