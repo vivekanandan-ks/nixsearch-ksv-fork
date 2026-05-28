@@ -12,6 +12,7 @@
       cargoSourceFiles = lib.fileset.unions [
         (craneLib.fileset.commonCargoSources ../.)
         ../crates/web/style.css
+        ../crates/web/src/scripts
       ];
 
       cargoDepsSourceFiles = craneLib.fileset.cargoTomlAndLock ../.;
