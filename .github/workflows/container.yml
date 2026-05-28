@@ -120,3 +120,36 @@ jobs:
             $(printf -- '-t %s ' ${{ steps.meta.outputs.tags }}) \
             "${{ matrix.image }}:sha-${GITHUB_SHA}-amd64" \
             "${{ matrix.image }}:sha-${GITHUB_SHA}-arm64"
+
+  update-komodo:
+    name: Update Komodo stack
+    needs: manifest
+    runs-on: ubuntu-latest
+    environment: proudction
+
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+
+    steps:
+      - name: Check Komodo stack for image update
+        env:
+          KOMODO_API_KEY: ${{ vars.KOMODO_API_KEY }}
+          KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          KOMODO_API_URL: ${{ vars.KOMODO_API_URL }}
+          KOMODO_STACK_NAME: ${{ vars.KOMODO_STACK_NAME }}
+        run: |
+          api_url="${KOMODO_API_URL%/}"
+
+          jq -n --arg stack "$KOMODO_STACK_NAME" \
+            '{
+              stack: $stack,
+              skip_auto_update: false,
+              wait_for_auto_update: true,
+              skip_cache_refresh: false
+            }' > check-stack-for-update.json
+
+          curl --fail-with-body --silent --show-error \
+            --header "Content-Type: application/json" \
+            --header "X-Api-Key: ${KOMODO_API_KEY}" \
+            --header "X-Api-Secret: ${KOMODO_API_SECRET}" \
+            --data @check-stack-for-update.json \
+            "${api_url}/write/CheckStackForUpdate"
