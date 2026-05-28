@@ -156,8 +156,7 @@ impl SearchIndex {
             let mut fallback_hits = if diversify_sources {
                 self.search_native_filtered_hits(
                     &searcher,
-                    &options.query,
-                    &options.scopes,
+                    &options,
                     &candidate_ids,
                     options.offset.saturating_sub(candidate_window_len),
                     remaining,
@@ -244,8 +243,7 @@ impl SearchIndex {
     fn search_native_filtered_hits(
         &self,
         searcher: &Searcher,
-        query_text: &str,
-        scopes: &[SearchScope],
+        options: &SearchOptions,
         excluded_ids: &HashSet<String>,
         skip: usize,
         limit: usize,
@@ -255,7 +253,7 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
 
-        let query = self.build_query(query_text, scopes)?;
+        let query = self.build_query(&options.query, &options.scopes)?;
         let mut hits = Vec::with_capacity(limit);
         let mut skipped = 0;
         let mut native_offset = 0;

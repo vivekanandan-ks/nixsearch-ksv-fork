@@ -71,7 +71,7 @@ impl QueryAnalysis {
 
 pub(crate) fn rerank_candidate_limit(limit: usize, offset: usize) -> usize {
     let target = offset.saturating_add(limit).max(1);
-    target.saturating_mul(4).max(200).min(MAX_RERANK_CANDIDATES)
+    target.saturating_mul(4).clamp(200, MAX_RERANK_CANDIDATES)
 }
 
 pub(crate) fn rerank_candidates(
@@ -424,10 +424,10 @@ fn package_name_score(analysis: &QueryAnalysis, package: &PackageDoc) -> Score {
         }
     }
 
-    if let Some(main_program) = &package.main_program {
-        if main_program.to_lowercase() == analysis.normalized {
-            score += 85.0;
-        }
+    if let Some(main_program) = &package.main_program
+        && main_program.to_lowercase() == analysis.normalized
+    {
+        score += 85.0;
     }
 
     if package_set_explicit {
