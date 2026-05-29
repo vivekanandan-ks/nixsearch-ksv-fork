@@ -60,8 +60,9 @@ pub fn render(
                 }
                 tbody #results-body {
                     @for (index, hit) in hits.iter().enumerate() {
-                        @let result_page = page_for_offset(offset + index);
-                        (render_hit_row(request, hit, config, show_source, result_page))
+                        @let result_offset = offset + index;
+                        @let result_page = page_for_offset(result_offset);
+                        (render_hit_row(request, hit, config, show_source, result_page, result_offset))
                     }
                 }
             }
@@ -100,8 +101,9 @@ pub fn render_rows_only(
 
     let markup = html! {
         @for (index, hit) in hits.iter().enumerate() {
-            @let result_page = page_for_offset(offset + index);
-            (render_hit_row(request, hit, config, show_source, result_page))
+            @let result_offset = offset + index;
+            @let result_page = page_for_offset(result_offset);
+            (render_hit_row(request, hit, config, show_source, result_page, result_offset))
         }
     };
 
@@ -130,6 +132,7 @@ fn render_hit_row(
     config: &AppConfig,
     show_source: bool,
     result_page: usize,
+    result_offset: usize,
 ) -> Markup {
     let common = hit.document.common();
     let summary = summary_for_document(&hit.document);
@@ -160,9 +163,14 @@ fn render_hit_row(
 
     let desc = summary.unwrap_or("");
     let source_color = source_tag::color_for_source(config, &common.source);
+    let row_parity = if result_offset % 2 == 0 {
+        "even"
+    } else {
+        "odd"
+    };
 
     html! {
-        tr data-href=(entry_href) data-result-page=(result_page) {
+        tr data-href=(entry_href) data-result-page=(result_page) data-row-parity=(row_parity) {
             td.col-name title=(common.name) {
                 a.entry-name href=(entry_href)
                     style=(format!("--source-color: {source_color};")) {

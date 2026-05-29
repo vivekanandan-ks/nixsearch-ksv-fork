@@ -3,6 +3,7 @@
   --bg: #121317;
   --header-bg: #1a1b21;
   --surface: #1e1f26;
+  --row-stripe: color-mix(in srgb, var(--surface) 22%, transparent);
   --text: #d4d4d8;
   --text-dim: #71717a;
   --text-bright: #fafafa;
@@ -615,6 +616,18 @@ body:has(.home-hero) {
   vertical-align: middle;
 }
 
+.results-table tbody td:first-child {
+  border-left: 1px solid var(--border);
+}
+
+.results-table tbody td:last-child {
+  border-right: 1px solid var(--border);
+}
+
+.results-table tr[data-row-parity="odd"] td {
+  background: var(--row-stripe);
+}
+
 .results-table tr:hover td {
   background: var(--surface);
 }
@@ -638,7 +651,13 @@ body:has(.home-hero) {
     transparent 0px,
     transparent calc(var(--row-height, 35px) - 1px),
     var(--border) calc(var(--row-height, 35px) - 1px),
-    var(--border) var(--row-height, 35px)
+    var(--border) var(--row-height, 35px),
+    var(--row-stripe) var(--row-height, 35px),
+    var(--row-stripe)
+      calc(var(--row-height, 35px) + var(--row-height, 35px) - 1px),
+    var(--border)
+      calc(var(--row-height, 35px) + var(--row-height, 35px) - 1px),
+    var(--border) calc(var(--row-height, 35px) + var(--row-height, 35px))
   );
 }
 
