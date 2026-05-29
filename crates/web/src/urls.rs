@@ -13,6 +13,7 @@ pub fn search_url_for(source: Option<&str>, query: &PageQuery) -> String {
     let qs = query_string([
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
+        ("ref_set", query.ref_set.as_deref()),
         ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
     ]);
@@ -37,6 +38,7 @@ pub fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &Page
     let qs = query_string([
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
+        ("ref_set", query.ref_set.as_deref()),
         ("kind", kind.or(query.kind.as_deref())),
         ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
@@ -55,6 +57,7 @@ pub fn close_url_for(request: &PageRequest) -> String {
             None,
             &PageQuery {
                 q: request.query.q.clone(),
+                ref_set: request.query.ref_set.clone(),
                 page: request.query.page,
                 ..PageQuery::default()
             },
@@ -82,6 +85,14 @@ pub fn ref_id_for_link(config: &AppConfig, source: &str, ref_id: &str) -> Option
         None
     } else {
         Some(ref_id.to_owned())
+    }
+}
+
+pub fn ref_set_for_link(config: &AppConfig, ref_set: &str) -> Option<String> {
+    if config.default_ref_set() == Some(ref_set) {
+        None
+    } else {
+        Some(ref_set.to_owned())
     }
 }
 
@@ -132,6 +143,19 @@ mod tests {
             },
         );
         assert_eq!(url, "/fixtures?q=git&ref=small");
+    }
+
+    #[test]
+    fn search_url_for_root_with_ref_set() {
+        let url = search_url_for(
+            None,
+            &PageQuery {
+                q: Some("git".to_owned()),
+                ref_set: Some("25.11".to_owned()),
+                ..PageQuery::default()
+            },
+        );
+        assert_eq!(url, "/?q=git&ref_set=25.11");
     }
 
     #[test]
@@ -188,12 +212,13 @@ mod tests {
             entry: Some("rubyPackages.git".to_owned()),
             query: PageQuery {
                 q: Some("git".to_owned()),
-                ref_id: None,
+                ref_id: Some("nixos-25.11".to_owned()),
+                ref_set: Some("25.11".to_owned()),
                 kind: None,
                 source: Some(LinkOrigin::All),
                 ..PageQuery::default()
             },
         };
-        assert_eq!(close_url_for(&request), "/?q=git");
+        assert_eq!(close_url_for(&request), "/?q=git&ref_set=25.11");
     }
 }

@@ -159,8 +159,9 @@
         ? decodeURIComponent(parts[0])
         : "";
     const ref = sourceAll ? "" : (params.get("ref") || "").trim();
+    const refSet = sourceAll || !source ? (params.get("ref_set") || "").trim() : "";
 
-    return JSON.stringify({ q, source, ref });
+    return JSON.stringify({ q, source, ref, refSet });
   }
 
   function shouldLoadResults(previousUrl, nextUrl) {
@@ -198,7 +199,11 @@
   }
 
   function sourceMetadata(sourceId) {
-    return metadata.find((s) => s.id === sourceId);
+    return metadata.sources.find((s) => s.id === sourceId);
+  }
+
+  function defaultRefSet() {
+    return metadata.defaultRefSet || "";
   }
 
   function populateRefRadios(sourceId) {
@@ -211,6 +216,23 @@
       container.style.setProperty("--source-color", source.color);
     } else {
       container.style.removeProperty("--source-color");
+    }
+
+    if (!sourceId) {
+      if (!metadata.refSets || metadata.refSets.length === 0) {
+        container.innerHTML = "";
+        syncHeaderHeight();
+        return;
+      }
+
+      container.innerHTML = metadata.refSets
+        .map((r) => {
+          const checked = r === defaultRefSet() ? " checked" : "";
+          return `<label class="ref-radio-label"><input type="radio" name="ref_set" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
+        })
+        .join("");
+      syncHeaderHeight();
+      return;
     }
 
     if (!source || source.refs.length === 0) {
@@ -272,6 +294,11 @@
       if (refValue && source && refValue !== source.defaultRef) {
         params.set("ref", refValue);
       }
+    } else {
+      const refSetValue = currentRefFromRadios();
+      if (refSetValue && refSetValue !== defaultRefSet()) {
+        params.set("ref_set", refSetValue);
+      }
     }
 
     const qs = params.toString();
@@ -314,7 +341,9 @@
     setActiveSourceTab(effectiveSource);
     populateRefRadios(effectiveSource);
 
-    const refParam = params.get("ref") || "";
+    const refParam = effectiveSource
+      ? params.get("ref") || ""
+      : params.get("ref_set") || "";
     if (refParam) {
       const radio = document.querySelector(
         `[data-nixsearch-input="ref"][value="${CSS.escape(refParam)}"]`,

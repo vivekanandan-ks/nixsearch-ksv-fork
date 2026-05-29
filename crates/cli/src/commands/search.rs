@@ -18,7 +18,11 @@ pub(super) fn search(args: SearchArgs) -> Result<()> {
         .with_context(|| format!("failed to open current index {}", current_path.as_str()))?;
 
     let scopes = config
-        .resolve_search_scopes(args.source.as_deref(), args.ref_id.as_deref())
+        .resolve_search_scopes(
+            args.source.as_deref(),
+            args.ref_id.as_deref(),
+            args.ref_set.as_deref(),
+        )
         .context("failed to resolve search scope")?
         .into_iter()
         .map(|scope| SearchScope {

@@ -244,11 +244,11 @@ html.modal-open body {
 }
 
 .ref-radio-label input[type="radio"]:checked {
-  border-color: var(--source-color, var(--accent));
+  border-color: var(--source-color, var(--text-bright));
 }
 
 .ref-radio-link[data-active] .ref-radio-dot {
-  border-color: var(--source-color, var(--accent));
+  border-color: var(--source-color, var(--text-bright));
 }
 
 .ref-radio-label input[type="radio"]:checked::after {
@@ -256,7 +256,7 @@ html.modal-open body {
   position: absolute;
   inset: 2px;
   border-radius: 50%;
-  background: var(--source-color, var(--accent));
+  background: var(--source-color, var(--text-bright));
 }
 
 .ref-radio-link[data-active] .ref-radio-dot::after {
@@ -264,7 +264,7 @@ html.modal-open body {
   position: absolute;
   inset: 2px;
   border-radius: 50%;
-  background: var(--source-color, var(--accent));
+  background: var(--source-color, var(--text-bright));
 }
 
 .ref-radio-label:has(input:checked) {

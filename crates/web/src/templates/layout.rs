@@ -80,6 +80,7 @@ pub fn render_full_page(
                             &form_action,
                             q,
                             request.query.ref_id.as_deref().unwrap_or(""),
+                            request.query.ref_set.as_deref().unwrap_or(""),
                         ))
                     }
                 }
@@ -99,7 +100,7 @@ pub fn render_full_page(
 }
 
 fn source_metadata_json(config: &AppConfig) -> String {
-    let entries: Vec<String> = config
+    let sources: Vec<String> = config
            .sources
            .iter()
            .map(|(id, source)| {
@@ -120,8 +121,21 @@ fn source_metadata_json(config: &AppConfig) -> String {
                    color = color.replace('"', "\\\""),
                    default_ref = default_ref.replace('"', "\\\""),
                )
-           })
-           .collect();
+            })
+            .collect();
 
-    format!("[{}]", entries.join(","))
+    let ref_sets = config
+        .ref_sets
+        .keys()
+        .map(|ref_set| format!("\"{}\"", ref_set.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let default_ref_set = config.default_ref_set().unwrap_or("");
+
+    format!(
+        r#"{{"sources":[{}],"refSets":[{}],"defaultRefSet":"{}"}}"#,
+        sources.join(","),
+        ref_sets,
+        default_ref_set.replace('"', "\\\""),
+    )
 }

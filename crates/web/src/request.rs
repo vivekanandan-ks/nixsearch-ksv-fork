@@ -18,6 +18,8 @@ pub struct PageQuery {
     #[serde(rename = "ref")]
     pub ref_id: Option<String>,
 
+    pub ref_set: Option<String>,
+
     pub kind: Option<String>,
 
     pub source: Option<LinkOrigin>,
@@ -30,6 +32,7 @@ pub struct ResultsContext {
     q: Option<String>,
     source: Option<String>,
     ref_id: Option<String>,
+    ref_set: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -102,6 +105,16 @@ pub fn results_context(request: &PageRequest) -> ResultsContext {
                 .and_then(non_empty)
                 .map(ToOwned::to_owned)
         },
+        ref_set: if source_all || request.source.is_none() {
+            request
+                .query
+                .ref_set
+                .as_deref()
+                .and_then(non_empty)
+                .map(ToOwned::to_owned)
+        } else {
+            None
+        },
     }
 }
 
@@ -135,6 +148,7 @@ pub fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageRe
 
     let mut q = None;
     let mut ref_id = None;
+    let mut ref_set = None;
     let mut kind = None;
     let mut source_param = None;
     let mut page = None;
@@ -143,6 +157,7 @@ pub fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageRe
         match key.as_ref() {
             "q" => q = Some(value.into_owned()),
             "ref" => ref_id = Some(value.into_owned()),
+            "ref_set" => ref_set = Some(value.into_owned()),
             "kind" => kind = Some(value.into_owned()),
             "source" => source_param = LinkOrigin::from_query_param(&value),
             "page" => page = value.parse::<usize>().ok(),
@@ -156,6 +171,7 @@ pub fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageRe
         query: PageQuery {
             q,
             ref_id,
+            ref_set,
             kind,
             source: source_param,
             page,
@@ -240,6 +256,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_ref_set_query_param() {
+        let request = page_request_from_public_url("/?q=git&ref_set=25.11").unwrap();
+
+        assert_eq!(request.query.q.as_deref(), Some("git"));
+        assert_eq!(request.query.ref_set.as_deref(), Some("25.11"));
+    }
+
+    #[test]
     fn results_context_ignores_entry_path_and_kind() {
         let search = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
         let modal = page_request_from_public_url(
@@ -252,13 +276,21 @@ mod tests {
 
     #[test]
     fn results_context_treats_all_scope_modal_as_root_search() {
-        let search = page_request_from_public_url("/?q=git").unwrap();
+        let search = page_request_from_public_url("/?q=git&ref_set=25.11").unwrap();
         let modal = page_request_from_public_url(
-            "/nixpkgs/rubyPackages.git?q=git&source=all&ref=unstable&kind=package",
+            "/nixpkgs/rubyPackages.git?q=git&source=all&ref=nixos-25.11&ref_set=25.11&kind=package",
         )
         .unwrap();
 
         assert_eq!(results_context(&search), results_context(&modal));
+    }
+
+    #[test]
+    fn results_context_changes_when_ref_set_changes() {
+        let stable = page_request_from_public_url("/?q=git&ref_set=25.11").unwrap();
+        let unstable = page_request_from_public_url("/?q=git&ref_set=unstable").unwrap();
+
+        assert_ne!(results_context(&stable), results_context(&unstable));
     }
 
     #[test]

@@ -94,6 +94,10 @@ pub(crate) struct SearchArgs {
     #[arg(long = "ref")]
     pub(crate) ref_id: Option<String>,
 
+    /// Restrict All search to one configured ref set.
+    #[arg(long = "ref-set")]
+    pub(crate) ref_set: Option<String>,
+
     /// Maximum number of results.
     #[arg(long, default_value_t = 20)]
     pub(crate) limit: usize,

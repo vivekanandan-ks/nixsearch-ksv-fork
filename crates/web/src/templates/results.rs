@@ -8,7 +8,7 @@ use nixsearch_index::search::SearchHit;
 
 use crate::DEFAULT_LIMIT;
 use crate::request::{LinkOrigin, PageQuery, PageRequest, normalized_query};
-use crate::urls::{entry_url_for, paginated_search_url, ref_id_for_link};
+use crate::urls::{entry_url_for, paginated_search_url, ref_id_for_link, ref_set_for_link};
 
 use super::source_tag;
 
@@ -147,6 +147,11 @@ fn render_hit_row(
         &PageQuery {
             q: request.query.q.clone(),
             ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
+            ref_set: request
+                .query
+                .ref_set
+                .as_deref()
+                .and_then(|ref_set| ref_set_for_link(config, ref_set)),
             kind: None,
             source: from_scope,
             page: Some(result_page),

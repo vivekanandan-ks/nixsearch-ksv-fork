@@ -197,6 +197,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
             },
         )]
         .into(),
+        ref_sets: Default::default(),
     }
 }
 

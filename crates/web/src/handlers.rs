@@ -230,7 +230,16 @@ fn run_search(
         .config
         .resolve_search_scopes(
             effective_source,
-            request.query.ref_id.as_deref().and_then(non_empty),
+            if effective_source.is_some() {
+                request.query.ref_id.as_deref().and_then(non_empty)
+            } else {
+                None
+            },
+            if effective_source.is_none() {
+                request.query.ref_set.as_deref().and_then(non_empty)
+            } else {
+                None
+            },
         )
         .context("failed to resolve search scope")?
         .into_iter()

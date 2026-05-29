@@ -3,7 +3,7 @@ use maud::{Markup, html};
 use nixsearch_config::app::AppConfig;
 
 use crate::request::{PageQuery, SourceFilter, non_empty};
-use crate::urls::{ref_id_for_link, search_url_for};
+use crate::urls::{ref_id_for_link, ref_set_for_link, search_url_for};
 
 use super::source_tag::color_for_source;
 
@@ -15,6 +15,7 @@ pub fn render_form(
     form_action: &str,
     q: &str,
     current_ref: &str,
+    current_ref_set: &str,
 ) -> Markup {
     let has_multiple_sources = config.sources.len() > 1;
     let source_color = match source_filter {
@@ -37,11 +38,11 @@ pub fn render_form(
                 div.ref-radios.js-ref-radios
                     data-nixsearch-ref-container=""
                     style=[source_color.as_ref().map(|color| format!("--source-color: {color};"))] {
-                    (render_ref_radios(config, source_filter, current_ref))
+                    (render_ref_radios(config, source_filter, current_ref, current_ref_set))
                 }
 
                 noscript {
-                    (render_ref_links(config, source_filter, current_ref, q, source_color.as_deref()))
+                    (render_ref_links(config, source_filter, current_ref, current_ref_set, q, source_color.as_deref()))
                 }
             }
 
@@ -85,9 +86,34 @@ fn render_ref_links(
     config: &AppConfig,
     selected_source: &SourceFilter,
     current_ref: &str,
+    current_ref_set: &str,
     q: &str,
     source_color: Option<&str>,
 ) -> Markup {
+    if matches!(selected_source, SourceFilter::All) {
+        return html! {
+            div.ref-radios.noscript-ref-radios {
+                @for ref_set in config.ref_sets.keys() {
+                    @let is_selected = if current_ref_set.is_empty() {
+                        config.default_ref_set() == Some(ref_set.as_str())
+                    } else {
+                        current_ref_set == ref_set
+                    };
+                    @let query = PageQuery {
+                        q: non_empty(q).map(ToOwned::to_owned),
+                        ref_set: ref_set_for_link(config, ref_set),
+                        ..PageQuery::default()
+                    };
+                    a.ref-radio-label.ref-radio-link href=(search_url_for(None, &query))
+                        data-active[is_selected] {
+                        span.ref-radio-dot {}
+                        span { (ref_set) }
+                    }
+                }
+            }
+        };
+    }
+
     let SourceFilter::Named(source_id) = selected_source else {
         return html! {};
     };
@@ -125,27 +151,37 @@ fn render_ref_radios(
     config: &AppConfig,
     selected_source: &SourceFilter,
     current_ref: &str,
+    current_ref_set: &str,
 ) -> Markup {
-    let (refs, default_ref): (Vec<&str>, Option<&str>) = match selected_source {
-        SourceFilter::All => (Vec::new(), None),
+    let (refs, default_ref, input_name): (Vec<&str>, Option<&str>, &str) = match selected_source {
+        SourceFilter::All => (
+            config.ref_sets.keys().map(String::as_str).collect(),
+            config.default_ref_set(),
+            "ref_set",
+        ),
         SourceFilter::Named(source_id) => match config.sources.get(source_id.as_str()) {
             Some(source) => (
                 source.refs.iter().map(|r| r.id.as_str()).collect(),
                 source.default_ref.as_deref(),
+                "ref",
             ),
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, "ref"),
         },
+    };
+    let current = match selected_source {
+        SourceFilter::All => current_ref_set,
+        SourceFilter::Named(_) => current_ref,
     };
 
     html! {
         @for ref_id in &refs {
-            @let is_selected = if current_ref.is_empty() {
+            @let is_selected = if current.is_empty() {
                 default_ref == Some(*ref_id)
             } else {
-                *ref_id == current_ref
+                *ref_id == current
             };
             label.ref-radio-label {
-                input type="radio" name="ref" value=(ref_id)
+                input type="radio" name=(input_name) value=(ref_id)
                     checked[is_selected]
                     data-nixsearch-input="ref";
                 span { (ref_id) }

@@ -81,6 +81,38 @@ fn fixture_two_ref_source_toml(default_ref: Option<&str>) -> String {
     )
 }
 
+fn two_source_ref_sets_toml() -> &'static str {
+    r#"
+    [ref_sets.unstable]
+    fixtures = ["unstable"]
+    nixpkgs = ["nixos-unstable"]
+
+    [ref_sets."25.11"]
+    fixtures = ["stable"]
+    nixpkgs = ["nixos-25.11"]
+
+    [sources.fixtures]
+    name = "Fixtures"
+    kind = "options"
+    default_ref = "unstable"
+
+    [sources.fixtures.refs.stable.producer]
+    type = "existing-file"
+    path = "fixtures/search-small/options.json"
+    artifact = "options-json"
+
+    [sources.fixtures.refs.unstable.producer]
+    type = "existing-file"
+    path = "fixtures/search-small/options.json"
+    artifact = "options-json"
+
+    [sources.nixpkgs]
+    preset = "nixpkgs-packages"
+    default_ref = "nixos-unstable"
+    preset_refs = ["nixos-unstable", "nixos-25.11"]
+    "#
+}
+
 fn assert_single_scope(
     scopes: &[crate::app::ResolvedSearchScope],
     expected_source: &str,
@@ -1132,7 +1164,7 @@ fn resolves_search_scopes_to_all_source_defaults() {
         fixture_existing_file_source_toml()
     ));
 
-    let scopes = config.resolve_search_scopes(None, None).unwrap();
+    let scopes = config.resolve_search_scopes(None, None, None).unwrap();
 
     assert_eq!(scopes.len(), 2);
     assert!(
@@ -1148,10 +1180,133 @@ fn resolves_search_scopes_to_all_source_defaults() {
 }
 
 #[test]
+fn loads_ref_sets_and_preserves_order() {
+    let config = load_toml(two_source_ref_sets_toml());
+    let ref_sets = config
+        .ref_sets
+        .keys()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ref_sets, vec!["unstable", "25.11"]);
+    assert_eq!(config.default_ref_set(), Some("unstable"));
+    assert_eq!(
+        config.ref_sets["25.11"].refs[FIXTURES_SOURCE],
+        vec!["stable".to_owned()]
+    );
+}
+
+#[test]
+fn resolves_search_scopes_to_default_ref_set() {
+    let config = load_toml(two_source_ref_sets_toml());
+    let scopes = config.resolve_search_scopes(None, None, None).unwrap();
+
+    assert_eq!(scopes.len(), 2);
+    assert!(
+        scopes
+            .iter()
+            .any(|scope| scope.source == FIXTURES_SOURCE && scope.ref_id == "unstable")
+    );
+    assert!(
+        scopes
+            .iter()
+            .any(|scope| scope.source == NIXPKGS_SOURCE && scope.ref_id == NIXOS_UNSTABLE_REF)
+    );
+}
+
+#[test]
+fn resolves_search_scopes_to_named_ref_set() {
+    let config = load_toml(two_source_ref_sets_toml());
+    let scopes = config
+        .resolve_search_scopes(None, None, Some("25.11"))
+        .unwrap();
+
+    assert_eq!(scopes.len(), 2);
+    assert!(
+        scopes
+            .iter()
+            .any(|scope| scope.source == FIXTURES_SOURCE && scope.ref_id == "stable")
+    );
+    assert!(
+        scopes
+            .iter()
+            .any(|scope| scope.source == NIXPKGS_SOURCE && scope.ref_id == NIXOS_STABLE_REF)
+    );
+}
+
+#[test]
+fn rejects_ref_set_missing_source() {
+    let error = load_toml_error(
+        r#"
+        [ref_sets.unstable]
+        fixtures = ["small"]
+
+        [sources.fixtures]
+        name = "Fixtures"
+        kind = "options"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+
+        [sources.nixpkgs]
+        preset = "nixpkgs-packages"
+        preset_refs = ["nixos-unstable"]
+        "#,
+    );
+
+    assert_error_contains(&error, "missing source");
+    assert_error_contains(&error, NIXPKGS_SOURCE);
+}
+
+#[test]
+fn rejects_ref_set_unknown_ref() {
+    let error = load_toml_error(
+        r#"
+        [ref_sets.unstable]
+        fixtures = ["missing"]
+
+        [sources.fixtures]
+        name = "Fixtures"
+        kind = "options"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+        "#,
+    );
+
+    assert_error_contains(&error, "unknown ref");
+}
+
+#[test]
+fn rejects_ref_set_duplicate_ref() {
+    let error = load_toml_error(
+        r#"
+        [ref_sets.unstable]
+        fixtures = ["small", "small"]
+
+        [sources.fixtures]
+        name = "Fixtures"
+        kind = "options"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+        "#,
+    );
+
+    assert_error_contains(&error, "duplicate ref");
+}
+
+#[test]
 fn resolves_search_scope_to_source_default() {
     let config = load_toml(fixture_existing_file_source_toml());
     let scopes = config
-        .resolve_search_scopes(Some(FIXTURES_SOURCE), None)
+        .resolve_search_scopes(Some(FIXTURES_SOURCE), None, None)
         .unwrap();
 
     assert_single_scope(&scopes, FIXTURES_SOURCE, SMALL_REF);
@@ -1161,7 +1316,7 @@ fn resolves_search_scope_to_source_default() {
 fn resolves_search_scope_to_explicit_source_ref() {
     let config = load_toml(fixture_existing_file_source_toml());
     let scopes = config
-        .resolve_search_scopes(Some(FIXTURES_SOURCE), Some(SMALL_REF))
+        .resolve_search_scopes(Some(FIXTURES_SOURCE), Some(SMALL_REF), None)
         .unwrap();
 
     assert_single_scope(&scopes, FIXTURES_SOURCE, SMALL_REF);
@@ -1172,7 +1327,7 @@ fn resolve_search_scope_rejects_ref_without_source() {
     let config = AppConfig::load(None).unwrap();
 
     let error = config
-        .resolve_search_scopes(None, Some(SMALL_REF))
+        .resolve_search_scopes(None, Some(SMALL_REF), None)
         .unwrap_err()
         .to_string();
 
@@ -1184,7 +1339,7 @@ fn resolve_search_scope_rejects_unknown_source() {
     let config = AppConfig::load(None).unwrap();
 
     let error = config
-        .resolve_search_scopes(Some("missing"), None)
+        .resolve_search_scopes(Some("missing"), None, None)
         .unwrap_err()
         .to_string();
 
@@ -1196,7 +1351,7 @@ fn resolve_search_scope_rejects_unknown_ref() {
     let config = load_toml(fixture_existing_file_source_toml());
 
     let error = config
-        .resolve_search_scopes(Some(FIXTURES_SOURCE), Some("missing"))
+        .resolve_search_scopes(Some(FIXTURES_SOURCE), Some("missing"), None)
         .unwrap_err()
         .to_string();
 

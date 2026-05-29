@@ -6,7 +6,9 @@ use nixsearch_index::search::{EntryLookup, EntryLookupResult, SearchIndex};
 
 use crate::AppState;
 use crate::request::{LinkOrigin, PageQuery, PageRequest, parse_document_kind, resolve_entry_ref};
-use crate::urls::{close_url_for, entry_url_for, ref_id_for_link, search_url_for};
+use crate::urls::{
+    close_url_for, entry_url_for, ref_id_for_link, ref_set_for_link, search_url_for,
+};
 
 use super::{detail, source_tag};
 
@@ -150,6 +152,11 @@ fn render_ambiguous(
                                 &PageQuery {
                                     q: request.query.q.clone(),
                                     ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
+                                    ref_set: request
+                                        .query
+                                        .ref_set
+                                        .as_deref()
+                                        .and_then(|ref_set| ref_set_for_link(config, ref_set)),
                                     kind: None,
                                     source: from_scope,
                                     page: request.query.page,

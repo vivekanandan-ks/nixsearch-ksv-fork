@@ -10,6 +10,26 @@ bootstrap = true
 enabled = false
 interval = "24h"
 
+[ref_sets.unstable]
+nixpkgs = ["nixos-unstable"]
+nixos = ["nixos-unstable"]
+home-manager = ["master"]
+darwin = ["master"]
+hjem = ["main"]
+hjem-rum = ["main"]
+fixtures = ["small"]
+eval-fixture = ["local"]
+
+[ref_sets."25.11"]
+nixpkgs = ["nixos-25.11"]
+nixos = ["nixos-25.11"]
+home-manager = ["release-25.11"]
+darwin = ["nix-darwin-25.11"]
+hjem = ["main"]
+hjem-rum = ["main"]
+fixtures = ["small"]
+eval-fixture = ["local"]
+
 [sources.nixpkgs]
 preset = "nixpkgs-packages"
 default_ref = "nixos-unstable"
