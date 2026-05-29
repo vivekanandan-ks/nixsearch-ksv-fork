@@ -495,8 +495,13 @@ html.modal-open body {
 }
 
 @keyframes loading-pulse {
-  0%, 100% { opacity: 0.6; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .col-name {
@@ -568,8 +573,13 @@ input[type="search"].is-loading {
 }
 
 @keyframes search-pulse {
-  0%, 100% { border-color: var(--accent); }
-  50% { border-color: var(--text-dim); }
+  0%,
+  100% {
+    border-color: var(--accent);
+  }
+  50% {
+    border-color: var(--text-dim);
+  }
 }
 
 .pagination {
@@ -720,7 +730,8 @@ dialog::backdrop {
 }
 
 .entry-section .tag-list.code-tags li {
-  font-family: "SF Mono", "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  font-family:
+    "SF Mono", "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
   font-size: 0.78rem;
 }
 
