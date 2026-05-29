@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -15,6 +16,7 @@ pub struct ServerConfig {
     pub public_url: Option<String>,
     pub bootstrap: bool,
     pub schedule: ScheduleConfig,
+    pub analytics_script: AnalyticsScriptConfig,
 }
 
 impl Default for ServerConfig {
@@ -24,6 +26,7 @@ impl Default for ServerConfig {
             public_url: None,
             bootstrap: true,
             schedule: ScheduleConfig::default(),
+            analytics_script: AnalyticsScriptConfig::default(),
         }
     }
 }
@@ -32,8 +35,46 @@ impl ServerConfig {
     pub(crate) fn validate(&self) -> Result<()> {
         validate_non_empty("server.listen", &self.listen)?;
         validate_public_url(self.public_url.as_deref())?;
-        self.schedule.validate()
+        self.schedule.validate()?;
+        self.analytics_script.validate()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnalyticsScriptConfig {
+    pub enabled: bool,
+    pub src: String,
+    pub attributes: IndexMap<String, ScriptAttributeValue>,
+}
+
+impl Default for AnalyticsScriptConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            src: "https://rybbit.thekoppe.com/api/script.js".to_owned(),
+            attributes: IndexMap::new(),
+        }
+    }
+}
+
+impl AnalyticsScriptConfig {
+    fn validate(&self) -> Result<()> {
+        validate_http_url("server.analytics_script.src", &self.src)?;
+
+        for name in self.attributes.keys() {
+            validate_script_attribute_name(name)?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScriptAttributeValue {
+    Bool(bool),
+    String(String),
 }
 
 fn validate_public_url(value: Option<&str>) -> Result<()> {
@@ -69,6 +110,46 @@ fn validate_public_url(value: Option<&str>) -> Result<()> {
         return Err(ConfigError::Validation(
             "server.public_url must not include a query or fragment".to_owned(),
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_http_url(name: &str, value: &str) -> Result<()> {
+    let url = Url::parse(value).map_err(|error| {
+        ConfigError::Validation(format!("{name} must be an absolute URL: {error}"))
+    })?;
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ConfigError::Validation(format!(
+            "{name} must use http or https"
+        )));
+    }
+
+    if url.host_str().is_none() {
+        return Err(ConfigError::Validation(format!(
+            "{name} must include a host"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_script_attribute_name(name: &str) -> Result<()> {
+    if name.eq_ignore_ascii_case("src") {
+        return Err(ConfigError::Validation(
+            "server.analytics_script.attributes must not contain src".to_owned(),
+        ));
+    }
+
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err(ConfigError::Validation(format!(
+            "server.analytics_script.attributes contains invalid attribute name {name:?}"
+        )));
     }
 
     Ok(())

@@ -1,6 +1,9 @@
-use maud::{DOCTYPE, Markup, PreEscaped, html};
+use std::fmt::Write;
+
+use maud::{DOCTYPE, Escaper, Markup, PreEscaped, html};
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_config::server::{AnalyticsScriptConfig, ScriptAttributeValue};
 use nixsearch_config::source::SourceKind;
 use nixsearch_index::search::SearchResult;
 
@@ -99,6 +102,7 @@ pub fn render_full_page(
                 link rel="apple-touch-icon" href="/apple-touch-icon.png";
                 script type="module"
                     src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js" {}
+                (analytics_script(&state.config.server.analytics_script))
                 style { (PreEscaped(CSS)) }
                 noscript {
                     style { ".js-ref-radios { display: none; } dialog#entry-modal { display: block; z-index: 201; } .modal-backdrop { display: block; position: fixed; inset: 0; z-index: 200; background: rgb(0 0 0 / 0.6); }" }
@@ -132,6 +136,40 @@ pub fn render_full_page(
             }
         }
     }
+}
+
+fn analytics_script(config: &AnalyticsScriptConfig) -> Markup {
+    if !config.enabled {
+        return html! {};
+    }
+
+    let mut script = String::from("<script src=\"");
+    append_escaped(&mut script, &config.src);
+    script.push('"');
+
+    for (name, value) in &config.attributes {
+        match value {
+            ScriptAttributeValue::Bool(true) => {
+                script.push(' ');
+                script.push_str(name);
+            }
+            ScriptAttributeValue::Bool(false) => {}
+            ScriptAttributeValue::String(value) => {
+                script.push(' ');
+                script.push_str(name);
+                script.push_str("=\"");
+                append_escaped(&mut script, value);
+                script.push('"');
+            }
+        }
+    }
+
+    script.push_str("></script>");
+    PreEscaped(script)
+}
+
+fn append_escaped(output: &mut String, value: &str) {
+    write!(Escaper::new(output), "{value}").expect("writing to a String should not fail");
 }
 
 fn page_metadata(
@@ -306,6 +344,7 @@ fn source_metadata_json(config: &AppConfig) -> String {
 
 #[cfg(test)]
 mod tests {
+    use nixsearch_config::server::ScriptAttributeValue;
     use nixsearch_core::document::{OptionDoc, PackageDoc, SearchDocument};
     use nixsearch_core::ingest::IngestContext;
     use nixsearch_index::search::SearchResult;
@@ -314,7 +353,10 @@ mod tests {
 
     use crate::request::{PageQuery, PageRequest, SourceFilter};
 
-    use super::{EntryData, PageUrls, description_for, page_metadata, title_for, title_for_entry};
+    use super::{
+        EntryData, PageUrls, analytics_script, description_for, page_metadata, title_for,
+        title_for_entry,
+    };
 
     fn config() -> nixsearch_config::app::AppConfig {
         let tempdir = tempdir().unwrap();
@@ -335,6 +377,58 @@ mod tests {
             revision: None,
             repo: None,
         }
+    }
+
+    #[test]
+    fn analytics_script_is_omitted_by_default() {
+        let config = config();
+
+        assert_eq!(
+            analytics_script(&config.server.analytics_script).into_string(),
+            ""
+        );
+    }
+
+    #[test]
+    fn analytics_script_renders_configured_attributes() {
+        let mut config = config();
+        config.server.analytics_script.enabled = true;
+        config.server.analytics_script.src = "https://analytics.example.com/script.js".to_owned();
+        config.server.analytics_script.attributes.insert(
+            "data-site-id".to_owned(),
+            ScriptAttributeValue::String("site-123".to_owned()),
+        );
+        config
+            .server
+            .analytics_script
+            .attributes
+            .insert("defer".to_owned(), ScriptAttributeValue::Bool(true));
+        config
+            .server
+            .analytics_script
+            .attributes
+            .insert("async".to_owned(), ScriptAttributeValue::Bool(false));
+
+        assert_eq!(
+            analytics_script(&config.server.analytics_script).into_string(),
+            r#"<script src="https://analytics.example.com/script.js" data-site-id="site-123" defer></script>"#
+        );
+    }
+
+    #[test]
+    fn analytics_script_escapes_dynamic_values() {
+        let mut config = config();
+        config.server.analytics_script.enabled = true;
+        config.server.analytics_script.src = "https://example.com/script.js?x=1&y=2".to_owned();
+        config.server.analytics_script.attributes.insert(
+            "data-site-id".to_owned(),
+            ScriptAttributeValue::String("<site>&\"id\"".to_owned()),
+        );
+
+        assert_eq!(
+            analytics_script(&config.server.analytics_script).into_string(),
+            r#"<script src="https://example.com/script.js?x=1&amp;y=2" data-site-id="&lt;site&gt;&amp;&quot;id&quot;"></script>"#
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use nixsearch_core::source_link::SourceLinkConfig;
 
 use crate::app::AppConfig;
 use crate::producer::{DownloadCompression, EvalModuleConfig, ProducerConfig, ProducerKind};
+use crate::server::ScriptAttributeValue;
 use crate::source::{
     HJEM_COLOR, HJEM_RUM_COLOR, HOME_MANAGER_COLOR, NIX_DARWIN_COLOR, NIXOS_COLOR, NIXPKGS_COLOR,
     SourceKind,
@@ -138,6 +139,12 @@ fn default_config_is_valid() {
     assert_eq!(config.data.index_dir, Utf8PathBuf::from("./data/indexes"));
     assert_eq!(config.server.listen, "127.0.0.1:3000");
     assert_eq!(config.server.public_url, None);
+    assert!(!config.server.analytics_script.enabled);
+    assert_eq!(
+        config.server.analytics_script.src,
+        "https://rybbit.thekoppe.com/api/script.js"
+    );
+    assert!(config.server.analytics_script.attributes.is_empty());
     assert!(config.sources.is_empty());
 }
 
@@ -183,6 +190,7 @@ fn loads_config_file() {
     assert!(config.server.bootstrap);
     assert!(!config.server.schedule.enabled);
     assert_eq!(config.server.schedule.interval, "24h");
+    assert!(!config.server.analytics_script.enabled);
 
     let options = &config.sources[NIXOS_SOURCE];
     assert_eq!(options.name.as_deref(), Some("NixOS Options"));
@@ -1444,6 +1452,72 @@ fn parses_schedule_config() {
         config.server.schedule.parse_interval().unwrap(),
         std::time::Duration::from_secs(12 * 60 * 60)
     );
+}
+
+#[test]
+fn parses_analytics_script_config() {
+    let config = load_toml(
+        r#"
+        [server.analytics_script]
+        enabled = true
+        src = "https://analytics.example.com/script.js"
+
+        [server.analytics_script.attributes]
+        "data-site-id" = "site-123"
+        defer = true
+        async = false
+        "#,
+    );
+
+    assert!(config.server.analytics_script.enabled);
+    assert_eq!(
+        config.server.analytics_script.src,
+        "https://analytics.example.com/script.js"
+    );
+    assert_eq!(
+        config.server.analytics_script.attributes["data-site-id"],
+        ScriptAttributeValue::String("site-123".to_owned())
+    );
+    assert_eq!(
+        config.server.analytics_script.attributes["defer"],
+        ScriptAttributeValue::Bool(true)
+    );
+    assert_eq!(
+        config.server.analytics_script.attributes["async"],
+        ScriptAttributeValue::Bool(false)
+    );
+}
+
+#[test]
+fn rejects_invalid_analytics_script_src() {
+    for value in [
+        "analytics.example.com/script.js",
+        "/script.js",
+        "file:///tmp/script.js",
+    ] {
+        let error = load_toml_error(&format!(
+            r#"
+            [server.analytics_script]
+            src = "{value}"
+            "#
+        ));
+
+        assert_error_contains(&error, "server.analytics_script.src");
+    }
+}
+
+#[test]
+fn rejects_invalid_analytics_script_attribute_names() {
+    for name in ["", "src", "data site", "data<site", "data=site"] {
+        let error = load_toml_error(&format!(
+            r#"
+            [server.analytics_script.attributes]
+            "{name}" = "value"
+            "#
+        ));
+
+        assert_error_contains(&error, "server.analytics_script.attributes");
+    }
 }
 
 #[test]

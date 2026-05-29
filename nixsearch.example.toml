@@ -11,6 +11,14 @@ bootstrap = true
 enabled = false
 interval = "24h"
 
+[server.analytics_script]
+enabled = false
+# src = "https://rybbit.example.com/api/script.js"
+
+[server.analytics_script.attributes]
+# data-site-id = ""
+defer = true
+
 [ref_sets.unstable]
 nixpkgs = ["nixos-unstable"]
 nixos = ["nixos-unstable"]
