@@ -40,6 +40,13 @@ pub fn render_full_page(
         SourceFilter::All => "/".to_owned(),
         SourceFilter::Named(source) => source_path(source),
     };
+    let logo_style = match &source_filter {
+        SourceFilter::All => None,
+        SourceFilter::Named(source) => Some(format!(
+            "--logo-accent: {};",
+            source_tag::color_for_source(&state.config, source)
+        )),
+    };
 
     let reconcile_attr = format!(
         "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search) + '&previous_url=' + encodeURIComponent(window.nixsearchPreviousUrl || ''))"
@@ -62,7 +69,10 @@ pub fn render_full_page(
             body data-on:nixsearch-reconcile__window=(reconcile_attr) {
                 header.header {
                     div.header-inner {
-                        a.site-title href="/" { "nixsearch" }
+                        a.site-title href="/" aria-label="nixsearch" style=[logo_style] {
+                            span.site-title-nix { "nix" }
+                            span.site-title-search { "search" }
+                        }
                         (search::render_form(
                             &state.config,
                             &source_filter,
