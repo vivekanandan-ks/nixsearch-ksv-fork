@@ -214,6 +214,18 @@
     }
   }
 
+  function syncSearchFocusColor(sourceId) {
+    const form = document.querySelector(".search-form");
+    if (!form) return;
+
+    const source = sourceMetadata(sourceId);
+    if (source) {
+      form.style.setProperty("--search-focus-color", source.color);
+    } else {
+      form.style.removeProperty("--search-focus-color");
+    }
+  }
+
   function defaultRefSet() {
     return metadata.defaultRefSet || "";
   }
@@ -224,6 +236,7 @@
 
     const source = sourceMetadata(sourceId);
     syncLogoAccent(sourceId);
+    syncSearchFocusColor(sourceId);
 
     if (source) {
       container.style.setProperty("--source-color", source.color);

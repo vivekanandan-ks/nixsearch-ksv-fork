@@ -164,7 +164,7 @@ html.modal-open body {
 }
 
 .search-bar-row input[type="search"]:focus {
-  border-color: var(--accent);
+  border-color: var(--search-focus-color, Highlight);
 }
 
 .search-bar-row input[type="search"]::placeholder {

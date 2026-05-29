@@ -22,9 +22,9 @@ pub fn render_form(
         SourceFilter::Named(source_id) => Some(color_for_source(config, source_id)),
         SourceFilter::All => None,
     };
-
     html! {
-        form.search-form action=(form_action) method="get" {
+        form.search-form action=(form_action) method="get"
+            style=[source_color.as_ref().map(|color| format!("--search-focus-color: {color};"))] {
             @if has_multiple_sources {
                 (render_source_tabs(config, source_filter, q))
             }
