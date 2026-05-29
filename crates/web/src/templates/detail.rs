@@ -29,7 +29,7 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                     @let resolver = source_link_config_for_document(config, &option.common)
                         .map(|cfg| SourceLinkResolver::new(cfg, option.common.revision.as_deref()));
                     (section("Declared", html! {
-                        ul {
+                        ul.plain-list {
                             @for declaration in &option.declarations {
                                 li {
                                     @if let Some(url) = resolver.as_ref().and_then(|r| r.resolve_declaration(declaration)) {
@@ -79,7 +79,7 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                 }
                 @if !package.homepages.is_empty() {
                     (section("Homepages", html! {
-                        ul {
+                        ul.plain-list {
                             @for url in &package.homepages {
                                 li {
                                     @if url.starts_with("http://") || url.starts_with("https://") {
@@ -150,7 +150,7 @@ fn licenses_section(licenses: &[License]) -> Markup {
     section(
         "Licenses",
         html! {
-            ul {
+            ul.plain-list {
                 @for license in licenses {
                     @let label = license.spdx_id.as_deref()
                         .or(license.name.as_deref())

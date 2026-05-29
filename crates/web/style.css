@@ -693,6 +693,11 @@ dialog::backdrop {
   padding-left: 1.25rem;
 }
 
+.entry-section .plain-list {
+  list-style: none;
+  padding-left: 0;
+}
+
 .entry-section li {
   margin-bottom: 0.2rem;
 }
