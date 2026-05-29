@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
@@ -29,6 +30,7 @@ struct AppState {
     config: Arc<AppConfig>,
     index_path: Arc<RwLock<Utf8PathBuf>>,
     generated_at: Arc<RwLock<OffsetDateTime>>,
+    manifest: Arc<RwLock<IndexGenerationManifest>>,
 }
 
 pub async fn serve(config: AppConfig) -> Result<()> {
@@ -44,17 +46,20 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let config = Arc::new(config);
     let index_path = Arc::new(RwLock::new(generation.path));
     let generated_at = Arc::new(RwLock::new(generation.manifest.generated_at));
+    let manifest = Arc::new(RwLock::new(generation.manifest));
 
     maintenance::spawn(
         Arc::clone(&config),
         Arc::clone(&index_path),
         Arc::clone(&generated_at),
+        Arc::clone(&manifest),
     );
 
     let state = AppState {
         config,
         index_path,
         generated_at,
+        manifest,
     };
 
     let app = Router::new()

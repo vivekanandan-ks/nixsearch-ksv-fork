@@ -10,6 +10,7 @@ use crate::scripts::navigation_script;
 use crate::urls::source_path;
 
 use super::footer;
+use super::home;
 use super::modal;
 use super::results;
 use super::search;
@@ -29,7 +30,7 @@ pub fn render_full_page(
         Ok(result) if normalized_query(&request.query).is_some() => {
             results::render(request, &result.hits, result.total, &state.config)
         }
-        Ok(_) => results::render_empty(),
+        Ok(_) => home::render(state, request),
         Err(error) => results::render_error(error),
     };
 

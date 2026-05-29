@@ -1,5 +1,6 @@
 pub mod detail;
 pub mod footer;
+pub mod home;
 pub mod layout;
 pub mod modal;
 pub mod results;

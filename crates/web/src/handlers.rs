@@ -106,15 +106,21 @@ pub async fn state_events(
     let patch_results = should_patch_results(query.previous_url.as_deref(), &request);
 
     let results_html = if patch_results {
-        let search_result = run_search(&state, &request, 0, DEFAULT_LIMIT);
+        if normalized_query(&request.query).is_none() {
+            Some(templates::home::render(&state, &request).into_string())
+        } else {
+            let search_result = run_search(&state, &request, 0, DEFAULT_LIMIT);
 
-        Some(match &search_result {
-            Ok(result) => {
-                templates::results::render(&request, &result.hits, result.total, &state.config)
-                    .into_string()
-            }
-            Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
-        })
+            Some(match &search_result {
+                Ok(result) => {
+                    templates::results::render(&request, &result.hits, result.total, &state.config)
+                        .into_string()
+                }
+                Err(error) => {
+                    templates::results::render_error(&format!("{error:#}")).into_string()
+                }
+            })
+        }
     } else {
         None
     };

@@ -43,6 +43,7 @@ pub(crate) fn spawn(
     config: Arc<AppConfig>,
     index_path: Arc<RwLock<Utf8PathBuf>>,
     generated_at: Arc<RwLock<OffsetDateTime>>,
+    manifest: Arc<RwLock<IndexGenerationManifest>>,
 ) {
     let interval = config
         .server
@@ -51,7 +52,7 @@ pub(crate) fn spawn(
         .expect("schedule interval already validated");
 
     tokio::spawn(async move {
-        run_loop(config, index_path, generated_at, interval).await;
+        run_loop(config, index_path, generated_at, manifest, interval).await;
     });
 }
 
@@ -59,6 +60,7 @@ async fn run_loop(
     config: Arc<AppConfig>,
     index_path: Arc<RwLock<Utf8PathBuf>>,
     generated_at: Arc<RwLock<OffsetDateTime>>,
+    manifest: Arc<RwLock<IndexGenerationManifest>>,
     interval: Duration,
 ) {
     let index_store = IndexStore::new(&config.data.index_dir);
@@ -96,6 +98,7 @@ async fn run_loop(
 
         reconcile_served_generation(&index_path, &generation.path);
         reconcile_generated_at(&generated_at, generation.manifest.generated_at);
+        reconcile_manifest(&manifest, &generation.manifest);
 
         if !regeneration_enabled {
             tokio::time::sleep(RECONCILE_INTERVAL).await;
@@ -279,6 +282,17 @@ pub(crate) fn reconcile_generated_at(
 
     if *current != manifest_generated_at {
         *current = manifest_generated_at;
+    }
+}
+
+pub(crate) fn reconcile_manifest(
+    manifest: &Arc<RwLock<IndexGenerationManifest>>,
+    published_manifest: &IndexGenerationManifest,
+) {
+    let mut current = manifest.write().expect("manifest lock poisoned");
+
+    if *current != *published_manifest {
+        *current = published_manifest.clone();
     }
 }
 
