@@ -468,7 +468,7 @@ body:has(.home-hero) {
 .home-glass {
   width: clamp(88px, 16vmin, 150px);
   aspect-ratio: 1;
-  margin-bottom: 1.6rem;
+  margin-bottom: 1.25rem;
   color: var(--glass-color, var(--accent));
   transition: color 0.2s ease;
 }
