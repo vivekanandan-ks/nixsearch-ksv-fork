@@ -62,7 +62,7 @@ html.modal-open body {
 }
 
 .site-title {
-  --logo-accent: var(--accent);
+  --logo-accent: var(--text-bright);
 
   display: inline-flex;
   align-items: baseline;
