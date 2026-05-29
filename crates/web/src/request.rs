@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_config::app::ResolvedSearchScope;
 use nixsearch_core::document::DocumentKind;
 
 #[derive(Debug, Clone, Default)]
@@ -28,11 +29,50 @@ pub struct PageQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultsContext {
-    q: Option<String>,
-    source: Option<String>,
-    ref_id: Option<String>,
-    ref_set: Option<String>,
+pub struct PageState {
+    pub q: Option<String>,
+    pub page: Option<usize>,
+    pub source_filter: SourceFilter,
+    pub ref_scope: RefScope,
+    pub source_ref: Option<String>,
+    pub detail: Option<DetailState>,
+}
+
+impl PageState {
+    pub fn active_ref_set(&self) -> Option<&str> {
+        self.ref_scope.ref_set()
+    }
+
+    pub fn set_explicit_ref_set(&mut self, ref_set: String) {
+        self.ref_scope = RefScope::RefSet { ref_set };
+    }
+
+    pub fn clear_ref_set_context(&mut self) {
+        self.ref_scope = RefScope::Ref;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefScope {
+    RefSet { ref_set: String },
+    Ref,
+}
+
+impl RefScope {
+    pub fn ref_set(&self) -> Option<&str> {
+        match self {
+            Self::RefSet { ref_set, .. } => Some(ref_set),
+            Self::Ref => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailState {
+    pub source: String,
+    pub entry: String,
+    pub ref_id: Option<String>,
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -72,6 +112,158 @@ impl SourceFilter {
     }
 }
 
+pub fn page_state(config: &AppConfig, request: &PageRequest) -> PageState {
+    let source_filter = SourceFilter::from_request(request);
+    let q = normalized_query(&request.query).map(ToOwned::to_owned);
+    let raw_ref_set = request.query.ref_set.as_deref().and_then(non_empty);
+    let raw_ref = request.query.ref_id.as_deref().and_then(non_empty);
+
+    match &source_filter {
+        SourceFilter::All => {
+            let ref_scope = normalize_all_ref_set(config, raw_ref_set)
+                .map(|ref_set| RefScope::RefSet { ref_set })
+                .unwrap_or(RefScope::Ref);
+            let detail = detail_state(config, request, raw_ref, ref_scope.ref_set(), None);
+
+            PageState {
+                q,
+                page: request.query.page,
+                source_filter,
+                ref_scope,
+                source_ref: None,
+                detail,
+            }
+        }
+        SourceFilter::Named(source) => {
+            let (ref_scope, source_ref) =
+                normalize_source_ref_scope(config, source, raw_ref, raw_ref_set);
+            let source_ref = source_ref.or_else(|| {
+                config
+                    .sources
+                    .get(source)
+                    .and_then(|source| source.default_ref.clone())
+            });
+            let detail = detail_state(
+                config,
+                request,
+                raw_ref,
+                ref_scope.ref_set(),
+                source_ref.as_deref(),
+            );
+
+            PageState {
+                q,
+                page: request.query.page,
+                source_filter,
+                ref_scope,
+                source_ref,
+                detail,
+            }
+        }
+    }
+}
+
+fn detail_state(
+    config: &AppConfig,
+    request: &PageRequest,
+    raw_ref: Option<&str>,
+    active_ref_set: Option<&str>,
+    source_ref: Option<&str>,
+) -> Option<DetailState> {
+    request
+        .entry
+        .as_ref()
+        .zip(request.source.as_ref())
+        .map(|(entry, source)| DetailState {
+            source: source.clone(),
+            entry: entry.clone(),
+            ref_id: detail_ref(config, source, raw_ref, active_ref_set, source_ref),
+            kind: request
+                .query
+                .kind
+                .as_deref()
+                .and_then(non_empty)
+                .map(ToOwned::to_owned),
+        })
+}
+
+fn detail_ref(
+    config: &AppConfig,
+    source: &str,
+    raw_ref: Option<&str>,
+    active_ref_set: Option<&str>,
+    source_ref: Option<&str>,
+) -> Option<String> {
+    if let Some(refs) =
+        active_ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, source))
+    {
+        if refs.len() == 1 {
+            return refs.first().cloned();
+        }
+
+        return raw_ref
+            .filter(|ref_id| refs.iter().any(|candidate| candidate == ref_id))
+            .map(ToOwned::to_owned)
+            .or_else(|| refs.first().cloned());
+    }
+
+    source_ref
+        .map(ToOwned::to_owned)
+        .or_else(|| raw_ref.map(ToOwned::to_owned))
+}
+
+fn normalize_all_ref_set(config: &AppConfig, ref_set: Option<&str>) -> Option<String> {
+    ref_set
+        .filter(|ref_set| config.ref_sets.contains_key(*ref_set))
+        .or_else(|| config.default_ref_set())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_source_ref_scope(
+    config: &AppConfig,
+    source: &str,
+    ref_id: Option<&str>,
+    ref_set: Option<&str>,
+) -> (RefScope, Option<String>) {
+    if let Some(ref_set) = ref_set.filter(|ref_set| config.ref_sets.contains_key(*ref_set)) {
+        if let Some(refs) = config.refs_for_ref_set_source(ref_set, source) {
+            let source_ref = if refs.len() == 1 {
+                refs.first().cloned()
+            } else {
+                ref_id
+                    .filter(|ref_id| refs.iter().any(|candidate| candidate == ref_id))
+                    .map(ToOwned::to_owned)
+                    .or_else(|| refs.first().cloned())
+            };
+            return (
+                RefScope::RefSet {
+                    ref_set: ref_set.to_owned(),
+                },
+                source_ref,
+            );
+        }
+    }
+
+    let ref_id = ref_id.map(ToOwned::to_owned);
+    (RefScope::Ref, ref_id)
+}
+
+pub fn search_scopes_for_state(
+    config: &AppConfig,
+    state: &PageState,
+) -> anyhow::Result<Vec<ResolvedSearchScope>> {
+    match &state.source_filter {
+        SourceFilter::All => Ok(config.resolve_search_scopes(
+            None,
+            None,
+            state.active_ref_set().and_then(non_empty),
+        )?),
+        SourceFilter::Named(source) => {
+            Ok(config.resolve_search_scopes(Some(source), state.source_ref.as_deref(), None)?)
+        }
+    }
+}
+
 pub fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     if value.is_empty() { None } else { Some(value) }
@@ -79,43 +271,6 @@ pub fn non_empty(value: &str) -> Option<&str> {
 
 pub fn normalized_query(query: &PageQuery) -> Option<&str> {
     query.q.as_deref().and_then(non_empty)
-}
-
-pub fn results_context(request: &PageRequest) -> ResultsContext {
-    let source_all = request.query.source == Some(LinkOrigin::All);
-
-    ResultsContext {
-        q: normalized_query(&request.query).map(ToOwned::to_owned),
-        source: if source_all {
-            None
-        } else {
-            request
-                .source
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned)
-        },
-        ref_id: if source_all {
-            None
-        } else {
-            request
-                .query
-                .ref_id
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned)
-        },
-        ref_set: if source_all || request.source.is_none() {
-            request
-                .query
-                .ref_set
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned)
-        } else {
-            None
-        },
-    }
 }
 
 pub fn decode_path_value(value: &str) -> Option<String> {
@@ -215,6 +370,88 @@ pub fn parse_document_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    use nixsearch_config::app::RefSetConfig;
+    use nixsearch_config::producer::ProducerConfig;
+    use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
+    use nixsearch_core::artifact::ArtifactKind;
+
+    fn ref_config(id: &str) -> RefConfig {
+        RefConfig {
+            id: id.to_owned(),
+            producer: ProducerConfig::ExistingFile {
+                path: PathBuf::from("unused.json"),
+                artifact: ArtifactKind::OptionsJson,
+            },
+            source_links: None,
+        }
+    }
+
+    fn handoff_config() -> AppConfig {
+        AppConfig {
+            sources: [
+                (
+                    "nixpkgs".to_owned(),
+                    SourceConfig {
+                        name: None,
+                        color: None,
+                        kind: SourceKind::Packages,
+                        default_ref: Some("nixos-unstable".to_owned()),
+                        refs: vec![ref_config("nixos-unstable"), ref_config("nixos-25.11")],
+                    },
+                ),
+                (
+                    "hjem".to_owned(),
+                    SourceConfig {
+                        name: None,
+                        color: None,
+                        kind: SourceKind::Options,
+                        default_ref: Some("main".to_owned()),
+                        refs: vec![ref_config("main")],
+                    },
+                ),
+            ]
+            .into(),
+            ref_sets: [
+                (
+                    "unstable".to_owned(),
+                    RefSetConfig {
+                        refs: [
+                            ("nixpkgs".to_owned(), vec!["nixos-unstable".to_owned()]),
+                            ("hjem".to_owned(), vec!["main".to_owned()]),
+                        ]
+                        .into(),
+                    },
+                ),
+                (
+                    "25.11".to_owned(),
+                    RefSetConfig {
+                        refs: [
+                            ("nixpkgs".to_owned(), vec!["nixos-25.11".to_owned()]),
+                            ("hjem".to_owned(), vec!["main".to_owned()]),
+                        ]
+                        .into(),
+                    },
+                ),
+                (
+                    "multi".to_owned(),
+                    RefSetConfig {
+                        refs: [
+                            (
+                                "nixpkgs".to_owned(),
+                                vec!["nixos-unstable".to_owned(), "nixos-25.11".to_owned()],
+                            ),
+                            ("hjem".to_owned(), vec!["main".to_owned()]),
+                        ]
+                        .into(),
+                    },
+                ),
+            ]
+            .into(),
+            ..AppConfig::default()
+        }
+    }
 
     #[test]
     fn parses_root_public_url() {
@@ -264,65 +501,68 @@ mod tests {
     }
 
     #[test]
-    fn results_context_ignores_entry_path_and_kind() {
-        let search = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
-        let modal = page_request_from_public_url(
-            "/fixtures/programs.git.enable?q=git&ref=small&kind=option",
-        )
-        .unwrap();
-
-        assert_eq!(results_context(&search), results_context(&modal));
-    }
-
-    #[test]
-    fn results_context_treats_all_scope_modal_as_root_search() {
-        let search = page_request_from_public_url("/?q=git&ref_set=25.11").unwrap();
-        let modal = page_request_from_public_url(
-            "/nixpkgs/rubyPackages.git?q=git&source=all&ref=nixos-25.11&ref_set=25.11&kind=package",
-        )
-        .unwrap();
-
-        assert_eq!(results_context(&search), results_context(&modal));
-    }
-
-    #[test]
-    fn results_context_changes_when_ref_set_changes() {
-        let stable = page_request_from_public_url("/?q=git&ref_set=25.11").unwrap();
-        let unstable = page_request_from_public_url("/?q=git&ref_set=unstable").unwrap();
-
-        assert_ne!(results_context(&stable), results_context(&unstable));
-    }
-
-    #[test]
-    fn results_context_changes_when_query_changes() {
-        let git = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
-        let firefox = page_request_from_public_url("/fixtures?q=firefox&ref=small").unwrap();
-
-        assert_ne!(results_context(&git), results_context(&firefox));
-    }
-
-    #[test]
-    fn results_context_changes_when_source_changes() {
-        let nixpkgs = page_request_from_public_url("/nixpkgs?q=git").unwrap();
-        let nixos = page_request_from_public_url("/nixos?q=git").unwrap();
-
-        assert_ne!(results_context(&nixpkgs), results_context(&nixos));
-    }
-
-    #[test]
-    fn results_context_changes_when_scoped_ref_changes() {
-        let stable = page_request_from_public_url("/fixtures?q=git&ref=stable").unwrap();
-        let unstable = page_request_from_public_url("/fixtures?q=git&ref=unstable").unwrap();
-
-        assert_ne!(results_context(&stable), results_context(&unstable));
-    }
-
-    #[test]
     fn source_filter_treats_source_all_as_all_sources() {
         let request =
             page_request_from_public_url("/nixos/programs.git.config?q=programs.git&source=all")
                 .unwrap();
 
         assert_eq!(SourceFilter::from_request(&request), SourceFilter::All);
+    }
+
+    #[test]
+    fn page_state_uses_ref_set_to_select_source_ref() {
+        let config = handoff_config();
+        let request = page_request_from_public_url("/nixpkgs?q=git&ref_set=25.11").unwrap();
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            state.source_filter,
+            SourceFilter::Named("nixpkgs".to_owned())
+        );
+        assert_eq!(state.active_ref_set(), Some("25.11"));
+        assert_eq!(state.source_ref.as_deref(), Some("nixos-25.11"));
+    }
+
+    #[test]
+    fn page_state_preserves_overlapping_ref_set_context() {
+        let config = handoff_config();
+        let request = page_request_from_public_url("/hjem?q=git&ref_set=25.11").unwrap();
+        let state = page_state(&config, &request);
+
+        assert_eq!(state.active_ref_set(), Some("25.11"));
+        assert_eq!(state.source_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn page_state_falls_back_to_default_ref_set_for_ambiguous_ref() {
+        let config = handoff_config();
+        let request = page_request_from_public_url("/hjem?q=git&ref=main").unwrap();
+        let state = page_state(&config, &request);
+
+        assert_eq!(state.active_ref_set(), None);
+        assert_eq!(state.source_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn page_state_detail_ref_set_wins_over_stale_ref() {
+        let config = handoff_config();
+        let request =
+            page_request_from_public_url("/nixpkgs/git?ref=nixos-unstable&ref_set=25.11").unwrap();
+        let state = page_state(&config, &request);
+        let detail = state.detail.as_ref().unwrap();
+
+        assert_eq!(state.source_ref.as_deref(), Some("nixos-25.11"));
+        assert_eq!(detail.ref_id.as_deref(), Some("nixos-25.11"));
+    }
+
+    #[test]
+    fn page_state_detail_ambiguous_ref_set_falls_back_to_first_ref() {
+        let config = handoff_config();
+        let request = page_request_from_public_url("/nixpkgs/git?ref=bogus&ref_set=multi").unwrap();
+        let state = page_state(&config, &request);
+        let detail = state.detail.as_ref().unwrap();
+
+        assert_eq!(state.source_ref.as_deref(), Some("nixos-unstable"));
+        assert_eq!(detail.ref_id.as_deref(), Some("nixos-unstable"));
     }
 }

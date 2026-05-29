@@ -7,18 +7,13 @@ use nixsearch_core::source_link::SourceLinkConfig;
 use nixsearch_index::search::SearchHit;
 
 use crate::DEFAULT_LIMIT;
-use crate::request::{LinkOrigin, PageQuery, PageRequest, normalized_query};
-use crate::urls::{entry_url_for, paginated_search_url, ref_id_for_link, ref_set_for_link};
+use crate::request::{PageRequest, PageState, SourceFilter, page_state};
+use crate::urls::{entry_url_for_hit, search_url_for_state};
 
 use super::source_tag;
 
-pub fn render(
-    request: &PageRequest,
-    hits: &[SearchHit],
-    total: usize,
-    config: &AppConfig,
-) -> Markup {
-    let Some(q) = normalized_query(&request.query) else {
+pub fn render(state: &PageState, hits: &[SearchHit], total: usize, config: &AppConfig) -> Markup {
+    let Some(q) = state.q.as_deref() else {
         return render_empty();
     };
 
@@ -38,8 +33,8 @@ pub fn render(
         };
     }
 
-    let show_source = request.source.is_none() || request.query.source == Some(LinkOrigin::All);
-    let page = request.query.page.unwrap_or(1).max(1);
+    let show_source = state.source_filter == SourceFilter::All;
+    let page = state.page.unwrap_or(1).max(1);
     let offset = (page - 1) * DEFAULT_LIMIT;
 
     html! {
@@ -62,7 +57,7 @@ pub fn render(
                     @for (index, hit) in hits.iter().enumerate() {
                         @let result_offset = offset + index;
                         @let result_page = page_for_offset(result_offset);
-                        (render_hit_row(request, hit, config, show_source, result_page, result_offset))
+                        (render_hit_row(state, hit, config, show_source, result_page, result_offset))
                     }
                 }
             }
@@ -70,18 +65,14 @@ pub fn render(
                 noscript {
                     nav.pagination {
                         @if page > 1 {
-                            a.pagination-link href=(paginated_search_url(
-                                request.source.as_deref(),
-                                &request.query,
-                                page - 1,
-                            )) { "← Previous" }
+                            @let mut prev_state = state.clone();
+                            @let _ = prev_state.page.replace(page - 1);
+                            a.pagination-link href=(search_url_for_state(config, &prev_state)) { "← Previous" }
                         }
                         @if offset + hits.len() < total {
-                            a.pagination-link href=(paginated_search_url(
-                                request.source.as_deref(),
-                                &request.query,
-                                page + 1,
-                            )) { "Next →" }
+                            @let mut next_state = state.clone();
+                            @let _ = next_state.page.replace(page + 1);
+                            a.pagination-link href=(search_url_for_state(config, &next_state)) { "Next →" }
                         }
                     }
                 }
@@ -97,13 +88,14 @@ pub fn render_rows_only(
     config: &AppConfig,
     offset: usize,
 ) -> String {
-    let show_source = request.source.is_none() || request.query.source == Some(LinkOrigin::All);
+    let state = page_state(config, request);
+    let show_source = state.source_filter == SourceFilter::All;
 
     let markup = html! {
         @for (index, hit) in hits.iter().enumerate() {
             @let result_offset = offset + index;
             @let result_page = page_for_offset(result_offset);
-            (render_hit_row(request, hit, config, show_source, result_page, result_offset))
+            (render_hit_row(&state, hit, config, show_source, result_page, result_offset))
         }
     };
 
@@ -127,7 +119,7 @@ pub fn render_error(error: &str) -> Markup {
 }
 
 fn render_hit_row(
-    request: &PageRequest,
+    state: &PageState,
     hit: &SearchHit,
     config: &AppConfig,
     show_source: bool,
@@ -137,29 +129,7 @@ fn render_hit_row(
     let common = hit.document.common();
     let summary = summary_for_document(&hit.document);
 
-    let from_scope = if request.source.is_none() || request.query.source == Some(LinkOrigin::All) {
-        Some(LinkOrigin::All)
-    } else {
-        None
-    };
-
-    let entry_href = entry_url_for(
-        &common.source,
-        &common.name,
-        None,
-        &PageQuery {
-            q: request.query.q.clone(),
-            ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
-            ref_set: request
-                .query
-                .ref_set
-                .as_deref()
-                .and_then(|ref_set| ref_set_for_link(config, ref_set)),
-            kind: None,
-            source: from_scope,
-            page: Some(result_page),
-        },
-    );
+    let entry_href = entry_url_for_hit(config, state, hit, None, Some(result_page));
 
     let desc = summary.unwrap_or("");
     let source_color = source_tag::color_for_source(config, &common.source);
@@ -219,6 +189,7 @@ pub fn source_link_config_for_document<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::PageQuery;
     use nixsearch_core::document::{OptionDoc, SearchDocument};
     use nixsearch_core::ingest::IngestContext;
     use nixsearch_core::source_link::{Declaration, SourceLinkResolver};
@@ -272,7 +243,8 @@ mod tests {
             ..Default::default()
         };
 
-        let html = render(&request, &[], 1_010, &config).into_string();
+        let state = page_state(&config, &request);
+        let html = render(&state, &[], 1_010, &config).into_string();
 
         assert!(html.contains("No results on this page"));
         assert!(!html.contains("No results for"));

@@ -5,7 +5,7 @@ use nixsearch_index::search::SearchResult;
 
 use crate::AppState;
 use crate::RECONCILE_EVENTS_URL;
-use crate::request::{PageRequest, SourceFilter, normalized_query};
+use crate::request::{PageRequest, SourceFilter, normalized_query, page_state};
 use crate::scripts::navigation_script;
 use crate::urls::source_path;
 
@@ -24,25 +24,26 @@ pub fn render_full_page(
     search_result: Result<&SearchResult, &str>,
 ) -> Markup {
     let q = request.query.q.as_deref().unwrap_or("");
-    let source_filter = SourceFilter::from_request(request);
+    let page_state = page_state(&state.config, request);
+    let source_filter = &page_state.source_filter;
 
     let results_markup = match search_result {
         Ok(result) if normalized_query(&request.query).is_some() => {
-            results::render(request, &result.hits, result.total, &state.config)
+            results::render(&page_state, &result.hits, result.total, &state.config)
         }
-        Ok(_) => home::render(state, request),
+        Ok(_) => home::render(state, request, &page_state),
         Err(error) => results::render_error(error),
     };
 
-    let modal_markup = modal::render(state, request);
+    let modal_markup = modal::render(state, request, &page_state);
     let source_metadata = source_metadata_json(&state.config);
-    let page_title = title_for(&state.config, request, &source_filter);
+    let page_title = title_for(&state.config, request, source_filter);
 
-    let form_action = match &source_filter {
+    let form_action = match source_filter {
         SourceFilter::All => "/".to_owned(),
         SourceFilter::Named(source) => source_path(source),
     };
-    let logo_style = match &source_filter {
+    let logo_style = match source_filter {
         SourceFilter::All => None,
         SourceFilter::Named(source) => Some(format!(
             "--logo-accent: {};",
@@ -78,11 +79,9 @@ pub fn render_full_page(
                         }
                         (search::render_form(
                             &state.config,
-                            &source_filter,
+                            &page_state,
                             &form_action,
                             q,
-                            request.query.ref_id.as_deref().unwrap_or(""),
-                            request.query.ref_set.as_deref().unwrap_or(""),
                         ))
                     }
                 }
@@ -125,44 +124,39 @@ fn source_display_name<'a>(config: &'a AppConfig, source_id: &'a str) -> &'a str
 }
 
 fn source_metadata_json(config: &AppConfig) -> String {
-    let sources: Vec<String> = config
-           .sources
-           .iter()
-           .map(|(id, source)| {
-               let name = source.name.as_deref().unwrap_or(id);
-               let color = source_tag::color_for_source(config, id);
-               let refs: Vec<&str> = source.refs.iter().map(|r| r.id.as_str()).collect();
-               let refs_json = refs
-                   .iter()
-                   .map(|r| format!("\"{}\"", r.replace('"', "\\\"")))
-                   .collect::<Vec<_>>()
-                   .join(",");
-               let default_ref = source.default_ref.as_deref().unwrap_or("");
+    let sources = config
+        .sources
+        .iter()
+        .map(|(id, source)| {
+            let refs: Vec<&str> = source.refs.iter().map(|r| r.id.as_str()).collect();
 
-               format!(
-                   r#"{{"id":"{id}","name":"{name}","color":"{color}","refs":[{refs_json}],"defaultRef":"{default_ref}"}}"#,
-                   id = id.replace('"', "\\\""),
-                   name = name.replace('"', "\\\""),
-                   color = color.replace('"', "\\\""),
-                   default_ref = default_ref.replace('"', "\\\""),
-               )
+            serde_json::json!({
+                "id": id,
+                "name": source.name.as_deref().unwrap_or(id),
+                "color": source_tag::color_for_source(config, id),
+                "refs": refs,
+                "defaultRef": source.default_ref.as_deref().unwrap_or(""),
             })
-            .collect();
+        })
+        .collect::<Vec<_>>();
 
     let ref_sets = config
         .ref_sets
-        .keys()
-        .map(|ref_set| format!("\"{}\"", ref_set.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let default_ref_set = config.default_ref_set().unwrap_or("");
+        .iter()
+        .map(|(ref_set, ref_set_config)| {
+            serde_json::json!({
+                "id": ref_set,
+                "refs": &ref_set_config.refs,
+            })
+        })
+        .collect::<Vec<_>>();
 
-    format!(
-        r#"{{"sources":[{}],"refSets":[{}],"defaultRefSet":"{}"}}"#,
-        sources.join(","),
-        ref_sets,
-        default_ref_set.replace('"', "\\\""),
-    )
+    serde_json::json!({
+        "sources": sources,
+        "refSets": ref_sets,
+        "defaultRefSet": config.default_ref_set().unwrap_or(""),
+    })
+    .to_string()
 }
 
 #[cfg(test)]

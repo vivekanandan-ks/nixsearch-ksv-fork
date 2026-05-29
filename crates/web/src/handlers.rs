@@ -14,8 +14,8 @@ use nixsearch_index::search::{SearchIndex, SearchOptions, SearchResult, SearchSc
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::request::{
-    LinkOrigin, PageQuery, PageRequest, decode_path_value, non_empty, normalized_query,
-    page_request_from_public_url, results_context,
+    PageQuery, PageRequest, decode_path_value, non_empty, normalized_query,
+    page_request_from_public_url, page_state, search_scopes_for_state,
 };
 use crate::scripts::dialog_reconcile_script;
 use crate::templates;
@@ -103,19 +103,23 @@ pub async fn state_events(
         }
     };
 
-    let patch_results = should_patch_results(query.previous_url.as_deref(), &request);
+    let patch_results = should_patch_results(&state, query.previous_url.as_deref(), &request);
 
     let results_html = if patch_results {
+        let page_state = page_state(&state.config, &request);
         if normalized_query(&request.query).is_none() {
-            Some(templates::home::render(&state, &request).into_string())
+            Some(templates::home::render(&state, &request, &page_state).into_string())
         } else {
             let search_result = run_search(&state, &request, 0, DEFAULT_LIMIT);
 
             Some(match &search_result {
-                Ok(result) => {
-                    templates::results::render(&request, &result.hits, result.total, &state.config)
-                        .into_string()
-                }
+                Ok(result) => templates::results::render(
+                    &page_state,
+                    &result.hits,
+                    result.total,
+                    &state.config,
+                )
+                .into_string(),
                 Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
             })
         }
@@ -123,7 +127,8 @@ pub async fn state_events(
         None
     };
 
-    let modal_html = templates::modal::render(&state, &request).into_string();
+    let page_state = page_state(&state.config, &request);
+    let modal_html = templates::modal::render(&state, &request, &page_state).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 
@@ -141,13 +146,25 @@ pub async fn state_events(
     Sse::new(stream::iter(events))
 }
 
-fn should_patch_results(previous_url: Option<&str>, request: &PageRequest) -> bool {
+fn should_patch_results(
+    state: &AppState,
+    previous_url: Option<&str>,
+    request: &PageRequest,
+) -> bool {
     let Some(previous_url) = previous_url.and_then(non_empty) else {
         return true;
     };
 
     match page_request_from_public_url(previous_url) {
-        Ok(previous_request) => results_context(&previous_request) != results_context(request),
+        Ok(previous_request) => {
+            let previous_state = page_state(&state.config, &previous_request);
+            let next_state = page_state(&state.config, request);
+
+            previous_state.q != next_state.q
+                || previous_state.source_filter != next_state.source_filter
+                || previous_state.source_ref != next_state.source_ref
+                || previous_state.active_ref_set() != next_state.active_ref_set()
+        }
         Err(_) => true,
     }
 }
@@ -224,27 +241,9 @@ fn run_search(
     let index = SearchIndex::open(&index_path)
         .with_context(|| format!("failed to open current search index {}", index_path))?;
 
-    // source=all overrides path-based source filter
-    let effective_source = match request.query.source {
-        Some(LinkOrigin::All) => None,
-        _ => request.source.as_deref().and_then(non_empty),
-    };
+    let page_state = page_state(&state.config, request);
 
-    let scopes = state
-        .config
-        .resolve_search_scopes(
-            effective_source,
-            if effective_source.is_some() {
-                request.query.ref_id.as_deref().and_then(non_empty)
-            } else {
-                None
-            },
-            if effective_source.is_none() {
-                request.query.ref_set.as_deref().and_then(non_empty)
-            } else {
-                None
-            },
-        )
+    let scopes = search_scopes_for_state(&state.config, &page_state)
         .context("failed to resolve search scope")?
         .into_iter()
         .map(|scope| SearchScope {

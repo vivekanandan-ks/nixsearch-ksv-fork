@@ -173,17 +173,11 @@
   function resultsContextForUrl(url) {
     const parsed = new URL(url, window.location.href);
     const params = new URLSearchParams(parsed.search);
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    const sourceAll = params.get("source") === "__SOURCE_ALL_VALUE__";
     const q = (params.get("q") || "").trim();
-    const source = sourceAll
-      ? ""
-      : parts[0]
-        ? decodeURIComponent(parts[0])
-        : "";
-    const ref = sourceAll ? "" : (params.get("ref") || "").trim();
-    const refSet =
-      sourceAll || !source ? (params.get("ref_set") || "").trim() : "";
+    const state = normalizedStateFromUrl(url);
+    const source = state.sourceId;
+    const ref = state.refId;
+    const refSet = state.activeRefSet;
 
     return JSON.stringify({ q, source, ref, refSet });
   }
@@ -233,6 +227,33 @@
     return metadata.sources.find((s) => s.id === sourceId);
   }
 
+  function refSetId(refSet) {
+    return typeof refSet === "string" ? refSet : refSet.id;
+  }
+
+  function refSetMetadata(refSetIdValue) {
+    return (metadata.refSets || []).find((r) => refSetId(r) === refSetIdValue);
+  }
+
+  function refSetIds() {
+    return (metadata.refSets || []).map(refSetId);
+  }
+
+  function refsForRefSetSource(refSetIdValue, sourceId) {
+    const refSet = refSetMetadata(refSetIdValue);
+    if (!refSet || typeof refSet === "string") return [];
+    const refs = (refSet.refs && refSet.refs[sourceId]) || [];
+    return Array.isArray(refs) ? refs : refs ? [refs] : [];
+  }
+
+  function firstRefForRefSetSource(refSetIdValue, sourceId) {
+    return refsForRefSetSource(refSetIdValue, sourceId)[0] || "";
+  }
+
+  function refSetContainsSourceRef(refSetIdValue, sourceId, refId) {
+    return refsForRefSetSource(refSetIdValue, sourceId).includes(refId);
+  }
+
   function syncLogoAccent(sourceId) {
     const logo = document.querySelector(".site-title");
     if (!logo) return;
@@ -261,7 +282,69 @@
     return metadata.defaultRefSet || "";
   }
 
-  function populateRefRadios(sourceId) {
+  function normalizeAllRefSet(refSetIdValue) {
+    if (refSetIdValue && refSetMetadata(refSetIdValue)) return refSetIdValue;
+    return defaultRefSet();
+  }
+
+  function normalizeSourceRefSetContext(sourceId, refId, refSetIdValue) {
+    if (
+      refSetIdValue &&
+      refSetMetadata(refSetIdValue) &&
+      refsForRefSetSource(refSetIdValue, sourceId).length > 0
+    ) {
+      return { activeRefSet: refSetIdValue, activeRefSetExplicit: true };
+    }
+
+    return {
+      activeRefSet: "",
+      activeRefSetExplicit: false,
+    };
+  }
+
+  function normalizedStateFromUrl(url = window.location.href) {
+    const parsed = new URL(url, window.location.href);
+    const params = new URLSearchParams(parsed.search);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const sourceAll = params.get("source") === "__SOURCE_ALL_VALUE__";
+    const sourceId = sourceAll ? "" : parts[0] ? decodeURIComponent(parts[0]) : "";
+    const source = sourceMetadata(sourceId);
+
+    if (!sourceId) {
+      return {
+        sourceId: "",
+        refId: "",
+        activeRefSet: normalizeAllRefSet(params.get("ref_set") || ""),
+        activeRefSetExplicit: true,
+      };
+    }
+
+    const requestedRef = (params.get("ref") || "").trim();
+    const refSetContext = normalizeSourceRefSetContext(
+      sourceId,
+      requestedRef,
+      params.get("ref_set") || "",
+    );
+    let refId = requestedRef || (source ? source.defaultRef : "");
+    if (refSetContext.activeRefSetExplicit) {
+      const refs = refsForRefSetSource(refSetContext.activeRefSet, sourceId);
+      if (refs.length === 1) {
+        refId = refs[0];
+      } else {
+        refId = refSetContainsSourceRef(
+          refSetContext.activeRefSet,
+          sourceId,
+          requestedRef,
+        )
+          ? requestedRef
+          : refs[0] || "";
+      }
+    }
+
+    return { sourceId, refId, ...refSetContext };
+  }
+
+  function populateRefRadios(sourceId, activeRefSet = "") {
     const container = getRefContainer();
     if (!container) return;
 
@@ -276,15 +359,17 @@
     }
 
     if (!sourceId) {
-      if (!metadata.refSets || metadata.refSets.length === 0) {
+      const refSets = refSetIds();
+      if (refSets.length === 0) {
         container.innerHTML = "";
         syncHeaderHeight();
         return;
       }
 
-      container.innerHTML = metadata.refSets
+      const selectedRefSet = normalizeAllRefSet(activeRefSet);
+      container.innerHTML = refSets
         .map((r) => {
-          const checked = r === defaultRefSet() ? " checked" : "";
+          const checked = r === selectedRefSet ? " checked" : "";
           return `<label class="ref-radio-label"><input type="radio" name="ref_set" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
         })
         .join("");
@@ -298,9 +383,10 @@
       return;
     }
 
+    const selectedRef = firstRefForRefSetSource(activeRefSet, sourceId) || source.defaultRef;
     container.innerHTML = source.refs
       .map((r) => {
-        const checked = r === source.defaultRef ? " checked" : "";
+        const checked = r === selectedRef ? " checked" : "";
         return `<label class="ref-radio-label"><input type="radio" name="ref" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
       })
       .join("");
@@ -337,7 +423,16 @@
     return sourceId ? "/" + encodeURIComponent(sourceId) : "/";
   }
 
-  function buildSearchUrlFromInputs() {
+  function refSetForLink(refSetIdValue) {
+    return refSetIdValue && refSetIdValue !== defaultRefSet() ? refSetIdValue : "";
+  }
+
+  function buildSearchUrlFromInputs(context = null) {
+    if (context === null) {
+      context = normalizedStateFromUrl();
+    }
+    const contextActiveRefSet = context.activeRefSet || "";
+    const contextActiveRefSetExplicit = !!context.activeRefSetExplicit;
     const sourceId = currentSourceFromTabs();
     const path = sourcePath(sourceId);
     const params = new URLSearchParams();
@@ -348,13 +443,27 @@
     if (sourceId) {
       const refValue = currentRefFromRadios();
       const source = sourceMetadata(sourceId);
-      if (refValue && source && refValue !== source.defaultRef) {
+      const refSetRefs = contextActiveRefSetExplicit
+        ? refsForRefSetSource(contextActiveRefSet, sourceId)
+        : [];
+      const shouldUseRefSet = refSetRefs.length > 0;
+      const shouldSetRef = !shouldUseRefSet || refSetRefs.length > 1;
+
+      if (
+        shouldSetRef &&
+        refValue &&
+        (!source || shouldUseRefSet || refValue !== source.defaultRef)
+      ) {
         params.set("ref", refValue);
+      }
+      if (shouldUseRefSet && refSetForLink(contextActiveRefSet)) {
+        params.set("ref_set", contextActiveRefSet);
       }
     } else {
       const refSetValue = currentRefFromRadios();
-      if (refSetValue && refSetValue !== defaultRefSet()) {
-        params.set("ref_set", refSetValue);
+      const activeRefSet = normalizeAllRefSet(refSetValue || contextActiveRefSet);
+      if (refSetForLink(activeRefSet)) {
+        params.set("ref_set", activeRefSet);
       }
     }
 
@@ -366,15 +475,16 @@
     sourceId,
     { push = true, preserveSourceKeyboardHistory = false } = {},
   ) {
+    const previousState = normalizedStateFromUrl();
     resetQueryHistoryGrouping();
     if (!preserveSourceKeyboardHistory) resetSourceKeyboardHistoryGrouping();
     setActiveSourceTab(sourceId);
-    populateRefRadios(sourceId);
+    populateRefRadios(sourceId, previousState.activeRefSet);
 
     const dropdown = document.querySelector("[data-nixsearch-overflow-menu]");
     if (dropdown) dropdown.hidden = true;
 
-    return navigate(buildSearchUrlFromInputs(), { push });
+    return navigate(buildSearchUrlFromInputs(previousState), { push });
   }
 
   function selectSourceFromKeyboard(sourceId) {
@@ -499,17 +609,16 @@
 
   function syncInputsFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    const parts = window.location.pathname.split("/").filter(Boolean);
-    const pathSource = parts.length > 0 ? decodeURIComponent(parts[0]) : "";
-    const effectiveSource =
-      params.get("source") === "__SOURCE_ALL_VALUE__" ? "" : pathSource;
+    const state = normalizedStateFromUrl();
+    const effectiveSource = state.sourceId;
 
     setActiveSourceTab(effectiveSource);
-    populateRefRadios(effectiveSource);
+    populateRefRadios(
+      effectiveSource,
+      state.activeRefSetExplicit ? state.activeRefSet : "",
+    );
 
-    const refParam = effectiveSource
-      ? params.get("ref") || ""
-      : params.get("ref_set") || "";
+    const refParam = effectiveSource ? state.refId : state.activeRefSet;
     if (refParam) {
       const radio = document.querySelector(
         `[data-nixsearch-input="ref"][value="${CSS.escape(refParam)}"]`,
@@ -580,7 +689,7 @@
     if (!el.matches || !el.matches('[data-nixsearch-input="ref"]')) return;
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();
-    navigate(buildSearchUrlFromInputs());
+    navigate(buildSearchUrlFromInputs({ activeRefSet: "", activeRefSetExplicit: false }));
   });
 
   document.addEventListener("click", (evt) => {

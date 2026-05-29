@@ -1,6 +1,10 @@
 use nixsearch_config::app::AppConfig;
+use nixsearch_core::document::SearchDocument;
+use nixsearch_index::search::SearchHit;
 
-use crate::request::{LinkOrigin, PageQuery, PageRequest, non_empty};
+#[cfg(test)]
+use crate::request::PageRequest;
+use crate::request::{LinkOrigin, PageQuery, PageState, SourceFilter, non_empty};
 
 pub fn source_path(source: &str) -> String {
     format!("/{}", encode_path(source))
@@ -25,6 +29,8 @@ pub fn search_url_for(source: Option<&str>, query: &PageQuery) -> String {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn paginated_search_url(source: Option<&str>, query: &PageQuery, page: usize) -> String {
     let mut paged_query = query.clone();
     paged_query.page = if page > 1 { Some(page) } else { None };
@@ -51,6 +57,7 @@ pub fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &Page
     }
 }
 
+#[cfg(test)]
 pub fn close_url_for(request: &PageRequest) -> String {
     if request.query.source == Some(LinkOrigin::All) {
         return search_url_for(
@@ -73,6 +80,150 @@ pub fn close_url_for(request: &PageRequest) -> String {
             ..PageQuery::default()
         },
     )
+}
+
+pub fn search_url_for_state(config: &AppConfig, state: &PageState) -> String {
+    match &state.source_filter {
+        SourceFilter::All => all_url_from_state(config, state),
+        SourceFilter::Named(source) => source_url_from_state(config, state, source),
+    }
+}
+
+pub fn all_url_from_state(config: &AppConfig, state: &PageState) -> String {
+    search_url_for(
+        None,
+        &PageQuery {
+            q: state.q.clone(),
+            ref_set: state
+                .active_ref_set()
+                .and_then(|ref_set| ref_set_for_link(config, ref_set)),
+            page: state.page,
+            ..PageQuery::default()
+        },
+    )
+}
+
+pub fn all_tab_url_from_state(config: &AppConfig, state: &PageState) -> String {
+    let mut state = state.clone();
+    state.page = None;
+    all_url_from_state(config, &state)
+}
+
+pub fn source_url_from_state(config: &AppConfig, state: &PageState, source: &str) -> String {
+    let active_ref_set = state.active_ref_set();
+    let ref_set_refs =
+        active_ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, source));
+    let source_ref = ref_set_refs
+        .and_then(|refs| source_ref_for_refs(state, source, refs))
+        .or_else(|| match &state.source_filter {
+            SourceFilter::Named(current_source) if current_source == source => {
+                state.source_ref.clone()
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            config
+                .sources
+                .get(source)
+                .and_then(|source| source.default_ref.clone())
+        });
+
+    let ref_set = active_ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set));
+    let ref_id = match ref_set_refs {
+        Some(refs) if refs.len() == 1 => None,
+        Some(_) => source_ref.clone(),
+        None => source_ref.clone(),
+    };
+    let ref_id = match ref_set_refs {
+        Some(refs) if refs.len() > 1 => ref_id,
+        _ => ref_id
+            .as_deref()
+            .and_then(|ref_id| ref_id_for_link(config, source, ref_id)),
+    };
+
+    search_url_for(
+        Some(source),
+        &PageQuery {
+            q: state.q.clone(),
+            ref_id,
+            ref_set,
+            page: state.page,
+            ..PageQuery::default()
+        },
+    )
+}
+
+pub fn source_tab_url_from_state(config: &AppConfig, state: &PageState, source: &str) -> String {
+    let mut state = state.clone();
+    state.page = None;
+    source_url_from_state(config, &state, source)
+}
+
+pub fn entry_url_for_hit(
+    config: &AppConfig,
+    state: &PageState,
+    hit: &SearchHit,
+    kind: Option<&str>,
+    page: Option<usize>,
+) -> String {
+    entry_url_for_document(config, state, &hit.document, kind, page)
+}
+
+pub fn entry_url_for_document(
+    config: &AppConfig,
+    state: &PageState,
+    document: &SearchDocument,
+    kind: Option<&str>,
+    page: Option<usize>,
+) -> String {
+    let common = document.common();
+    let from_scope = matches!(state.source_filter, SourceFilter::All).then_some(LinkOrigin::All);
+    let ref_set = state.active_ref_set().filter(|ref_set| {
+        config.ref_set_contains_source_ref(ref_set, &common.source, &common.ref_id)
+    });
+    let ref_set_refs =
+        ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, &common.source));
+    let ref_id = match ref_set_refs {
+        Some(refs) if refs.len() == 1 => None,
+        _ => Some(common.ref_id.as_str()),
+    };
+    let ref_id = match ref_set_refs {
+        Some(refs) if refs.len() > 1 => ref_id.map(ToOwned::to_owned),
+        _ => ref_id.and_then(|ref_id| ref_id_for_link(config, &common.source, ref_id)),
+    };
+
+    entry_url_for(
+        &common.source,
+        &common.name,
+        kind,
+        &PageQuery {
+            q: state.q.clone(),
+            ref_id,
+            ref_set: ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set)),
+            kind: None,
+            source: from_scope,
+            page,
+        },
+    )
+}
+
+fn source_ref_for_refs(state: &PageState, source: &str, refs: &[String]) -> Option<String> {
+    match &state.source_filter {
+        SourceFilter::Named(current_source) if current_source == source => state
+            .source_ref
+            .as_ref()
+            .filter(|ref_id| refs.iter().any(|candidate| candidate == *ref_id))
+            .cloned()
+            .or_else(|| refs.first().cloned()),
+        _ => refs.first().cloned(),
+    }
+}
+
+pub fn close_url_for_state(config: &AppConfig, state: &PageState) -> String {
+    match &state.source_filter {
+        SourceFilter::All => all_url_from_state(config, state),
+        SourceFilter::Named(_) => search_url_for_state(config, state),
+    }
 }
 
 pub fn ref_id_for_link(config: &AppConfig, source: &str, ref_id: &str) -> Option<String> {
@@ -118,7 +269,67 @@ fn query_string<const N: usize>(pairs: [(&str, Option<&str>); N]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::{LinkOrigin, PageQuery, PageRequest};
+    use std::path::PathBuf;
+
+    use nixsearch_config::app::{AppConfig, RefSetConfig};
+    use nixsearch_config::producer::ProducerConfig;
+    use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
+    use nixsearch_core::artifact::ArtifactKind;
+
+    use crate::request::{LinkOrigin, PageQuery, PageRequest, page_state};
+
+    fn ref_config(id: &str) -> RefConfig {
+        RefConfig {
+            id: id.to_owned(),
+            producer: ProducerConfig::ExistingFile {
+                path: PathBuf::from("unused.json"),
+                artifact: ArtifactKind::OptionsJson,
+            },
+            source_links: None,
+        }
+    }
+
+    fn handoff_config() -> AppConfig {
+        AppConfig {
+            sources: [(
+                "nixpkgs".to_owned(),
+                SourceConfig {
+                    name: None,
+                    color: None,
+                    kind: SourceKind::Packages,
+                    default_ref: Some("nixos-unstable".to_owned()),
+                    refs: vec![ref_config("nixos-unstable"), ref_config("nixos-25.11")],
+                },
+            )]
+            .into(),
+            ref_sets: [
+                (
+                    "unstable".to_owned(),
+                    RefSetConfig {
+                        refs: [("nixpkgs".to_owned(), vec!["nixos-unstable".to_owned()])].into(),
+                    },
+                ),
+                (
+                    "25.11".to_owned(),
+                    RefSetConfig {
+                        refs: [("nixpkgs".to_owned(), vec!["nixos-25.11".to_owned()])].into(),
+                    },
+                ),
+                (
+                    "multi".to_owned(),
+                    RefSetConfig {
+                        refs: [(
+                            "nixpkgs".to_owned(),
+                            vec!["nixos-unstable".to_owned(), "nixos-25.11".to_owned()],
+                        )]
+                        .into(),
+                    },
+                ),
+            ]
+            .into(),
+            ..AppConfig::default()
+        }
+    }
 
     #[test]
     fn search_url_for_root_with_query() {
@@ -220,5 +431,152 @@ mod tests {
             },
         };
         assert_eq!(close_url_for(&request), "/?q=git&ref_set=25.11");
+    }
+
+    #[test]
+    fn source_url_does_not_serialize_inferred_ref_set() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            source_url_from_state(&config, &state, "nixpkgs"),
+            "/nixpkgs?q=git&ref=nixos-25.11"
+        );
+
+        assert_eq!(all_url_from_state(&config, &state), "/?q=git");
+    }
+
+    #[test]
+    fn source_url_prefers_unique_ref_set_over_ref() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                ref_set: Some("25.11".to_owned()),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            source_url_from_state(&config, &state, "nixpkgs"),
+            "/nixpkgs?q=git&ref_set=25.11"
+        );
+    }
+
+    #[test]
+    fn source_url_includes_ref_when_ref_set_is_ambiguous() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                ref_set: Some("multi".to_owned()),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            source_url_from_state(&config, &state, "nixpkgs"),
+            "/nixpkgs?q=git&ref=nixos-25.11&ref_set=multi"
+        );
+    }
+
+    #[test]
+    fn search_url_for_state_preserves_source_page() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                page: Some(3),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            search_url_for_state(&config, &state),
+            "/nixpkgs?q=git&ref=nixos-25.11&page=3"
+        );
+    }
+
+    #[test]
+    fn source_tab_url_resets_page() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                page: Some(3),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            source_tab_url_from_state(&config, &state, "nixpkgs"),
+            "/nixpkgs?q=git&ref=nixos-25.11"
+        );
+    }
+
+    #[test]
+    fn all_tab_url_resets_page() {
+        let config = handoff_config();
+        let request = PageRequest {
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_set: Some("25.11".to_owned()),
+                page: Some(3),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            all_tab_url_from_state(&config, &state),
+            "/?q=git&ref_set=25.11"
+        );
+    }
+
+    #[test]
+    fn close_url_for_state_preserves_source_page() {
+        let config = handoff_config();
+        let request = PageRequest {
+            source: Some("nixpkgs".to_owned()),
+            entry: Some("git".to_owned()),
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_id: Some("nixos-25.11".to_owned()),
+                page: Some(3),
+                ..PageQuery::default()
+            },
+        };
+        let state = page_state(&config, &request);
+
+        assert_eq!(
+            close_url_for_state(&config, &state),
+            "/nixpkgs?q=git&ref=nixos-25.11&page=3"
+        );
     }
 }

@@ -4,7 +4,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceKind;
 
 use crate::AppState;
-use crate::request::{PageRequest, SourceFilter, non_empty};
+use crate::request::{PageRequest, PageState, SourceFilter, search_scopes_for_state};
 
 use super::source_tag::color_for_source;
 
@@ -14,9 +14,9 @@ static GLASS_SVG: &str = include_str!("../../magnify-glass.svg");
 /// The muted Nix-logo blue used when searching every source ("All" mode).
 const ALL_GLASS_COLOR: &str = "#5873B9";
 
-pub fn render(state: &AppState, request: &PageRequest) -> Markup {
+pub fn render(state: &AppState, _request: &PageRequest, page_state: &PageState) -> Markup {
     let config = &state.config;
-    let source_filter = SourceFilter::from_request(request);
+    let source_filter = &page_state.source_filter;
 
     let (title_prefix, title_accent) = title_for(config, &source_filter);
     // "All" keeps the muted glass blue and lets the title fall back to the
@@ -28,7 +28,7 @@ pub fn render(state: &AppState, request: &PageRequest) -> Markup {
             format!("--glass-color: {color}; --home-accent: {color};")
         }
     };
-    let count = count_for(state, request, &source_filter);
+    let count = count_for(state, page_state);
 
     html! {
         div #results.home-hero style=(hero_style) {
@@ -76,26 +76,10 @@ fn source_display_name<'a>(config: &'a AppConfig, source_id: &'a str) -> &'a str
 /// Returns the entry count and its noun (e.g. `(123456, "packages and options")`)
 /// for the active set, or `None` when counts are unavailable (e.g. the index has
 /// no matching targets yet).
-fn count_for(
-    state: &AppState,
-    request: &PageRequest,
-    source_filter: &SourceFilter,
-) -> Option<(usize, &'static str)> {
+fn count_for(state: &AppState, page_state: &PageState) -> Option<(usize, &'static str)> {
     let config = &state.config;
 
-    let scopes = match source_filter {
-        SourceFilter::All => config.resolve_search_scopes(
-            None,
-            None,
-            request.query.ref_set.as_deref().and_then(non_empty),
-        ),
-        SourceFilter::Named(source) => config.resolve_search_scopes(
-            Some(source),
-            request.query.ref_id.as_deref().and_then(non_empty),
-            None,
-        ),
-    }
-    .ok()?;
+    let scopes = search_scopes_for_state(config, page_state).ok()?;
 
     let manifest = state.manifest.read().expect("manifest lock poisoned");
 
@@ -115,7 +99,7 @@ fn count_for(
         return None;
     }
 
-    Some((count, kind_noun_for(config, source_filter)))
+    Some((count, kind_noun_for(config, &page_state.source_filter)))
 }
 
 fn kind_noun_for(config: &AppConfig, source_filter: &SourceFilter) -> &'static str {

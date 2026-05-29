@@ -2,23 +2,16 @@ use maud::{Markup, html};
 
 use nixsearch_config::app::AppConfig;
 
-use crate::request::{PageQuery, SourceFilter, non_empty};
-use crate::urls::{ref_id_for_link, ref_set_for_link, search_url_for};
+use crate::request::{PageState, SourceFilter};
+use crate::urls::{all_tab_url_from_state, source_tab_url_from_state};
 
 use super::source_tag::color_for_source;
 
 const ALL_TAB_COLOR: &str = "#d4d4d8";
 
-pub fn render_form(
-    config: &AppConfig,
-    source_filter: &SourceFilter,
-    form_action: &str,
-    q: &str,
-    current_ref: &str,
-    current_ref_set: &str,
-) -> Markup {
+pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: &str) -> Markup {
     let has_multiple_sources = config.sources.len() > 1;
-    let source_color = match source_filter {
+    let source_color = match &state.source_filter {
         SourceFilter::Named(source_id) => Some(color_for_source(config, source_id)),
         SourceFilter::All => None,
     };
@@ -26,7 +19,7 @@ pub fn render_form(
         form.search-form action=(form_action) method="get"
             style=[source_color.as_ref().map(|color| format!("--search-focus-color: {color};"))] {
             @if has_multiple_sources {
-                (render_source_tabs(config, source_filter, q))
+                (render_source_tabs(config, state))
             }
 
             div.search-bar-row {
@@ -38,11 +31,11 @@ pub fn render_form(
                 div.ref-radios.js-ref-radios
                     data-nixsearch-ref-container=""
                     style=[source_color.as_ref().map(|color| format!("--source-color: {color};"))] {
-                    (render_ref_radios(config, source_filter, current_ref, current_ref_set))
+                    (render_ref_radios(config, state))
                 }
 
                 noscript {
-                    (render_ref_links(config, source_filter, current_ref, current_ref_set, q, source_color.as_deref()))
+                    (render_ref_links(config, state, source_color.as_deref()))
                 }
             }
 
@@ -51,26 +44,21 @@ pub fn render_form(
     }
 }
 
-fn render_source_tabs(config: &AppConfig, selected: &SourceFilter, q: &str) -> Markup {
-    let query = PageQuery {
-        q: non_empty(q).map(ToOwned::to_owned),
-        ..PageQuery::default()
-    };
-
+fn render_source_tabs(config: &AppConfig, state: &PageState) -> Markup {
     html! {
         div.source-tabs-container {
             nav.source-tabs {
-                a.source-tab href=(search_url_for(None, &query))
+                a.source-tab href=(all_tab_url_from_state(config, state))
                     data-nixsearch-source=""
-                    data-active[*selected == SourceFilter::All]
+                    data-active[state.source_filter == SourceFilter::All]
                     style=(format!("--tab-color: {ALL_TAB_COLOR};")) {
                     "All"
                 }
                 @for (id, source) in &config.sources {
                     @let name = source.name.as_deref().unwrap_or(id);
-                    @let is_selected = matches!(selected, SourceFilter::Named(s) if s == id);
+                    @let is_selected = matches!(&state.source_filter, SourceFilter::Named(s) if s == id);
                     @let color = color_for_source(config, id);
-                    a.source-tab href=(search_url_for(Some(id), &query))
+                    a.source-tab href=(source_tab_url_from_state(config, state, id))
                         data-nixsearch-source=(id)
                         data-active[is_selected]
                         style=(format!("--tab-color: {color};")) {
@@ -82,29 +70,15 @@ fn render_source_tabs(config: &AppConfig, selected: &SourceFilter, q: &str) -> M
     }
 }
 
-fn render_ref_links(
-    config: &AppConfig,
-    selected_source: &SourceFilter,
-    current_ref: &str,
-    current_ref_set: &str,
-    q: &str,
-    source_color: Option<&str>,
-) -> Markup {
-    if matches!(selected_source, SourceFilter::All) {
+fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<&str>) -> Markup {
+    if matches!(state.source_filter, SourceFilter::All) {
         return html! {
             div.ref-radios.noscript-ref-radios {
                 @for ref_set in config.ref_sets.keys() {
-                    @let is_selected = if current_ref_set.is_empty() {
-                        config.default_ref_set() == Some(ref_set.as_str())
-                    } else {
-                        current_ref_set == ref_set
-                    };
-                    @let query = PageQuery {
-                        q: non_empty(q).map(ToOwned::to_owned),
-                        ref_set: ref_set_for_link(config, ref_set),
-                        ..PageQuery::default()
-                    };
-                    a.ref-radio-label.ref-radio-link href=(search_url_for(None, &query))
+                    @let is_selected = state.active_ref_set() == Some(ref_set.as_str());
+                    @let mut next = state.clone();
+                    @let _ = next.set_explicit_ref_set(ref_set.clone());
+                    a.ref-radio-label.ref-radio-link href=(all_tab_url_from_state(config, &next))
                         data-active[is_selected] {
                         span.ref-radio-dot {}
                         span { (ref_set) }
@@ -114,7 +88,7 @@ fn render_ref_links(
         };
     }
 
-    let SourceFilter::Named(source_id) = selected_source else {
+    let SourceFilter::Named(source_id) = &state.source_filter else {
         return html! {};
     };
 
@@ -127,17 +101,11 @@ fn render_ref_links(
             style=[source_color.map(|color| format!("--source-color: {color};"))] {
             @for ref_config in &source.refs {
                 @let ref_id = ref_config.id.as_str();
-                @let is_selected = if current_ref.is_empty() {
-                    source.default_ref.as_deref() == Some(ref_id)
-                } else {
-                    current_ref == ref_id
-                };
-                @let query = PageQuery {
-                    q: non_empty(q).map(ToOwned::to_owned),
-                    ref_id: ref_id_for_link(config, source_id, ref_id),
-                    ..PageQuery::default()
-                };
-                a.ref-radio-label.ref-radio-link href=(search_url_for(Some(source_id), &query))
+                @let is_selected = state.source_ref.as_deref() == Some(ref_id);
+                @let mut next = state.clone();
+                @let _ = next.source_ref.replace(ref_id.to_owned());
+                @let _ = next.clear_ref_set_context();
+                a.ref-radio-label.ref-radio-link href=(source_tab_url_from_state(config, &next, source_id))
                     data-active[is_selected] {
                     span.ref-radio-dot {}
                     span { (ref_id) }
@@ -147,39 +115,26 @@ fn render_ref_links(
     }
 }
 
-fn render_ref_radios(
-    config: &AppConfig,
-    selected_source: &SourceFilter,
-    current_ref: &str,
-    current_ref_set: &str,
-) -> Markup {
-    let (refs, default_ref, input_name): (Vec<&str>, Option<&str>, &str) = match selected_source {
+fn render_ref_radios(config: &AppConfig, state: &PageState) -> Markup {
+    let (refs, current, input_name): (Vec<&str>, Option<&str>, &str) = match &state.source_filter {
         SourceFilter::All => (
             config.ref_sets.keys().map(String::as_str).collect(),
-            config.default_ref_set(),
+            state.active_ref_set(),
             "ref_set",
         ),
         SourceFilter::Named(source_id) => match config.sources.get(source_id.as_str()) {
             Some(source) => (
                 source.refs.iter().map(|r| r.id.as_str()).collect(),
-                source.default_ref.as_deref(),
+                state.source_ref.as_deref(),
                 "ref",
             ),
             None => (Vec::new(), None, "ref"),
         },
     };
-    let current = match selected_source {
-        SourceFilter::All => current_ref_set,
-        SourceFilter::Named(_) => current_ref,
-    };
 
     html! {
         @for ref_id in &refs {
-            @let is_selected = if current.is_empty() {
-                default_ref == Some(*ref_id)
-            } else {
-                *ref_id == current
-            };
+            @let is_selected = current == Some(*ref_id);
             label.ref-radio-label {
                 input type="radio" name=(input_name) value=(ref_id)
                     checked[is_selected]

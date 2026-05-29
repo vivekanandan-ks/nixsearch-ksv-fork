@@ -144,6 +144,30 @@ impl AppConfig {
         self.ref_sets.keys().next().map(String::as_str)
     }
 
+    pub fn refs_for_ref_set_source(&self, ref_set_id: &str, source_id: &str) -> Option<&[String]> {
+        self.ref_sets
+            .get(ref_set_id)?
+            .refs
+            .get(source_id)
+            .map(Vec::as_slice)
+    }
+
+    pub fn first_ref_for_ref_set_source(&self, ref_set_id: &str, source_id: &str) -> Option<&str> {
+        self.refs_for_ref_set_source(ref_set_id, source_id)?
+            .first()
+            .map(String::as_str)
+    }
+
+    pub fn ref_set_contains_source_ref(
+        &self,
+        ref_set_id: &str,
+        source_id: &str,
+        ref_id: &str,
+    ) -> bool {
+        self.refs_for_ref_set_source(ref_set_id, source_id)
+            .is_some_and(|refs| refs.iter().any(|candidate| candidate == ref_id))
+    }
+
     pub fn resolve_search_scopes(
         &self,
         source: Option<&str>,
