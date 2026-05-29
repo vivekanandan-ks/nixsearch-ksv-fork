@@ -11,6 +11,7 @@
       craneLib = inputs.crane.mkLib pkgs;
       cargoSourceFiles = lib.fileset.unions [
         (craneLib.fileset.commonCargoSources ../.)
+        ../crates/web/favicon.ico
         ../crates/web/style.css
         ../crates/web/src/scripts
       ];

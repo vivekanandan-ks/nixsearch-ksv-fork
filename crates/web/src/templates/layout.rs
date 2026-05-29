@@ -59,6 +59,7 @@ pub fn render_full_page(
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "nixsearch" }
+                link rel="icon" type="image/x-icon" href="/favicon.ico";
                 script type="module"
                     src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js" {}
                 style { (PreEscaped(CSS)) }

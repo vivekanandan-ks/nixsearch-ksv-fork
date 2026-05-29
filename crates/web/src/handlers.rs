@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::header;
 use axum::response::{Html, IntoResponse, Sse, sse::Event};
 use datastar::prelude::{ExecuteScript, PatchElements};
 use futures_util::stream;
@@ -33,6 +34,13 @@ pub struct MoreQuery {
 
 pub async fn health() -> &'static str {
     "ok"
+}
+
+pub async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../favicon.ico"),
+    )
 }
 
 pub async fn root_page(
