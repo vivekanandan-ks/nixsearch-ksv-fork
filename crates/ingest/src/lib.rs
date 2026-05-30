@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use nixsearch_core::document::{License, Maintainer, OptionDoc, PackageDoc, SearchDocument};
+use nixsearch_core::document::{
+    DocText, DocValue, License, Maintainer, OptionDoc, PackageDoc, SearchDocument,
+    looks_like_docbook_text,
+};
 use nixsearch_core::ingest::IngestContext;
 use nixsearch_core::source_link::Declaration;
 
@@ -39,7 +42,7 @@ struct RawOption {
     declarations: Vec<RawDeclaration>,
 
     #[serde(default)]
-    description: Option<String>,
+    description: Option<Value>,
 
     #[serde(default, rename = "type")]
     option_type: Option<String>,
@@ -51,7 +54,7 @@ struct RawOption {
     example: Option<Value>,
 
     #[serde(default)]
-    related_packages: Option<String>,
+    related_packages: Option<Value>,
 
     #[serde(default)]
     loc: Vec<String>,
@@ -99,16 +102,66 @@ fn convert_option(name: String, raw: RawOption, context: &IngestContext) -> Opti
     doc.parents = parents_from_loc(&doc.loc);
     doc.option_set = doc.loc.first().cloned();
     doc.declarations = raw.declarations.into_iter().map(Into::into).collect();
-    doc.description = raw.description;
+    doc.description = raw.description.map(doc_text_from_value);
     doc.option_type = raw.option_type;
-    doc.default = raw.default;
-    doc.example = raw.example;
-    doc.related_packages = raw.related_packages;
+    doc.default = raw.default.map(doc_value_from_value);
+    doc.example = raw.example.map(doc_value_from_value);
+    doc.related_packages = raw.related_packages.map(doc_text_from_value);
     doc.read_only = raw.read_only;
     doc.internal = raw.internal;
     doc.visible = raw.visible;
 
     doc
+}
+
+fn doc_text_from_value(value: Value) -> DocText {
+    match value {
+        Value::String(value) if looks_like_docbook_text(&value) => DocText::DocBook(value),
+        Value::String(value) => DocText::Markdown(value),
+        Value::Object(object) => {
+            let original = Value::Object(object.clone());
+            let doc_type = object.get("_type").and_then(Value::as_str);
+            let text = object.get("text").and_then(Value::as_str);
+
+            match (doc_type, text) {
+                (Some("mdDoc" | "literalMD"), Some(text)) => DocText::Markdown(text.to_owned()),
+                (Some("literalDocBook"), Some(text)) => DocText::DocBook(text.to_owned()),
+                (Some("literalExpression" | "literalExample"), Some(text)) => {
+                    DocText::Plain(text.to_owned())
+                }
+                (Some(_), Some(text)) => DocText::Unknown {
+                    text: text.to_owned(),
+                    raw: original,
+                },
+                _ => DocText::Json(original),
+            }
+        }
+        other => DocText::Json(other),
+    }
+}
+
+fn doc_value_from_value(value: Value) -> DocValue {
+    match value {
+        Value::Object(mut object) => {
+            let original = Value::Object(object.clone());
+            let doc_type = object
+                .remove("_type")
+                .and_then(|value| value.as_str().map(ToOwned::to_owned));
+            let text = object
+                .remove("text")
+                .and_then(|value| value.as_str().map(ToOwned::to_owned));
+
+            match (doc_type.as_deref(), text) {
+                (Some("literalExpression" | "literalExample"), Some(text)) => {
+                    DocValue::NixExpression(text)
+                }
+                (Some("mdDoc" | "literalMD"), Some(text)) => DocValue::Markdown(text),
+                (Some("literalDocBook"), Some(text)) => DocValue::DocBook(text),
+                _ => DocValue::Json(original),
+            }
+        }
+        other => DocValue::Json(other),
+    }
 }
 
 fn parents_from_loc(loc: &[String]) -> Vec<String> {
@@ -307,7 +360,7 @@ fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use nixsearch_core::document::SearchDocument;
+    use nixsearch_core::document::{DocText, DocValue, SearchDocument};
     use nixsearch_test_support::{OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, ingest_context};
 
     use super::parse_options_json;
@@ -384,6 +437,162 @@ mod tests {
         assert_eq!(
             option.declarations[0].url.as_deref(),
             Some("https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/programs/git.nix")
+        );
+    }
+
+    #[test]
+    fn parses_option_doc_values_semantically() {
+        let json = r#"
+           {
+              "programs.firefox.profiles.<name>.settings": {
+                "description": "Attribute set of Firefox preferences.",
+                "default": { "_type": "literalExpression", "text": "{ }" },
+                "relatedPackages": { "_type": "mdDoc", "text": "Use `firefox`." },
+                "example": {
+                  "_type": "literalExpression",
+                  "text": "{\n  \"browser.startup.homepage\" = \"https://nixos.org\";\n}\n"
+               }
+             }
+           }
+           "#;
+
+        let docs = parse_options_json(json.as_bytes(), &ingest_context()).unwrap();
+
+        let SearchDocument::Option(option) = &docs[0] else {
+            panic!("expected option document");
+        };
+
+        assert!(matches!(option.description, Some(DocText::Markdown(_))));
+        assert_eq!(
+            option.default,
+            Some(DocValue::NixExpression("{ }".to_owned()))
+        );
+        assert!(
+            matches!(option.example, Some(DocValue::NixExpression(ref text)) if text.contains("browser.startup.homepage"))
+        );
+        assert_eq!(
+            option.related_packages,
+            Some(DocText::Markdown("Use `firefox`.".to_owned()))
+        );
+    }
+
+    #[test]
+    fn preserves_unknown_typed_option_values_as_json() {
+        let json = r#"
+           {
+             "programs.example.value": {
+               "default": {
+                 "_type": "customValue",
+                 "text": "Preserved text.",
+                 "extra": true
+               }
+             }
+           }
+           "#;
+
+        let docs = parse_options_json(json.as_bytes(), &ingest_context()).unwrap();
+
+        let SearchDocument::Option(option) = &docs[0] else {
+            panic!("expected option document");
+        };
+
+        assert_eq!(
+            option.default,
+            Some(DocValue::Json(serde_json::json!({
+                "_type": "customValue",
+                "text": "Preserved text.",
+                "extra": true
+            })))
+        );
+    }
+
+    #[test]
+    fn parses_option_doc_text_objects_without_losing_text() {
+        let json = r#"
+           {
+              "programs.example.unknown": {
+                "description": { "_type": "unknownDoc", "text": "Preserved text.", "extra": true }
+              },
+              "programs.example.docbook": {
+                "description": { "_type": "literalDocBook", "text": "<para>Hello</para>" }
+              },
+              "programs.example.docbook-string": {
+                "description": "<para>Hello <literal>world</literal></para>"
+              },
+              "programs.example.docbook-emphasis-string": {
+                "description": "<emphasis>Hello</emphasis>"
+              },
+               "programs.example.docbook-variablelist-string": {
+                 "description": "<variablelist><varlistentry><term>foo</term><listitem><para>bar</para></listitem></varlistentry></variablelist>"
+              },
+               "programs.example.docbook-replaceable-string": {
+                 "description": "<replaceable>name</replaceable>"
+                },
+                "programs.example.placeholder-string": {
+                  "description": "<option> is a placeholder"
+                },
+                "programs.example.object": {
+                  "description": { "unexpected": true }
+             }
+           }
+           "#;
+
+        let docs = parse_options_json(json.as_bytes(), &ingest_context()).unwrap();
+
+        let descriptions = docs
+            .iter()
+            .map(|doc| match doc {
+                SearchDocument::Option(option) => {
+                    (option.common.name.as_str(), &option.description)
+                }
+                SearchDocument::Package(_) => unreachable!("expected option documents"),
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(
+            descriptions["programs.example.unknown"],
+            &Some(DocText::Unknown {
+                text: "Preserved text.".to_owned(),
+                raw: serde_json::json!({
+                    "_type": "unknownDoc",
+                    "text": "Preserved text.",
+                    "extra": true
+                })
+            })
+        );
+        assert_eq!(
+            descriptions["programs.example.docbook"],
+            &Some(DocText::DocBook("<para>Hello</para>".to_owned()))
+        );
+        assert_eq!(
+            descriptions["programs.example.docbook-string"],
+            &Some(DocText::DocBook(
+                "<para>Hello <literal>world</literal></para>".to_owned()
+            ))
+        );
+        assert_eq!(
+            descriptions["programs.example.docbook-emphasis-string"],
+            &Some(DocText::DocBook("<emphasis>Hello</emphasis>".to_owned()))
+        );
+        assert_eq!(
+            descriptions["programs.example.docbook-variablelist-string"],
+            &Some(DocText::DocBook(
+                "<variablelist><varlistentry><term>foo</term><listitem><para>bar</para></listitem></varlistentry></variablelist>".to_owned()
+            ))
+        );
+        assert_eq!(
+            descriptions["programs.example.docbook-replaceable-string"],
+            &Some(DocText::DocBook(
+                "<replaceable>name</replaceable>".to_owned()
+            ))
+        );
+        assert_eq!(
+            descriptions["programs.example.placeholder-string"],
+            &Some(DocText::Markdown("<option> is a placeholder".to_owned()))
+        );
+        assert_eq!(
+            descriptions["programs.example.object"],
+            &Some(DocText::Json(serde_json::json!({ "unexpected": true })))
         );
     }
 
