@@ -46,6 +46,10 @@ pub enum ProducerConfig {
         source_ref: String,
         #[serde(default)]
         inputs: BTreeMap<String, String>,
+        #[serde(default = "default_eval_modules_options")]
+        options: String,
+        #[serde(default = "default_eval_modules_transform_options")]
+        transform_options: String,
         modules: Vec<EvalModuleConfig>,
     },
 
@@ -115,6 +119,14 @@ fn default_nix_build_nix_path_name() -> String {
     "nixpkgs".to_owned()
 }
 
+fn default_eval_modules_options() -> String {
+    "evaluatedModules.options".to_owned()
+}
+
+fn default_eval_modules_transform_options() -> String {
+    "opt: opt".to_owned()
+}
+
 impl ProducerConfig {
     pub(crate) fn validate(&self, source_id: &str, ref_id: &str) -> Result<()> {
         match self {
@@ -157,9 +169,18 @@ impl ProducerConfig {
             Self::EvalModules {
                 source_ref,
                 inputs,
+                options,
+                transform_options,
                 modules,
             } => {
                 validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
+                validate_producer_non_empty(source_id, ref_id, "options", options)?;
+                validate_producer_non_empty(
+                    source_id,
+                    ref_id,
+                    "transform_options",
+                    transform_options,
+                )?;
 
                 if modules.is_empty() {
                     return producer_error(source_id, ref_id, "modules must not be empty");

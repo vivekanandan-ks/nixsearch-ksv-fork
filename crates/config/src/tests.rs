@@ -299,10 +299,14 @@ fn loads_eval_modules_producer() {
         ProducerConfig::EvalModules {
             source_ref,
             inputs,
+            options,
+            transform_options,
             modules,
         } => {
             assert_eq!(source_ref, "path:/some/flake");
             assert!(inputs.is_empty());
+            assert_eq!(options, "evaluatedModules.options");
+            assert_eq!(transform_options, "opt: opt");
             assert_eq!(modules.len(), 1);
 
             match &modules[0] {
@@ -328,6 +332,8 @@ fn loads_eval_modules_producer_with_inputs_and_module_list_option() {
         [sources.fixtures.refs.eval.producer]
         type = "eval-modules"
         ref = "github:example/root"
+        options = "evaluatedModules.options.programs"
+        transform_options = "opt: opt // { name = opt.name; }"
 
         [sources.fixtures.refs.eval.producer.inputs]
         dependency = "github:example/dependency"
@@ -352,9 +358,13 @@ fn loads_eval_modules_producer_with_inputs_and_module_list_option() {
         ProducerConfig::EvalModules {
             source_ref,
             inputs,
+            options,
+            transform_options,
             modules,
         } => {
             assert_eq!(source_ref, "github:example/root");
+            assert_eq!(options, "evaluatedModules.options.programs");
+            assert_eq!(transform_options, "opt: opt // { name = opt.name; }");
             assert_eq!(
                 inputs.get("dependency").map(String::as_str),
                 Some("github:example/dependency")
@@ -949,10 +959,20 @@ fn loads_hjem_rum_options_preset() {
         ProducerConfig::EvalModules {
             source_ref,
             inputs,
+            options,
+            transform_options,
             modules,
         } => {
             assert_eq!(source_ref, "github:snugnug/hjem-rum/main");
             assert!(inputs.is_empty());
+            assert_eq!(
+                options,
+                "(evaluatedModules.options.hjem.users.type.getSubOptions []).rum"
+            );
+            assert_eq!(
+                transform_options,
+                r#"opt: opt // { name = lib.removePrefix "<name>." opt.name; }"#
+            );
             assert_eq!(modules.len(), 2);
 
             match &modules[0] {

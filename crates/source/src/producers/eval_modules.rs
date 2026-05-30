@@ -19,6 +19,8 @@ pub struct EvalModulesProducer {
     source_ref: String,
     inputs: BTreeMap<String, String>,
     modules: Vec<EvalModule>,
+    options: String,
+    transform_options: String,
     producer_name: String,
 }
 
@@ -47,8 +49,20 @@ impl EvalModulesProducer {
             source_ref: source_ref.into(),
             inputs,
             modules,
+            options: "evaluatedModules.options".to_owned(),
+            transform_options: "opt: opt".to_owned(),
             producer_name: "eval-modules".to_owned(),
         }
+    }
+
+    pub fn with_options(
+        mut self,
+        options: impl Into<String>,
+        transform_options: impl Into<String>,
+    ) -> Self {
+        self.options = options.into();
+        self.transform_options = transform_options.into();
+        self
     }
 }
 
@@ -68,6 +82,8 @@ impl Producer for EvalModulesProducer {
             source_ref: &source_ref,
             inputs: &inputs,
             modules: &self.modules,
+            options: &self.options,
+            transform_options: &self.transform_options,
         });
         tokio::fs::write(&expression_path, expression)
             .await
@@ -125,6 +141,8 @@ struct EvalModulesExpression<'a> {
     source_ref: &'a str,
     inputs: &'a BTreeMap<String, String>,
     modules: &'a [EvalModule],
+    options: &'a str,
+    transform_options: &'a str,
 }
 
 fn eval_modules_expression(input: EvalModulesExpression<'_>) -> String {
@@ -176,7 +194,7 @@ let
     {{ lib, ... }}:
     lib.setAttrByPath (lib.splitString "." option) modules;
 
-  eval = lib.evalModules {{
+  evaluatedModules = lib.evalModules {{
     specialArgs = {{
       inherit pkgs lib utils;
       inputs = {{ self = self; }} // (self.inputs or {{}}) // explicitInputs;
@@ -206,15 +224,21 @@ let
       }})
     ];
   }};
+
+  selectedOptions = {options};
+  selectedTransformOptions = {transform_options};
 in
   (pkgs.nixosOptionsDoc {{
-    inherit (eval) options;
+    options = selectedOptions;
+    transformOptions = selectedTransformOptions;
     warningsAreErrors = false;
   }}).optionsJSON
 "#,
         source_ref = nix_string(input.source_ref),
         explicit_inputs = explicit_inputs,
         modules = modules,
+        options = input.options,
+        transform_options = input.transform_options,
     )
 }
 
@@ -382,6 +406,8 @@ mod tests {
                 flake: "self".to_owned(),
                 attr: "nixosModules.default".to_owned(),
             })],
+            options: "evaluatedModules.options",
+            transform_options: "opt: opt",
         });
 
         assert!(expression.contains("\"github:example/project\""));
@@ -398,6 +424,10 @@ mod tests {
         );
         assert!(expression.contains("config._module.check = false;"));
         assert!(expression.contains("pkgs.nixosOptionsDoc"));
+        assert!(expression.contains("selectedOptions = evaluatedModules.options;"));
+        assert!(expression.contains("selectedTransformOptions = opt: opt;"));
+        assert!(expression.contains("options = selectedOptions;"));
+        assert!(expression.contains("transformOptions = selectedTransformOptions;"));
     }
 
     #[test]
@@ -423,6 +453,8 @@ mod tests {
                     }],
                 },
             ],
+            options: "evaluatedModules.options",
+            transform_options: "opt: opt",
         });
 
         assert!(
@@ -443,9 +475,32 @@ mod tests {
                 flake: "self.inputs.hjem".to_owned(),
                 attr: "nixosModules.default".to_owned(),
             })],
+            options: "evaluatedModules.options",
+            transform_options: "opt: opt",
         });
 
         assert!(expression.contains("(moduleAttr \"self.inputs.hjem\" \"nixosModules.default\")"));
+    }
+
+    #[test]
+    fn eval_modules_expression_supports_custom_options_expression() {
+        let expression = eval_modules_expression(EvalModulesExpression {
+            source_ref: "github:example/project",
+            inputs: &BTreeMap::new(),
+            modules: &[EvalModule::FlakeAttr(EvalModuleRef {
+                flake: "self".to_owned(),
+                attr: "nixosModules.default".to_owned(),
+            })],
+            options: "(evaluatedModules.options.hjem.users.type.getSubOptions []).rum",
+            transform_options: r#"opt: opt // { name = lib.removePrefix "<name>." opt.name; }"#,
+        });
+
+        assert!(expression.contains(
+            "selectedOptions = (evaluatedModules.options.hjem.users.type.getSubOptions []).rum;"
+        ));
+        assert!(expression.contains(
+            r#"selectedTransformOptions = opt: opt // { name = lib.removePrefix "<name>." opt.name; };"#
+        ));
     }
 
     #[test]

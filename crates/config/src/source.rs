@@ -284,6 +284,10 @@ impl RawSourceConfig {
                 producer: ProducerConfig::EvalModules {
                     source_ref: format!("github:snugnug/hjem-rum/{ref_id}"),
                     inputs: BTreeMap::new(),
+                    options: "(evaluatedModules.options.hjem.users.type.getSubOptions []).rum"
+                        .to_owned(),
+                    transform_options:
+                        r#"opt: opt // { name = lib.removePrefix "<name>." opt.name; }"#.to_owned(),
                     modules: vec![
                         EvalModuleConfig::FlakeAttr {
                             flake: "inputs.hjem".to_owned(),
