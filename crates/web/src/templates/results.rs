@@ -140,7 +140,10 @@ fn render_hit_row(
     };
 
     html! {
-        tr data-href=(entry_href) data-result-page=(result_page) data-row-parity=(row_parity) {
+        tr data-href=(entry_href)
+            data-result-page=(result_page)
+            data-result-offset=(result_offset)
+            data-row-parity=(row_parity) {
             td.col-name title=(common.name) {
                 a.entry-name href=(entry_href)
                     style=(format!("--source-color: {source_color};")) {

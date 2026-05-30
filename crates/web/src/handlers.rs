@@ -32,9 +32,10 @@ pub struct StateQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct MoreQuery {
+pub struct SliceQuery {
     url: String,
     offset: usize,
+    limit: Option<usize>,
 }
 
 pub async fn health() -> &'static str {
@@ -209,9 +210,9 @@ fn should_patch_results(
     }
 }
 
-pub async fn more_results(
+pub async fn results_slice(
     State(state): State<AppState>,
-    Query(query): Query<MoreQuery>,
+    Query(query): Query<SliceQuery>,
 ) -> impl IntoResponse {
     let request = match page_request_from_public_url(&query.url) {
         Ok(request) => request,
@@ -222,10 +223,15 @@ pub async fn more_results(
         }
     };
 
-    let search_result = run_search(&state, &request, query.offset, DEFAULT_LIMIT);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, DEFAULT_LIMIT * 4);
+    let search_result = run_search(&state, &request, query.offset, limit);
 
     match search_result {
         Ok(result) => {
+            let count = result.hits.len();
             let rows_html = templates::results::render_rows_only(
                 &request,
                 &result.hits,
@@ -234,7 +240,11 @@ pub async fn more_results(
             );
             Json(serde_json::json!({
                 "rows": rows_html,
-                "total": result.total
+                "total": result.total,
+                "offset": query.offset,
+                "limit": limit,
+                "count": count,
+                "endOffset": query.offset + count,
             }))
         }
         Err(error) => Json(serde_json::json!({

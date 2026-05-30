@@ -91,7 +91,9 @@
   let pageSyncScheduled = false;
   let virtualResults = null;
   let virtualLoadScheduled = false;
-  let virtualLoading = false;
+  let virtualRequestSeq = 0;
+  let virtualActiveRequest = null;
+  const virtualSliceCache = new Map();
 
   function scheduleVisiblePageSync() {
     if (pageSyncScheduled) return;
@@ -987,16 +989,32 @@
 
   window.nixsearchNavigate = navigate;
 
-  const MORE_URL = "__MORE_RESULTS_URL__";
+  const RESULTS_SLICE_URL = "__RESULTS_SLICE_URL__";
 
   function pageForOffset(offset) {
     return Math.floor(Math.max(0, offset) / PAGE_SIZE) + 1;
   }
 
-  async function fetchMoreResults(offset, pageUrl = currentPublicUrl()) {
-    let url = `${MORE_URL}?url=${encodeURIComponent(pageUrl)}&offset=${offset}`;
-    const res = await fetch(url);
+  async function fetchResultSlice(
+    offset,
+    limit = PAGE_SIZE,
+    pageUrl = currentPublicUrl(),
+    signal = undefined,
+  ) {
+    const url = `${RESULTS_SLICE_URL}?url=${encodeURIComponent(pageUrl)}&offset=${offset}&limit=${limit}`;
+    const res = await fetch(url, { signal });
     return await res.json();
+  }
+
+  function virtualSliceCacheKey(requestUrl, offset, limit) {
+    return `${requestUrl}\n${offset}\n${limit}`;
+  }
+
+  function rememberVirtualSlice(key, data) {
+    virtualSliceCache.set(key, data);
+    if (virtualSliceCache.size > 32) {
+      virtualSliceCache.delete(virtualSliceCache.keys().next().value);
+    }
   }
 
   function initializeVirtualResults() {
@@ -1201,137 +1219,188 @@
   }
 
   async function loadVirtualRowsNearViewport() {
-    if (!virtualResults || virtualLoading) return;
+    if (!virtualResults) return;
 
     const targetOffset = virtualOffsetAtViewport();
     const { startOffset, endOffset, total } = virtualResults;
+    const replaceLimit = PAGE_SIZE * 3;
 
     if (targetOffset < startOffset) {
       if (startOffset - targetOffset <= PAGE_SIZE) {
-        await loadVirtualPage(Math.max(0, startOffset - PAGE_SIZE), "prepend");
+        if (!virtualActiveRequest) {
+          await loadVirtualSlice(Math.max(0, startOffset - PAGE_SIZE), "prepend");
+        }
         return;
       }
 
-      await loadVirtualPage(
-        Math.floor(targetOffset / PAGE_SIZE) * PAGE_SIZE,
-        "replace",
-      );
+      await loadVirtualSlice(replacementSliceOffset(targetOffset, total, replaceLimit), "replace", {
+        abortExisting: true,
+        limit: replaceLimit,
+      });
       return;
     }
 
     if (targetOffset >= endOffset) {
       if (targetOffset - endOffset <= PAGE_SIZE) {
-        await loadVirtualPage(endOffset, "append");
+        if (!virtualActiveRequest) {
+          await loadVirtualSlice(endOffset, "append");
+        }
         return;
       }
 
-      await loadVirtualPage(
-        Math.floor(targetOffset / PAGE_SIZE) * PAGE_SIZE,
-        "replace",
-      );
+      await loadVirtualSlice(replacementSliceOffset(targetOffset, total, replaceLimit), "replace", {
+        abortExisting: true,
+        limit: replaceLimit,
+      });
       return;
     }
 
+    if (virtualActiveRequest) return;
+
     const margin = PAGE_SIZE * 2;
     if (targetOffset < startOffset + margin && startOffset > 0) {
-      await loadVirtualPage(Math.max(0, startOffset - PAGE_SIZE), "prepend");
+      await loadVirtualSlice(Math.max(0, startOffset - PAGE_SIZE), "prepend");
       return;
     }
 
     if (targetOffset >= endOffset - margin && endOffset < total) {
-      await loadVirtualPage(endOffset, "append");
+      await loadVirtualSlice(endOffset, "append");
     }
   }
 
-  async function loadVirtualPage(offset, mode) {
-    if (!virtualResults || virtualLoading) return;
+  function replacementSliceOffset(targetOffset, total, limit) {
+    const centered = Math.max(0, targetOffset - Math.floor(limit / 2));
+    const maxStart = Math.max(0, total - limit);
+    return Math.floor(Math.min(centered, maxStart) / PAGE_SIZE) * PAGE_SIZE;
+  }
 
-    virtualLoading = true;
+  function cancelVirtualRequest() {
+    if (!virtualActiveRequest) return;
+    virtualActiveRequest.controller.abort();
+    virtualActiveRequest = null;
+  }
+
+  async function loadVirtualSlice(offset, mode, options = {}) {
+    if (!virtualResults) return;
+
     const state = virtualResults;
     const requestUrl = state.requestUrl;
+    const limit = options.limit || PAGE_SIZE;
     const normalizedOffset = Math.max(
       0,
       Math.min(offset, Math.max(0, state.total - 1)),
     );
-    const anchor = firstVisibleResultRow();
+    const cacheKey = virtualSliceCacheKey(requestUrl, normalizedOffset, limit);
+    const cached = virtualSliceCache.get(cacheKey);
 
-    if (mode === "replace") {
-      runVirtualTransaction("bottom", anchor, () => {
-        state.tbody
-          .querySelectorAll("tr[data-result-page]")
-          .forEach((row) => row.remove());
-        state.startOffset = normalizedOffset;
-        state.endOffset = normalizedOffset;
-        state.topSpacerHeight = normalizedOffset * state.rowHeight;
-        state.bottomSpacerHeight =
-          (state.total - normalizedOffset) * state.rowHeight;
-        applyVirtualSpacers();
-      });
+    if (virtualActiveRequest && virtualActiveRequest.key === cacheKey) return;
+
+    if (cached) {
+      if (options.abortExisting || mode === "replace") cancelVirtualRequest();
+      if (applyVirtualSlice(cached, mode, normalizedOffset)) {
+        scheduleVisiblePageSync();
+        scheduleVirtualLoad();
+      }
+      return;
     }
 
+    if (virtualActiveRequest) {
+      if (options.abortExisting || mode === "replace") {
+        cancelVirtualRequest();
+      } else {
+        return;
+      }
+    }
+
+    const requestId = ++virtualRequestSeq;
+    const controller = new AbortController();
+    virtualActiveRequest = { controller, id: requestId, key: cacheKey };
     setVirtualSpacerLoading(mode, true);
 
     try {
-      const data = await fetchMoreResults(normalizedOffset, requestUrl);
+      const data = await fetchResultSlice(
+        normalizedOffset,
+        limit,
+        requestUrl,
+        controller.signal,
+      );
 
-      if (!virtualResults || virtualResults.requestUrl !== requestUrl) return;
+      if (
+        !virtualResults ||
+        virtualResults.requestUrl !== requestUrl ||
+        !virtualActiveRequest ||
+        virtualActiveRequest.id !== requestId
+      ) {
+        return;
+      }
 
       if (data.error) {
         console.error("Load virtual results failed:", data.error);
         return;
       }
 
-      if (!data.rows) return;
-
-      if (typeof data.total === "number") {
-        state.total = data.total;
-      }
-
-      const spacer = mode === "prepend" ? "top" : "bottom";
-      let insertedRows = [];
-
-      runVirtualTransaction(spacer, anchor, () => {
-        if (mode === "append") {
-          state.tbody.insertAdjacentHTML("beforeend", data.rows);
-        } else if (mode === "prepend") {
-          state.tbody.insertAdjacentHTML("afterbegin", data.rows);
-        } else {
-          state.tbody
-            .querySelectorAll("tr[data-result-page]")
-            .forEach((row) => row.remove());
-          state.tbody.insertAdjacentHTML("afterbegin", data.rows);
-        }
-
-        insertedRows = rowsForOffset(normalizedOffset);
-        if (insertedRows.length === 0) return;
-
-        state.startOffset =
-          mode === "append" ? state.startOffset : normalizedOffset;
-        state.endOffset =
-          mode === "prepend"
-            ? state.endOffset
-            : Math.min(state.total, normalizedOffset + insertedRows.length);
-      });
-
-      if (insertedRows.length === 0) return;
-
-      scheduleVisiblePageSync();
+      rememberVirtualSlice(cacheKey, data);
+      if (applyVirtualSlice(data, mode, normalizedOffset)) scheduleVisiblePageSync();
     } catch (e) {
+      if (e.name === "AbortError") return;
       console.error("Failed to load virtual results:", e);
     } finally {
-      setVirtualSpacerLoading(mode, false);
-      virtualLoading = false;
+      const ownsActiveRequest =
+        virtualActiveRequest && virtualActiveRequest.id === requestId;
+      if (ownsActiveRequest || !virtualActiveRequest) {
+        setVirtualSpacerLoading(mode, false);
+      }
+      if (ownsActiveRequest) {
+        virtualActiveRequest = null;
+      }
       scheduleVirtualLoad();
     }
   }
 
-  function rowsForOffset(offset) {
-    const page = pageForOffset(offset);
-    return Array.from(
-      document.querySelectorAll(
-        `#results-body tr[data-result-page="${CSS.escape(String(page))}"]`,
-      ),
+  function applyVirtualSlice(data, mode, requestedOffset) {
+    if (!virtualResults || typeof data.rows !== "string") return false;
+
+    const state = virtualResults;
+    const previousTotal = state.total;
+    const sliceOffset = finiteNumber(data.offset, requestedOffset);
+    const count = finiteNumber(data.count, null);
+    const sliceEnd = finiteNumber(
+      data.endOffset,
+      sliceOffset + Math.max(0, count || 0),
     );
+
+    if (typeof data.total === "number") state.total = data.total;
+
+    if (mode === "replace") {
+      state.tbody
+        .querySelectorAll("tr[data-result-page]")
+        .forEach((row) => row.remove());
+      if (data.rows) state.tbody.insertAdjacentHTML("afterbegin", data.rows);
+      state.startOffset = Math.min(sliceOffset, state.total);
+      state.endOffset = Math.min(state.total, Math.max(sliceOffset, sliceEnd));
+      resetVirtualSpacerHeights();
+      return true;
+    }
+
+    const anchor = firstVisibleResultRow();
+    const spacer = mode === "prepend" ? "top" : "bottom";
+
+    runVirtualTransaction(spacer, anchor, () => {
+      if (mode === "append") {
+        if (data.rows) state.tbody.insertAdjacentHTML("beforeend", data.rows);
+        state.endOffset = Math.min(state.total, Math.max(state.endOffset, sliceEnd));
+      } else {
+        if (data.rows) state.tbody.insertAdjacentHTML("afterbegin", data.rows);
+        state.startOffset = Math.min(state.startOffset, sliceOffset);
+      }
+    });
+
+    if (previousTotal !== state.total) resetVirtualSpacerHeights();
+    return true;
+  }
+
+  function finiteNumber(value, fallback) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
   }
 
   function firstVisibleResultRow() {

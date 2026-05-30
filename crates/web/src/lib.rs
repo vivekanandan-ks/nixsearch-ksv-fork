@@ -24,7 +24,7 @@ mod urls;
 
 const DEFAULT_LIMIT: usize = 50;
 const RECONCILE_EVENTS_URL: &str = "/-/state/events";
-const MORE_RESULTS_URL: &str = "/-/more";
+const RESULTS_SLICE_URL: &str = "/-/results/slice";
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -66,7 +66,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let app = Router::new()
         .route("/-/health", get(handlers::health))
         .route(RECONCILE_EVENTS_URL, get(handlers::state_events))
-        .route(MORE_RESULTS_URL, get(handlers::more_results))
+        .route(RESULTS_SLICE_URL, get(handlers::results_slice))
         .route("/favicon.ico", get(handlers::favicon))
         .route("/apple-touch-icon.png", get(handlers::apple_touch_icon))
         .route("/", get(handlers::root_page))

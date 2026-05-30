@@ -1,9 +1,9 @@
 use crate::DEFAULT_LIMIT;
-use crate::MORE_RESULTS_URL;
+use crate::RESULTS_SLICE_URL;
 use crate::request::LinkOrigin;
 
 const DEFAULT_LIMIT_PLACEHOLDER: &str = "__DEFAULT_LIMIT__";
-const MORE_RESULTS_URL_PLACEHOLDER: &str = "__MORE_RESULTS_URL__";
+const RESULTS_SLICE_URL_PLACEHOLDER: &str = "__RESULTS_SLICE_URL__";
 const SOURCE_ALL_VALUE_PLACEHOLDER: &str = "__SOURCE_ALL_VALUE__";
 
 pub fn dialog_reconcile_script() -> &'static str {
@@ -12,7 +12,7 @@ pub fn dialog_reconcile_script() -> &'static str {
 
 pub fn navigation_script() -> String {
     include_str!("scripts/navigation.js")
-        .replace(MORE_RESULTS_URL_PLACEHOLDER, MORE_RESULTS_URL)
+        .replace(RESULTS_SLICE_URL_PLACEHOLDER, RESULTS_SLICE_URL)
         .replace(DEFAULT_LIMIT_PLACEHOLDER, &DEFAULT_LIMIT.to_string())
         .replace(SOURCE_ALL_VALUE_PLACEHOLDER, LinkOrigin::All.as_str())
 }
@@ -20,7 +20,7 @@ pub fn navigation_script() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LIMIT_PLACEHOLDER, MORE_RESULTS_URL_PLACEHOLDER, SOURCE_ALL_VALUE_PLACEHOLDER,
+        DEFAULT_LIMIT_PLACEHOLDER, RESULTS_SLICE_URL_PLACEHOLDER, SOURCE_ALL_VALUE_PLACEHOLDER,
         dialog_reconcile_script, navigation_script,
     };
 
@@ -29,10 +29,10 @@ mod tests {
         let script = navigation_script();
 
         assert!(!script.contains(DEFAULT_LIMIT_PLACEHOLDER));
-        assert!(!script.contains(MORE_RESULTS_URL_PLACEHOLDER));
+        assert!(!script.contains(RESULTS_SLICE_URL_PLACEHOLDER));
         assert!(!script.contains(SOURCE_ALL_VALUE_PLACEHOLDER));
         assert!(script.contains("const PAGE_SIZE = 50;"));
-        assert!(script.contains(r#"const MORE_URL = "/-/more";"#));
+        assert!(script.contains(r#"const RESULTS_SLICE_URL = "/-/results/slice";"#));
     }
 
     #[test]
