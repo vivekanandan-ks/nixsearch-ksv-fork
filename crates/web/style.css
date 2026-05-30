@@ -14,14 +14,37 @@
   --src-default: #94a3b8;
 
   --header-height: 88px;
-  --footer-visible-height: 2.25rem;
+  --footer-content-height: 2.25rem;
+  --footer-edge-bleed: 3px;
+  --footer-padding-top: 0.5rem;
+  --footer-padding-bottom: 0.5rem;
+  --footer-safe-bottom: 0px;
+  --footer-reserved-height: calc(
+    var(--footer-content-height) + var(--footer-safe-bottom)
+  );
 
   scroll-padding-top: calc(var(--header-height) + 0.5rem);
-  scroll-padding-bottom: calc(var(--footer-visible-height) + 0.5rem);
+  scroll-padding-bottom: calc(var(--footer-reserved-height) + 0.5rem);
+}
+
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  html.footer-safe-bottom-enabled {
+    --footer-safe-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+html.footer-browser-compact {
+  --footer-content-height: 1.85rem;
+  --footer-padding-top: 0.38rem;
+  --footer-padding-bottom: 0.18rem;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
 }
 
 body {
@@ -389,22 +412,36 @@ html.modal-open body {
   margin: 0 auto;
   padding: 0;
   margin-top: var(--header-height);
-  padding-bottom: 2.5rem;
+  padding-bottom: calc(var(--footer-reserved-height) + 0.25rem);
 }
 
 /* ─── Sticky footer ─── */
 
 .footer {
-  --footer-bleed: 4rem;
-
   position: fixed;
-  bottom: calc(-1 * var(--footer-bleed));
+  bottom: calc(-1 * var(--footer-edge-bleed));
   left: 0;
   right: 0;
   z-index: 100;
   background: var(--header-bg);
   border-top: 1px solid var(--border);
-  padding: 0.5rem 1rem calc(0.5rem + var(--footer-bleed));
+  padding: var(--footer-padding-top) 1rem
+    calc(
+      var(--footer-padding-bottom) + var(--footer-safe-bottom) +
+        var(--footer-edge-bleed)
+    );
+}
+
+@supports (padding: max(0px)) {
+  .footer {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+}
+
+html.footer-keyboard-open .footer {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .footer-inner {
@@ -635,7 +672,7 @@ body:has(.home-hero) {
 .results-table tr {
   cursor: pointer;
   scroll-margin-top: calc(var(--header-height) + 0.5rem);
-  scroll-margin-bottom: calc(var(--footer-visible-height) + 0.5rem);
+  scroll-margin-bottom: calc(var(--footer-reserved-height) + 0.5rem);
 }
 
 .virtual-results-active,

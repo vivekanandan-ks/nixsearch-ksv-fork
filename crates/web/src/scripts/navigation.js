@@ -403,6 +403,86 @@
     }
   }
 
+  const VISUAL_VIEWPORT_KEYBOARD_DELTA = 180;
+  const VISUAL_VIEWPORT_HEIGHT_EPSILON = 12;
+  let footerViewportStateScheduled = false;
+  let footerEditableFocused = false;
+  let stableVisualViewportHeight = null;
+
+  function scheduleFooterViewportStateSync() {
+    if (footerViewportStateScheduled) return;
+    footerViewportStateScheduled = true;
+    requestAnimationFrame(syncFooterViewportState);
+  }
+
+  function shouldGuardFooterViewport() {
+    if (!window.visualViewport) return false;
+    return (
+      window.matchMedia("(pointer: coarse)").matches ||
+      window.matchMedia("(any-pointer: coarse)").matches
+    );
+  }
+
+  function isStandaloneDisplay() {
+    return (
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+    );
+  }
+
+  function syncFooterViewportState() {
+    footerViewportStateScheduled = false;
+
+    if (!shouldGuardFooterViewport()) {
+      resetFooterViewportState();
+      return;
+    }
+
+    const viewport = window.visualViewport;
+    if (!viewport) {
+      resetFooterViewportState();
+      return;
+    }
+
+    if (stableVisualViewportHeight === null) {
+      stableVisualViewportHeight = viewport.height;
+    }
+
+    const keyboardOpen =
+      footerEditableFocused &&
+      stableVisualViewportHeight - viewport.height > VISUAL_VIEWPORT_KEYBOARD_DELTA;
+
+    if (
+      !footerEditableFocused ||
+      (!keyboardOpen &&
+        viewport.height > stableVisualViewportHeight + VISUAL_VIEWPORT_HEIGHT_EPSILON)
+    ) {
+      stableVisualViewportHeight = viewport.height;
+    }
+
+    const standalone = isStandaloneDisplay();
+    document.documentElement.classList.toggle(
+      "footer-safe-bottom-enabled",
+      standalone,
+    );
+    document.documentElement.classList.toggle(
+      "footer-browser-compact",
+      !standalone,
+    );
+    document.documentElement.classList.toggle(
+      "footer-keyboard-open",
+      keyboardOpen,
+    );
+  }
+
+  function resetFooterViewportState() {
+    footerEditableFocused = false;
+    stableVisualViewportHeight = null;
+    document.documentElement.classList.remove("footer-keyboard-open");
+    document.documentElement.classList.remove("footer-safe-bottom-enabled");
+    document.documentElement.classList.remove("footer-browser-compact");
+  }
+
   function syncModalState() {
     const dialog = document.getElementById("entry-modal");
 
@@ -1288,6 +1368,28 @@
   })();
 
   syncHeaderHeight();
+  syncFooterViewportState();
+
+  document.addEventListener("focusin", (evt) => {
+    if (!isEditableTarget(evt.target)) return;
+    footerEditableFocused = true;
+    scheduleFooterViewportStateSync();
+  });
+
+  document.addEventListener("focusout", (evt) => {
+    if (!isEditableTarget(evt.target)) return;
+    footerEditableFocused = false;
+    scheduleFooterViewportStateSync();
+    setTimeout(scheduleFooterViewportStateSync, 250);
+  });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener(
+      "resize",
+      scheduleFooterViewportStateSync,
+      { passive: true },
+    );
+  }
 
   const initialPage = currentPageFromUrl();
   initializeVirtualResults();
@@ -1298,6 +1400,7 @@
     () => {
       scheduleVisiblePageSync();
       scheduleVirtualLoad();
+      scheduleFooterViewportStateSync();
     },
     { passive: true },
   );
@@ -1305,6 +1408,7 @@
     remeasureVirtualResults();
     scheduleVisiblePageSync();
     scheduleVirtualLoad();
+    scheduleFooterViewportStateSync();
   });
   window.addEventListener(RECONCILE_EVENT, () => {
     setTimeout(() => {
