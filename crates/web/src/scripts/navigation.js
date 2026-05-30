@@ -4,6 +4,9 @@
     document.getElementById("source-metadata").textContent,
   );
   const PAGE_SIZE = __DEFAULT_LIMIT__;
+  const VIRTUAL_REPLACE_LIMIT = PAGE_SIZE * 3;
+  const VIRTUAL_JUMP_GAP = PAGE_SIZE * 4;
+  const VIRTUAL_JUMP_DELTA = PAGE_SIZE * 3;
   let currentUrl = currentPublicUrl();
   let lastFocusedResultHref = "";
 
@@ -93,6 +96,7 @@
   let virtualLoadScheduled = false;
   let virtualRequestSeq = 0;
   let virtualActiveRequest = null;
+  let virtualLastTargetOffset = null;
   const virtualSliceCache = new Map();
 
   function scheduleVisiblePageSync() {
@@ -1065,6 +1069,7 @@
       bottomSpacerHeight:
         (total - Math.min(total, startOffset + rows.length)) * rowHeight,
     };
+    virtualLastTargetOffset = null;
 
     results.classList.add("virtual-results-active");
     applyVirtualSpacerRowHeight();
@@ -1222,36 +1227,52 @@
     if (!virtualResults) return;
 
     const targetOffset = virtualOffsetAtViewport();
+    const previousTargetOffset = virtualLastTargetOffset;
+    virtualLastTargetOffset = targetOffset;
+
     const { startOffset, endOffset, total } = virtualResults;
-    const replaceLimit = PAGE_SIZE * 3;
+    const jump = isVirtualJumpTarget(
+      targetOffset,
+      previousTargetOffset,
+      startOffset,
+      endOffset,
+    );
 
     if (targetOffset < startOffset) {
-      if (startOffset - targetOffset <= PAGE_SIZE) {
-        if (!virtualActiveRequest) {
-          await loadVirtualSlice(Math.max(0, startOffset - PAGE_SIZE), "prepend");
-        }
+      if (jump) {
+        await loadVirtualSlice(
+          replacementSliceOffset(targetOffset, total, VIRTUAL_REPLACE_LIMIT),
+          "replace",
+          {
+            abortExisting: true,
+            limit: VIRTUAL_REPLACE_LIMIT,
+          },
+        );
         return;
       }
 
-      await loadVirtualSlice(replacementSliceOffset(targetOffset, total, replaceLimit), "replace", {
-        abortExisting: true,
-        limit: replaceLimit,
-      });
+      if (!virtualActiveRequest) {
+        await loadVirtualSlice(Math.max(0, startOffset - PAGE_SIZE), "prepend");
+      }
       return;
     }
 
     if (targetOffset >= endOffset) {
-      if (targetOffset - endOffset <= PAGE_SIZE) {
-        if (!virtualActiveRequest) {
-          await loadVirtualSlice(endOffset, "append");
-        }
+      if (jump) {
+        await loadVirtualSlice(
+          replacementSliceOffset(targetOffset, total, VIRTUAL_REPLACE_LIMIT),
+          "replace",
+          {
+            abortExisting: true,
+            limit: VIRTUAL_REPLACE_LIMIT,
+          },
+        );
         return;
       }
 
-      await loadVirtualSlice(replacementSliceOffset(targetOffset, total, replaceLimit), "replace", {
-        abortExisting: true,
-        limit: replaceLimit,
-      });
+      if (!virtualActiveRequest) {
+        await loadVirtualSlice(endOffset, "append");
+      }
       return;
     }
 
@@ -1266,6 +1287,30 @@
     if (targetOffset >= endOffset - margin && endOffset < total) {
       await loadVirtualSlice(endOffset, "append");
     }
+  }
+
+  function isVirtualJumpTarget(
+    targetOffset,
+    previousTargetOffset,
+    startOffset,
+    endOffset,
+  ) {
+    const gap = virtualGapOutsideWindow(targetOffset, startOffset, endOffset);
+    const delta =
+      previousTargetOffset === null
+        ? 0
+        : Math.abs(targetOffset - previousTargetOffset);
+
+    return (
+      delta > VIRTUAL_JUMP_DELTA ||
+      (!virtualActiveRequest && gap > VIRTUAL_JUMP_GAP)
+    );
+  }
+
+  function virtualGapOutsideWindow(targetOffset, startOffset, endOffset) {
+    if (targetOffset < startOffset) return startOffset - targetOffset;
+    if (targetOffset >= endOffset) return targetOffset - endOffset + 1;
+    return 0;
   }
 
   function replacementSliceOffset(targetOffset, total, limit) {
