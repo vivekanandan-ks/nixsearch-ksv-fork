@@ -131,7 +131,7 @@ fn render_markdown(value: &str) -> Markup {
     let markdown = extract_fenced_code_blocks(&markdown, &mut code_blocks);
     let mut options = Options::default();
     options.extension.table = true;
-    options.render.unsafe_ = false;
+    options.render.r#unsafe = false;
     let mut html = sanitize_rendered_markdown(&markdown_to_html(&markdown, &options));
 
     for code_block in code_blocks {

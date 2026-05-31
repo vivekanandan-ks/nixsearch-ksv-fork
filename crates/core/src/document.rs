@@ -153,7 +153,10 @@ fn append_markdown_plain_text<'a>(node: &'a AstNode<'a>, output: &mut String) {
     {
         let data = node.data.borrow();
         match &data.value {
-            NodeValue::Text(value) | NodeValue::Raw(value) => {
+            NodeValue::Text(value) => {
+                output.push_str(&strip_html_to_text_preserve_lines(value.as_ref()));
+            }
+            NodeValue::Raw(value) => {
                 output.push_str(&strip_html_to_text_preserve_lines(value));
             }
             NodeValue::Code(value) => output.push_str(&value.literal),
