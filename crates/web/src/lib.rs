@@ -23,6 +23,7 @@ mod templates;
 mod urls;
 
 const DEFAULT_LIMIT: usize = 50;
+const DATASTAR_JS_URL: &str = "/-/assets/datastar.js";
 const RECONCILE_EVENTS_URL: &str = "/-/state/events";
 const RESULTS_SLICE_URL: &str = "/-/results/slice";
 
@@ -69,6 +70,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .route(RESULTS_SLICE_URL, get(handlers::results_slice))
         .route("/favicon.ico", get(handlers::favicon))
         .route("/apple-touch-icon.png", get(handlers::apple_touch_icon))
+        .route(DATASTAR_JS_URL, get(handlers::datastar_js))
         .route("/", get(handlers::root_page))
         .route("/{source}", get(handlers::source_page))
         .route("/{source}/{*entry}", get(handlers::entry_page))

@@ -55,7 +55,15 @@
         }
       );
 
-      individualCrateArgs = commonBuildArgs // {
+      datastarJsPath = "${inputs.datastar}/bundles/datastar.js";
+
+      datastarBuildEnv = {
+        DATASTAR_JS_PATH = datastarJsPath;
+      };
+
+      workspaceBuildArgs = commonBuildArgs // datastarBuildEnv;
+
+      individualCrateArgs = workspaceBuildArgs // {
         inherit cargoArtifacts;
         inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
         # NB: we disable tests since we'll run them all via cargo-nextest
@@ -74,7 +82,7 @@
     {
       checks = {
         clippy = craneLib.cargoClippy (
-          commonBuildArgs
+          workspaceBuildArgs
           // {
             src = checkSrc;
             inherit cargoArtifacts;
@@ -83,7 +91,7 @@
         );
 
         doc = craneLib.cargoDoc (
-          commonBuildArgs
+          workspaceBuildArgs
           // {
             inherit cargoArtifacts;
           }
@@ -107,7 +115,7 @@
         };
 
         rust-test = craneLib.cargoNextest (
-          commonBuildArgs
+          workspaceBuildArgs
           // {
             inherit cargoArtifacts;
             src = checkSrc;
@@ -132,10 +140,13 @@
         default = cli;
       };
 
-      devShells.default = craneLib.devShell {
-        NIXSEARCH_CONFIG = "./nixsearch.example.toml";
+      devShells.default = craneLib.devShell (
+        {
+          NIXSEARCH_CONFIG = "./nixsearch.example.toml";
 
-        packages = with pkgs; [ watchexec ];
-      };
+          packages = with pkgs; [ watchexec ];
+        }
+        // datastarBuildEnv
+      );
     };
 }

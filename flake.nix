@@ -10,6 +10,11 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
+
+    datastar = {
+      url = "github:starfederation/datastar";
+      flake = false;
+    };
   };
 
   outputs =

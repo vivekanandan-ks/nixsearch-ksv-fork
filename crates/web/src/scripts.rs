@@ -6,6 +6,13 @@ const DEFAULT_LIMIT_PLACEHOLDER: &str = "__DEFAULT_LIMIT__";
 const RESULTS_SLICE_URL_PLACEHOLDER: &str = "__RESULTS_SLICE_URL__";
 const SOURCE_ALL_VALUE_PLACEHOLDER: &str = "__SOURCE_ALL_VALUE__";
 
+pub fn datastar_script() -> &'static str {
+    include_str!(env!(
+        "DATASTAR_JS_PATH",
+        "DATASTAR_JS_PATH must be set by Nix; run `nix develop .#` before cargo commands"
+    ))
+}
+
 pub fn dialog_reconcile_script() -> &'static str {
     include_str!("scripts/dialog-reconcile.js")
 }

@@ -31,6 +31,22 @@
         "type": "github"
       }
     },
+    "datastar": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780095443,
+        "narHash": "sha256-k3p+TGj1u/h/jNdgjTElptgyEl6kir4oAxL7pne4+Lk=",
+        "owner": "starfederation",
+        "repo": "datastar",
+        "rev": "cd85a635f9fcf9422c2eea122f9ad8e1e55179a5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "starfederation",
+        "repo": "datastar",
+        "type": "github"
+      }
+    },
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": "nixpkgs-lib"
@@ -84,6 +100,7 @@
       "inputs": {
         "advisory-db": "advisory-db",
         "crane": "crane",
+        "datastar": "datastar",
         "flake-parts": "flake-parts",
         "nixpkgs": "nixpkgs"
       }

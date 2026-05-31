@@ -8,6 +8,7 @@ use nixsearch_config::source::SourceKind;
 use nixsearch_index::search::SearchResult;
 
 use crate::AppState;
+use crate::DATASTAR_JS_URL;
 use crate::RECONCILE_EVENTS_URL;
 use crate::request::{PageRequest, SourceFilter, normalized_query};
 use crate::scripts::navigation_script;
@@ -100,8 +101,7 @@ pub fn render_full_page(
                 meta property="og:image" content=(&metadata.image_url);
                 link rel="icon" type="image/x-icon" href="/favicon.ico";
                 link rel="apple-touch-icon" href="/apple-touch-icon.png";
-                script type="module"
-                    src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js" {}
+                script type="module" src=(DATASTAR_JS_URL) {}
                 (analytics_script(&state.config.server.analytics_script))
                 style { (PreEscaped(CSS)) }
                 noscript {

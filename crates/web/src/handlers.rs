@@ -22,7 +22,7 @@ use crate::request::{
     page_request_from_public_url, page_state, parse_document_kind, resolve_entry_ref,
     search_scopes_for_state,
 };
-use crate::scripts::dialog_reconcile_script;
+use crate::scripts::{datastar_script, dialog_reconcile_script};
 use crate::templates::{self, layout::PageUrls, modal::EntryData};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +53,13 @@ pub async fn apple_touch_icon() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/png")],
         include_bytes!("../apple-touch-icon.png"),
+    )
+}
+
+pub async fn datastar_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        datastar_script(),
     )
 }
 
