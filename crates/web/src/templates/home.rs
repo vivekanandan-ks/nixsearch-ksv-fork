@@ -4,7 +4,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceKind;
 
 use crate::AppState;
-use crate::request::{PageRequest, PageState, SourceFilter, search_scopes_for_state};
+use crate::request::{PageRequest, PageState, SourceFilter};
 
 use super::source_tag::color_for_source;
 
@@ -79,7 +79,16 @@ fn source_display_name<'a>(config: &'a AppConfig, source_id: &'a str) -> &'a str
 fn count_for(state: &AppState, page_state: &PageState) -> Option<(usize, &'static str)> {
     let config = &state.config;
 
-    let scopes = search_scopes_for_state(config, page_state).ok()?;
+    let (source, ref_id, ref_set) = match &page_state.source_filter {
+        SourceFilter::All => (None, None, page_state.active_ref_set()),
+        SourceFilter::Named(source) => (
+            Some(source.as_str()),
+            page_state.source_ref.as_deref(),
+            None,
+        ),
+    };
+
+    let scopes = state.search.search_scopes(source, ref_id, ref_set).ok()?;
 
     let manifest = state.manifest.read().expect("manifest lock poisoned");
 

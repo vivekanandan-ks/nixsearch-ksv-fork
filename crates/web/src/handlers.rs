@@ -10,17 +10,14 @@ use futures_util::stream;
 use serde::Deserialize;
 use url::Url;
 
-use nixsearch_config::app::AppConfig;
-use nixsearch_index::search::{
-    EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult, SearchScope,
-};
+use nixsearch_index::search::{EntryLookupResult, SearchIndex, SearchResult};
+use nixsearch_service::{EntryRequest, SearchRequest};
 
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::request::{
-    PageQuery, PageRequest, PageState, decode_path_value, non_empty, normalized_query,
-    page_request_from_public_url, page_state, parse_document_kind, resolve_entry_ref,
-    search_scopes_for_state,
+    PageQuery, PageRequest, PageState, SourceFilter, decode_path_value, non_empty,
+    normalized_query, page_request_from_public_url, page_state, parse_document_kind,
 };
 use crate::scripts::{datastar_script, dialog_reconcile_script};
 use crate::templates::{self, layout::PageUrls, modal::EntryData};
@@ -147,15 +144,10 @@ pub async fn state_events(
             Some(templates::home::render(&state, &request, &page_state).into_string())
         } else {
             let search_result = match &index {
-                Some(Ok(index)) => run_search_with_index(
-                    &state.config,
-                    index,
-                    &request,
-                    &page_state,
-                    0,
-                    DEFAULT_LIMIT,
-                )
-                .map_err(|error| format!("{error:#}")),
+                Some(Ok(index)) => {
+                    run_search_with_index(&state, index, &request, &page_state, 0, DEFAULT_LIMIT)
+                        .map_err(|error| format!("{error:#}"))
+                }
                 Some(Err(error)) => Err(error.clone()),
                 None => unreachable!("search result requested without opening the index"),
             };
@@ -175,7 +167,7 @@ pub async fn state_events(
         None
     };
 
-    let entry = entry_data_from_index(&state.config, &page_state, index.as_ref());
+    let entry = entry_data_from_index(&state, &page_state, index.as_ref());
     let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -277,22 +269,17 @@ fn render_full_page_response(
     };
     let search_result = if needs_search {
         match &index {
-            Some(Ok(index)) => run_search_with_index(
-                &state.config,
-                index,
-                &request,
-                &page_state,
-                offset,
-                DEFAULT_LIMIT,
-            )
-            .map_err(|error| format!("{error:#}")),
+            Some(Ok(index)) => {
+                run_search_with_index(state, index, &request, &page_state, offset, DEFAULT_LIMIT)
+                    .map_err(|error| format!("{error:#}"))
+            }
             Some(Err(error)) => Err(error.clone()),
             None => unreachable!("search result requested without opening the index"),
         }
     } else {
         Ok(empty_search_result())
     };
-    let entry = entry_data_from_index(&state.config, &page_state, index.as_ref());
+    let entry = entry_data_from_index(state, &page_state, index.as_ref());
 
     let view = match &search_result {
         Ok(result) => Ok(result),
@@ -305,7 +292,7 @@ fn render_full_page_response(
 }
 
 fn entry_data_from_index(
-    config: &AppConfig,
+    state: &AppState,
     page_state: &PageState,
     index: Option<&Result<SearchIndex, String>>,
 ) -> EntryData {
@@ -325,26 +312,29 @@ fn entry_data_from_index(
         .as_deref()
         .or(page_state.source_ref.as_deref())
         .or_else(|| {
-            page_state
-                .active_ref_set()
-                .and_then(|ref_set| config.first_ref_for_ref_set_source(ref_set, &detail.source))
+            page_state.active_ref_set().and_then(|ref_set| {
+                state
+                    .config
+                    .first_ref_for_ref_set_source(ref_set, &detail.source)
+            })
         });
-    let ref_id = match resolve_entry_ref(config, &detail.source, lookup_ref) {
-        Ok(ref_id) => ref_id,
-        Err(error) => return EntryData::Error(format!("{error:#}")),
-    };
+
     let kind = match parse_document_kind(detail.kind.as_deref()) {
         Ok(kind) => kind,
         Err(error) => return EntryData::Error(error),
     };
 
-    match index
-        .find_entry(EntryLookup {
-            source: detail.source.clone(),
-            ref_id,
-            name: detail.entry.clone(),
-            kind,
-        })
+    match state
+        .search
+        .find_entry_with_index(
+            index,
+            EntryRequest {
+                source: detail.source.clone(),
+                ref_id: lookup_ref.map(ToOwned::to_owned),
+                name: detail.entry.clone(),
+                kind,
+            },
+        )
         .map_err(|error| format!("{error:#}"))
     {
         Ok(EntryLookupResult::Found(document)) => EntryData::Found(document),
@@ -463,7 +453,7 @@ fn run_search(
     let index = open_search_index(state)?;
     let page_state = page_state(&state.config, request);
 
-    run_search_with_index(&state.config, &index, request, &page_state, offset, limit)
+    run_search_with_index(state, &index, request, &page_state, offset, limit)
 }
 
 fn open_search_index(state: &AppState) -> Result<SearchIndex> {
@@ -485,7 +475,7 @@ fn empty_search_result() -> SearchResult {
 }
 
 fn run_search_with_index(
-    config: &AppConfig,
+    state: &AppState,
     index: &SearchIndex,
     request: &PageRequest,
     page_state: &PageState,
@@ -496,23 +486,35 @@ fn run_search_with_index(
         return Ok(empty_search_result());
     };
 
-    let scopes = search_scopes_for_state(config, page_state)
-        .context("failed to resolve search scope")?
-        .into_iter()
-        .map(|scope| SearchScope {
-            source: scope.source,
-            ref_id: scope.ref_id,
-        })
-        .collect();
+    state.search.search_with_index(
+        index,
+        search_request_for_page_state(page_state, q, offset, limit),
+    )
+}
 
-    index
-        .search(SearchOptions {
-            query: q.to_owned(),
-            limit,
-            offset,
-            scopes,
-        })
-        .context("search failed")
+fn search_request_for_page_state(
+    page_state: &PageState,
+    query: &str,
+    offset: usize,
+    limit: usize,
+) -> SearchRequest {
+    let (source, ref_id, ref_set) = match &page_state.source_filter {
+        SourceFilter::All => (
+            None,
+            None,
+            page_state.active_ref_set().map(ToOwned::to_owned),
+        ),
+        SourceFilter::Named(source) => (Some(source.clone()), page_state.source_ref.clone(), None),
+    };
+
+    SearchRequest {
+        query: query.to_owned(),
+        source,
+        ref_id,
+        ref_set,
+        offset,
+        limit,
+    }
 }
 
 #[cfg(test)]

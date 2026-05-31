@@ -1,8 +1,6 @@
-use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_config::app::ResolvedSearchScope;
 use nixsearch_core::document::DocumentKind;
 
 #[derive(Debug, Clone, Default)]
@@ -248,22 +246,6 @@ fn normalize_source_ref_scope(
     (RefScope::Ref, ref_id)
 }
 
-pub fn search_scopes_for_state(
-    config: &AppConfig,
-    state: &PageState,
-) -> anyhow::Result<Vec<ResolvedSearchScope>> {
-    match &state.source_filter {
-        SourceFilter::All => Ok(config.resolve_search_scopes(
-            None,
-            None,
-            state.active_ref_set().and_then(non_empty),
-        )?),
-        SourceFilter::Named(source) => {
-            Ok(config.resolve_search_scopes(Some(source), state.source_ref.as_deref(), None)?)
-        }
-    }
-}
-
 pub fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     if value.is_empty() { None } else { Some(value) }
@@ -332,26 +314,6 @@ pub fn page_request_from_public_url(raw_url: &str) -> std::result::Result<PageRe
             page,
         },
     })
-}
-
-pub fn resolve_entry_ref(
-    config: &AppConfig,
-    source_id: &str,
-    ref_id: Option<&str>,
-) -> Result<String> {
-    if let Some(ref_id) = ref_id.and_then(non_empty) {
-        return Ok(ref_id.to_owned());
-    }
-
-    let source = config
-        .sources
-        .get(source_id)
-        .with_context(|| format!("unknown source {source_id:?}"))?;
-
-    source
-        .default_ref
-        .clone()
-        .with_context(|| format!("source {source_id:?} has no default ref"))
 }
 
 pub fn parse_document_kind(

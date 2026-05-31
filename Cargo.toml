@@ -75,6 +75,7 @@ nixsearch-index-test-support = { path = "crates/index-test-support" }
 nixsearch-config = { path = "crates/config" }
 nixsearch-store = { path = "crates/store" }
 nixsearch-source = { path = "crates/source" }
+nixsearch-service = { path = "crates/service" }
 nixsearch-web = { path = "crates/web" }
 nixsearch-ops = { path = "crates/ops" }
 nixsearch-test-support = { path = "crates/test-support" }

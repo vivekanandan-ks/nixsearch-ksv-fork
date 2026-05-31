@@ -13,6 +13,7 @@ use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
+use nixsearch_service::SearchService;
 
 mod handlers;
 mod maintenance;
@@ -30,6 +31,7 @@ const RESULTS_SLICE_URL: &str = "/-/results/slice";
 #[derive(Debug, Clone)]
 struct AppState {
     config: Arc<AppConfig>,
+    search: SearchService,
     index_path: Arc<RwLock<Utf8PathBuf>>,
     generated_at: Arc<RwLock<OffsetDateTime>>,
     manifest: Arc<RwLock<IndexGenerationManifest>>,
@@ -46,6 +48,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     log_startup_maintenance_state(&config, &generation);
 
     let config = Arc::new(config);
+    let search = SearchService::new(Arc::clone(&config));
     let index_path = Arc::new(RwLock::new(generation.path));
     let generated_at = Arc::new(RwLock::new(generation.manifest.generated_at));
     let manifest = Arc::new(RwLock::new(generation.manifest));
@@ -59,6 +62,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     let state = AppState {
         config,
+        search,
         index_path,
         generated_at,
         manifest,

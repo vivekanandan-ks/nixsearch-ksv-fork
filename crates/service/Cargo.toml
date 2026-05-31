@@ -1,0 +1,18 @@
+[package]
+name = "nixsearch-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+
+nixsearch-config.workspace = true
+nixsearch-core.workspace = true
+nixsearch-index.workspace = true
+
+[dev-dependencies]
+nixsearch-index-test-support.workspace = true
+nixsearch-test-support.workspace = true
+tempfile.workspace = true

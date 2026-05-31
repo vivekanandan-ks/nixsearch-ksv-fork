@@ -29,6 +29,7 @@ nixsearch-config.workspace = true
 nixsearch-core.workspace = true
 nixsearch-index.workspace = true
 nixsearch-ops.workspace = true
+nixsearch-service.workspace = true
 
 [dev-dependencies]
 nixsearch-index-test-support.workspace = true

@@ -2157,6 +2157,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nixsearch-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "nixsearch-config",
+ "nixsearch-core",
+ "nixsearch-index",
+ "nixsearch-index-test-support",
+ "nixsearch-test-support",
+ "tempfile",
+]
+
+[[package]]
 name = "nixsearch-source"
 version = "0.1.0"
 dependencies = [
@@ -2224,6 +2238,7 @@ dependencies = [
  "nixsearch-index",
  "nixsearch-index-test-support",
  "nixsearch-ops",
+ "nixsearch-service",
  "nixsearch-test-support",
  "serde",
  "serde_json",
