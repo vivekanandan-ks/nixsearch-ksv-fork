@@ -1,6 +1,7 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Uri, header};
@@ -134,7 +135,7 @@ pub async fn state_events(
     let needs_search = patch_results && normalized_query(&request.query).is_some();
     let needs_entry = page_state.detail.is_some();
     let index = if needs_search || needs_entry {
-        Some(open_search_index(&state).map_err(|error| format!("{error:#}")))
+        Some(state.search.current_index())
     } else {
         None
     };
@@ -144,11 +145,10 @@ pub async fn state_events(
             Some(templates::home::render(&state, &request, &page_state).into_string())
         } else {
             let search_result = match &index {
-                Some(Ok(index)) => {
+                Some(index) => {
                     run_search_with_index(&state, index, &request, &page_state, 0, DEFAULT_LIMIT)
                         .map_err(|error| format!("{error:#}"))
                 }
-                Some(Err(error)) => Err(error.clone()),
                 None => unreachable!("search result requested without opening the index"),
             };
 
@@ -263,17 +263,16 @@ fn render_full_page_response(
     let needs_search = normalized_query(&request.query).is_some();
     let needs_entry = page_state.detail.is_some();
     let index = if needs_search || needs_entry {
-        Some(open_search_index(state).map_err(|error| format!("{error:#}")))
+        Some(state.search.current_index())
     } else {
         None
     };
     let search_result = if needs_search {
         match &index {
-            Some(Ok(index)) => {
+            Some(index) => {
                 run_search_with_index(state, index, &request, &page_state, offset, DEFAULT_LIMIT)
                     .map_err(|error| format!("{error:#}"))
             }
-            Some(Err(error)) => Err(error.clone()),
             None => unreachable!("search result requested without opening the index"),
         }
     } else {
@@ -294,7 +293,7 @@ fn render_full_page_response(
 fn entry_data_from_index(
     state: &AppState,
     page_state: &PageState,
-    index: Option<&Result<SearchIndex, String>>,
+    index: Option<&Arc<SearchIndex>>,
 ) -> EntryData {
     let Some(detail) = page_state.detail.as_ref() else {
         return EntryData::Empty;
@@ -302,11 +301,6 @@ fn entry_data_from_index(
     let Some(index) = index else {
         return EntryData::Error("search index was not opened".to_owned());
     };
-    let index = match index {
-        Ok(index) => index,
-        Err(error) => return EntryData::Error(error.clone()),
-    };
-
     let lookup_ref = detail
         .ref_id
         .as_deref()
@@ -450,21 +444,10 @@ fn run_search(
         return Ok(empty_search_result());
     };
 
-    let index = open_search_index(state)?;
+    let index = state.search.current_index();
     let page_state = page_state(&state.config, request);
 
     run_search_with_index(state, &index, request, &page_state, offset, limit)
-}
-
-fn open_search_index(state: &AppState) -> Result<SearchIndex> {
-    let index_path = state
-        .index_path
-        .read()
-        .expect("index path lock poisoned")
-        .clone();
-
-    SearchIndex::open(&index_path)
-        .with_context(|| format!("failed to open current search index {}", index_path))
 }
 
 fn empty_search_result() -> SearchResult {

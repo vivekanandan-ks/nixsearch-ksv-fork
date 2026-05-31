@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use time::OffsetDateTime;
 
 use nixsearch_config::app::AppConfig;
@@ -12,6 +12,7 @@ use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
 use nixsearch_ops::targets::{TargetKey, all_targets};
+use nixsearch_service::{ReconcileOutcome, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -39,12 +40,7 @@ enum MaintenanceOutcome {
     Failed,
 }
 
-pub(crate) fn spawn(
-    config: Arc<AppConfig>,
-    index_path: Arc<RwLock<Utf8PathBuf>>,
-    generated_at: Arc<RwLock<OffsetDateTime>>,
-    manifest: Arc<RwLock<IndexGenerationManifest>>,
-) {
+pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
     let interval = config
         .server
         .schedule
@@ -52,17 +48,11 @@ pub(crate) fn spawn(
         .expect("schedule interval already validated");
 
     tokio::spawn(async move {
-        run_loop(config, index_path, generated_at, manifest, interval).await;
+        run_loop(config, search, interval).await;
     });
 }
 
-async fn run_loop(
-    config: Arc<AppConfig>,
-    index_path: Arc<RwLock<Utf8PathBuf>>,
-    generated_at: Arc<RwLock<OffsetDateTime>>,
-    manifest: Arc<RwLock<IndexGenerationManifest>>,
-    interval: Duration,
-) {
+async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Duration) {
     let index_store = IndexStore::new(&config.data.index_dir);
     let regeneration_enabled = config.server.schedule.enabled && has_configured_targets(&config);
 
@@ -96,9 +86,35 @@ async fn run_loop(
             }
         };
 
-        reconcile_served_generation(&index_path, &generation.path);
-        reconcile_generated_at(&generated_at, generation.manifest.generated_at);
-        reconcile_manifest(&manifest, &generation.manifest);
+        match search.reconcile_generation(generation.path.clone(), generation.manifest.clone()) {
+            Ok(ReconcileOutcome::Unchanged) => {}
+            Ok(ReconcileOutcome::ManifestUpdated) => {
+                tracing::info!(
+                    generation = %generation.path,
+                    "detected published index manifest change"
+                );
+            }
+            Ok(ReconcileOutcome::Swapped) => {
+                tracing::info!(
+                    generation = %generation.path,
+                    "detected published index generation change"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed to switch to published index generation; continuing to serve previous generation: {error:#}"
+                );
+
+                if regeneration_enabled {
+                    let outcome = run_scheduled_regeneration(&config, interval).await;
+                    sleep_after_regeneration_outcome(outcome, interval).await;
+                    continue;
+                }
+
+                tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+                continue;
+            }
+        }
 
         if !regeneration_enabled {
             tokio::time::sleep(RECONCILE_INTERVAL).await;
@@ -257,45 +273,6 @@ pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<Curren
     }))
 }
 
-pub(crate) fn reconcile_served_generation(
-    index_path: &Arc<RwLock<Utf8PathBuf>>,
-    published_path: &Utf8Path,
-) {
-    let mut served_path = index_path.write().expect("index path lock poisoned");
-
-    if served_path.as_path() != published_path {
-        tracing::info!(
-            old = %served_path,
-                new = %published_path,
-                "detected published index generation change"
-        );
-
-        *served_path = published_path.to_owned();
-    }
-}
-
-pub(crate) fn reconcile_generated_at(
-    generated_at: &Arc<RwLock<OffsetDateTime>>,
-    manifest_generated_at: OffsetDateTime,
-) {
-    let mut current = generated_at.write().expect("generated_at lock poisoned");
-
-    if *current != manifest_generated_at {
-        *current = manifest_generated_at;
-    }
-}
-
-pub(crate) fn reconcile_manifest(
-    manifest: &Arc<RwLock<IndexGenerationManifest>>,
-    published_manifest: &IndexGenerationManifest,
-) {
-    let mut current = manifest.write().expect("manifest lock poisoned");
-
-    if *current != *published_manifest {
-        *current = published_manifest.clone();
-    }
-}
-
 pub(crate) fn has_configured_targets(config: &AppConfig) -> bool {
     !all_targets(config).is_empty()
 }
@@ -320,10 +297,8 @@ pub(crate) fn clamp_duration(value: Duration, min: Duration, max: Duration) -> D
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
-    use camino::Utf8PathBuf;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         assert_canonical_manifest_targets, publish_canonical_index,
@@ -335,7 +310,7 @@ mod tests {
 
     use super::{
         CurrentGeneration, clamp_duration, current_generation_is_due, duration_until, next_due,
-        read_current_generation, reconcile_served_generation,
+        read_current_generation,
     };
 
     #[test]
@@ -373,24 +348,6 @@ mod tests {
             ),
             std::time::Duration::from_secs(20)
         );
-    }
-
-    #[test]
-    fn reconcile_updates_changed_path() {
-        let path = Arc::new(RwLock::new(Utf8PathBuf::from("/old")));
-
-        reconcile_served_generation(&path, camino::Utf8Path::new("/new"));
-
-        assert_eq!(*path.read().unwrap(), Utf8PathBuf::from("/new"));
-    }
-
-    #[test]
-    fn reconcile_keeps_current_path() {
-        let path = Arc::new(RwLock::new(Utf8PathBuf::from("/current")));
-
-        reconcile_served_generation(&path, camino::Utf8Path::new("/current"));
-
-        assert_eq!(*path.read().unwrap(), Utf8PathBuf::from("/current"));
     }
 
     #[test]

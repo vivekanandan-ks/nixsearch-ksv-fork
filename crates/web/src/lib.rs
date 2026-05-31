@@ -1,15 +1,12 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::routing::get;
-use camino::Utf8PathBuf;
-use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::generate;
 use nixsearch_ops::lock;
@@ -32,9 +29,6 @@ const RESULTS_SLICE_URL: &str = "/-/results/slice";
 struct AppState {
     config: Arc<AppConfig>,
     search: SearchService,
-    index_path: Arc<RwLock<Utf8PathBuf>>,
-    generated_at: Arc<RwLock<OffsetDateTime>>,
-    manifest: Arc<RwLock<IndexGenerationManifest>>,
 }
 
 pub async fn serve(config: AppConfig) -> Result<()> {
@@ -48,25 +42,12 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     log_startup_maintenance_state(&config, &generation);
 
     let config = Arc::new(config);
-    let search = SearchService::new(Arc::clone(&config));
-    let index_path = Arc::new(RwLock::new(generation.path));
-    let generated_at = Arc::new(RwLock::new(generation.manifest.generated_at));
-    let manifest = Arc::new(RwLock::new(generation.manifest));
+    let search =
+        SearchService::from_generation(Arc::clone(&config), generation.path, generation.manifest)?;
 
-    maintenance::spawn(
-        Arc::clone(&config),
-        Arc::clone(&index_path),
-        Arc::clone(&generated_at),
-        Arc::clone(&manifest),
-    );
+    maintenance::spawn(Arc::clone(&config), search.clone());
 
-    let state = AppState {
-        config,
-        search,
-        index_path,
-        generated_at,
-        manifest,
-    };
+    let state = AppState { config, search };
 
     let app = Router::new()
         .route("/-/health", get(handlers::health))

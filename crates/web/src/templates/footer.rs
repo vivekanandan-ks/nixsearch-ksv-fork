@@ -9,10 +9,8 @@ use crate::maintenance;
 const PROJECT_GITHUB_URL: &str = "https://github.com/benkoppe/nixsearch";
 
 pub fn render_footer(state: &AppState) -> Markup {
-    let generated_at = *state
-        .generated_at
-        .read()
-        .expect("generated_at lock poisoned");
+    let snapshot = state.search.snapshot();
+    let generated_at = snapshot.manifest.generated_at;
     let now = OffsetDateTime::now_utc();
 
     let elapsed = duration_between(generated_at, now);

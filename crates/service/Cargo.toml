@@ -16,3 +16,4 @@ nixsearch-index.workspace = true
 nixsearch-index-test-support.workspace = true
 nixsearch-test-support.workspace = true
 tempfile.workspace = true
+time.workspace = true

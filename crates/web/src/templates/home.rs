@@ -21,7 +21,7 @@ pub fn render(state: &AppState, _request: &PageRequest, page_state: &PageState) 
     let (title_prefix, title_accent) = title_for(config, source_filter);
     // "All" keeps the muted glass blue and lets the title fall back to the
     // logo's default blues; named sources tint both with the source color.
-    let hero_style = match &source_filter {
+    let hero_style = match source_filter {
         SourceFilter::All => format!("--glass-color: {ALL_GLASS_COLOR};"),
         SourceFilter::Named(source) => {
             let color = color_for_source(config, source);
@@ -90,7 +90,8 @@ fn count_for(state: &AppState, page_state: &PageState) -> Option<(usize, &'stati
 
     let scopes = state.search.search_scopes(source, ref_id, ref_set).ok()?;
 
-    let manifest = state.manifest.read().expect("manifest lock poisoned");
+    let snapshot = state.search.snapshot();
+    let manifest = &snapshot.manifest;
 
     let count: usize = scopes
         .iter()
