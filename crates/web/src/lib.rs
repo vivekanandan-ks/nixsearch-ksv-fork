@@ -250,7 +250,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::Router;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use nixsearch_config::app::AppConfig;
@@ -290,6 +290,17 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    async fn request_body(app: Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     #[tokio::test]
@@ -401,6 +412,17 @@ mod tests {
     #[tokio::test]
     async fn all_source_search_works_when_some_configured_refs_are_missing() {
         let tempdir = tempdir().unwrap();
+
+        async fn request_body(app: Router, uri: &str) -> (StatusCode, String) {
+            let response = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        }
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
 
@@ -501,6 +523,58 @@ mod tests {
             .await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_source_error_page_keeps_recovery_controls() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app, "/missing?q=git").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("search-form"));
+        assert!(body.contains("action=\"/\""));
+        assert!(body.contains("value=\"git\""));
+        assert!(body.contains("Page unavailable"));
+        assert!(body.contains("unknown source"));
+    }
+
+    #[tokio::test]
+    async fn unknown_ref_error_page_keeps_known_source_controls() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app, "/fixtures?q=git&ref=missing").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("search-form"));
+        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("value=\"git\""));
+        assert!(body.contains("Page unavailable"));
+        assert!(body.contains("unknown ref"));
+        assert!(!body.contains("value=\"missing\""));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_ref_set_error_page_keeps_recovery_controls() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(multi_ref_app_config(&index_dir));
+        let (status, body) = request_body(app, "/fixtures?q=git&ref_set=multi").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("search-form"));
+        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("value=\"git\""));
+        assert!(body.contains("Page unavailable"));
+        assert!(body.contains("explicit ref is required"));
     }
 
     #[tokio::test]

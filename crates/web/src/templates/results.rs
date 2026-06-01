@@ -110,10 +110,10 @@ pub fn render_empty() -> Markup {
     }
 }
 
-pub fn render_error(error: &str) -> Markup {
+pub fn render_error(title: &str, error: &str) -> Markup {
     html! {
         div #results.results-error {
-            strong { "Search failed:" } " " (error)
+            strong { (title) ":" } " " (error)
         }
     }
 }

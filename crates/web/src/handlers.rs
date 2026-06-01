@@ -23,6 +23,7 @@ use crate::request::{
     normalized_query, page_request_from_public_url, page_state, parse_document_kind,
 };
 use crate::scripts::{datastar_script, dialog_reconcile_script};
+use crate::templates::layout::ResultsContent;
 use crate::templates::{self, layout::PageUrls, modal::EntryData};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -163,7 +164,10 @@ pub async fn state_events(
                         &error.to_string(),
                     );
                 }
-                Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
+                Err(error) => {
+                    templates::results::render_error("Search failed", &format!("{error:#}"))
+                        .into_string()
+                }
             })
         }
     } else {
@@ -273,7 +277,7 @@ fn render_full_page_response(
     let page_state = match resolve_page_state(state, &snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
-            return html_error_response(status_for_resolution_error(&error), &error.to_string());
+            return render_full_page_error_response(state, page_urls, &snapshot, &request, &error);
         }
     };
 
@@ -283,10 +287,29 @@ fn render_full_page_response(
     let needs_entry = page_state.detail.is_some();
 
     let search_result = if needs_search {
-        run_search_with_snapshot(state, &snapshot, &page_state, offset, DEFAULT_LIMIT)
-            .map_err(|error| format!("{error:#}"))
+        Some(run_search_with_snapshot(
+            state,
+            &snapshot,
+            &page_state,
+            offset,
+            DEFAULT_LIMIT,
+        ))
     } else {
-        Ok(empty_search_result())
+        None
+    };
+
+    let search_error = match &search_result {
+        Some(Err(error)) => Some(format!("{error:#}")),
+        _ => None,
+    };
+
+    let results_content = match &search_result {
+        Some(Ok(result)) => ResultsContent::SearchResults(result),
+        Some(Err(_)) => ResultsContent::Error {
+            title: "Search failed",
+            message: search_error.as_deref().unwrap_or("search failed"),
+        },
+        None => ResultsContent::Home,
     };
 
     let entry = entry_data_from_snapshot(
@@ -295,22 +318,99 @@ fn render_full_page_response(
         (needs_search || needs_entry).then_some(&snapshot),
     );
 
-    let view = match &search_result {
-        Ok(result) => Ok(result),
-        Err(error) => Err(error.as_str()),
-    };
-
     let markup = templates::layout::render_full_page(
         state,
         &request,
         &page_state,
         &page_urls,
         &snapshot,
-        view,
+        results_content,
         &entry,
     );
 
     Html(markup.into_string()).into_response()
+}
+
+fn render_full_page_error_response(
+    state: &AppState,
+    page_urls: PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+    request: &PageRequest,
+    error: &RequestResolutionError,
+) -> Response {
+    let recovery_request = recovery_request_for_error(state, request, error);
+    let page_state = page_state(&state.config, &recovery_request);
+    let message = error.to_string();
+
+    let markup = templates::layout::render_full_page(
+        state,
+        &recovery_request,
+        &page_state,
+        &page_urls,
+        snapshot,
+        ResultsContent::Error {
+            title: "Page unavailable",
+            message: &message,
+        },
+        &EntryData::Empty,
+    );
+
+    (
+        status_for_resolution_error(error),
+        Html(markup.into_string()),
+    )
+        .into_response()
+}
+
+fn recovery_request_for_error(
+    state: &AppState,
+    request: &PageRequest,
+    error: &RequestResolutionError,
+) -> PageRequest {
+    let q = request.query.q.clone();
+
+    match error {
+        RequestResolutionError::UnknownSource { .. }
+        | RequestResolutionError::RefRequiresSource
+        | RequestResolutionError::MissingDefaultRef { .. }
+        | RequestResolutionError::NoServedSearchScopes => PageRequest {
+            source: None,
+            entry: None,
+            query: PageQuery {
+                q,
+                ..PageQuery::default()
+            },
+        },
+
+        RequestResolutionError::UnknownRef { source_id, .. }
+        | RequestResolutionError::UnservedRef { source_id, .. }
+        | RequestResolutionError::AmbiguousRefSetSource { source_id, .. }
+        | RequestResolutionError::InvalidRefForRefSet { source_id, .. } => PageRequest {
+            source: state
+                .config
+                .sources
+                .contains_key(source_id)
+                .then(|| source_id.clone()),
+            entry: None,
+            query: PageQuery {
+                q,
+                ..PageQuery::default()
+            },
+        },
+
+        RequestResolutionError::UnknownRefSet { .. } => PageRequest {
+            source: request
+                .source
+                .as_ref()
+                .filter(|source| state.config.sources.contains_key(source.as_str()))
+                .cloned(),
+            entry: None,
+            query: PageQuery {
+                q,
+                ..PageQuery::default()
+            },
+        },
+    }
 }
 
 fn resolve_page_state(
@@ -392,13 +492,8 @@ fn status_for_resolution_error(error: &RequestResolutionError) -> StatusCode {
     }
 }
 
-fn html_error_response(status: StatusCode, error: &str) -> Response {
-    let html = templates::results::render_error(error).into_string();
-    (status, Html(html)).into_response()
-}
-
 fn sse_error_response(status: StatusCode, error: &str) -> Response {
-    let html = templates::results::render_error(error).into_string();
+    let html = templates::results::render_error("Request failed", error).into_string();
     let event = PatchElements::new(html).write_as_axum_sse_event();
     let events: Vec<std::result::Result<Event, Infallible>> = vec![Ok(event)];
 

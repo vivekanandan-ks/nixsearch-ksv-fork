@@ -26,6 +26,13 @@ use super::source_tag;
 static CSS: &str = include_str!("../../style.css");
 const DEFAULT_DESCRIPTION: &str = "Search the Nix ecosystem";
 
+#[derive(Clone, Copy)]
+pub enum ResultsContent<'a> {
+    Home,
+    SearchResults(&'a SearchResult),
+    Error { title: &'a str, message: &'a str },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageUrls {
     pub current_url: String,
@@ -46,18 +53,24 @@ pub fn render_full_page(
     page_state: &crate::request::PageState,
     page_urls: &PageUrls,
     served_generation: &ServedGenerationSnapshot,
-    search_result: Result<&SearchResult, &str>,
+    results_content: ResultsContent<'_>,
     entry: &EntryData,
 ) -> Markup {
     let q = request.query.q.as_deref().unwrap_or("");
     let source_filter = &page_state.source_filter;
 
-    let results_markup = match search_result {
-        Ok(result) if normalized_query(&request.query).is_some() => {
+    let results_markup = match results_content {
+        ResultsContent::Home => home::render(state, request, page_state, served_generation),
+        ResultsContent::SearchResults(result) => {
             results::render(page_state, &result.hits, result.total, &state.config)
         }
-        Ok(_) => home::render(state, request, page_state, served_generation),
-        Err(error) => results::render_error(error),
+        ResultsContent::Error { title, message } => results::render_error(title, message),
+    };
+
+    let search_result_for_metadata = match results_content {
+        ResultsContent::SearchResults(result) => Ok(result),
+        ResultsContent::Error { message, .. } => Err(message),
+        ResultsContent::Home => Err(""),
     };
 
     let modal_markup = modal::render(&state.config, page_state, entry);
@@ -66,7 +79,7 @@ pub fn render_full_page(
         &state.config,
         request,
         source_filter,
-        search_result,
+        search_result_for_metadata,
         entry,
         page_urls,
     );
