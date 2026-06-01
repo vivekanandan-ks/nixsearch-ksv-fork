@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_config::source::SourceConfig;
 use nixsearch_core::document::DocumentKind;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::{
@@ -63,6 +64,56 @@ impl fmt::Debug for ServedGenerationSnapshot {
 pub enum ReconcileOutcome {
     Unchanged,
     Reloaded,
+}
+
+pub type ServiceResult<T> = std::result::Result<T, ServiceError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error(transparent)]
+    Resolution(#[from] RequestResolutionError),
+
+    #[error("search failed")]
+    Search(#[source] anyhow::Error),
+
+    #[error("entry lookup failed")]
+    EntryLookup(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RequestResolutionError {
+    #[error("unknown source {source_id:?}")]
+    UnknownSource { source_id: String },
+
+    #[error("unknown ref {ref_id:?} for source {source_id:?}")]
+    UnknownRef { source_id: String, ref_id: String },
+
+    #[error("unknown ref set {ref_set:?}")]
+    UnknownRefSet { ref_set: String },
+
+    #[error("ref {ref_id:?} for source {source_id:?} is not present in the served manifest")]
+    UnservedRef { source_id: String, ref_id: String },
+
+    #[error("source {source_id:?} has no default ref")]
+    MissingDefaultRef { source_id: String },
+
+    #[error("ref requires source")]
+    RefRequiresSource,
+
+    #[error(
+        "ref set {ref_set:?} contains multiple refs for source {source_id:?}; explicit ref is required"
+    )]
+    AmbiguousRefSetSource { ref_set: String, source_id: String },
+
+    #[error("ref {ref_id:?} is not valid for source {source_id:?} in ref set {ref_set:?}")]
+    InvalidRefForRefSet {
+        ref_set: String,
+        source_id: String,
+        ref_id: String,
+    },
+
+    #[error("no configured search scopes are present in the served manifest")]
+    NoServedSearchScopes,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -191,52 +242,59 @@ impl SearchService {
         Ok(ReconcileOutcome::Reloaded)
     }
 
-    pub fn search_current(&self, request: SearchRequest) -> Result<SearchResult> {
-        let index = self.current_index();
-        self.search_with_index(&index, request)
+    pub fn search_current(&self, request: SearchRequest) -> ServiceResult<SearchResult> {
+        let snapshot = self.snapshot();
+        self.search_with_snapshot(&snapshot, request)
     }
 
-    pub fn search_with_index(
+    pub fn search_with_snapshot(
         &self,
-        index: &SearchIndex,
+        snapshot: &ServedGenerationSnapshot,
         request: SearchRequest,
-    ) -> Result<SearchResult> {
-        let scopes = self.search_scopes(
+    ) -> ServiceResult<SearchResult> {
+        let scopes = self.search_scopes_for_snapshot(
+            snapshot,
             request.source.as_deref(),
             request.ref_id.as_deref(),
             request.ref_set.as_deref(),
         )?;
 
-        index
+        snapshot
+            .index
             .search(SearchOptions {
                 query: request.query,
                 limit: request.limit,
                 offset: request.offset,
                 scopes,
             })
-            .context("search failed")
+            .map_err(ServiceError::Search)
     }
 
-    pub fn find_entry_current(&self, request: EntryRequest) -> Result<EntryLookupResult> {
-        let index = self.current_index();
-        self.find_entry_with_index(&index, request)
+    pub fn find_entry_current(&self, request: EntryRequest) -> ServiceResult<EntryLookupResult> {
+        let snapshot = self.snapshot();
+        self.find_entry_with_snapshot(&snapshot, request)
     }
 
-    pub fn find_entry_with_index(
+    pub fn find_entry_with_snapshot(
         &self,
-        index: &SearchIndex,
+        snapshot: &ServedGenerationSnapshot,
         request: EntryRequest,
-    ) -> Result<EntryLookupResult> {
-        let ref_id = self.resolve_entry_ref(&request.source, request.ref_id.as_deref())?;
+    ) -> ServiceResult<EntryLookupResult> {
+        let ref_id = self.resolve_entry_ref_for_snapshot(
+            snapshot,
+            &request.source,
+            request.ref_id.as_deref(),
+        )?;
 
-        index
+        snapshot
+            .index
             .find_entry(EntryLookup {
                 source: request.source,
                 ref_id,
                 name: request.name,
                 kind: request.kind,
             })
-            .context("entry lookup failed")
+            .map_err(ServiceError::EntryLookup)
     }
 
     pub fn search_scopes(
@@ -244,36 +302,319 @@ impl SearchService {
         source: Option<&str>,
         ref_id: Option<&str>,
         ref_set: Option<&str>,
-    ) -> Result<Vec<SearchScope>> {
-        let scopes = self
-            .config
-            .resolve_search_scopes(source, ref_id, ref_set)
-            .context("failed to resolve search scope")?
-            .into_iter()
-            .map(|scope| SearchScope {
-                source: scope.source,
-                ref_id: scope.ref_id,
-            })
-            .collect();
-
-        Ok(scopes)
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        let snapshot = self.snapshot();
+        self.search_scopes_for_snapshot(&snapshot, source, ref_id, ref_set)
     }
 
-    pub fn resolve_entry_ref(&self, source_id: &str, ref_id: Option<&str>) -> Result<String> {
-        if let Some(ref_id) = ref_id.and_then(non_empty) {
-            return Ok(ref_id.to_owned());
+    pub fn search_scopes_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source: Option<&str>,
+        ref_id: Option<&str>,
+        ref_set: Option<&str>,
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        let source = source.and_then(non_empty);
+        let ref_id = ref_id.and_then(non_empty);
+        let ref_set = ref_set.and_then(non_empty);
+        let source_specific = source.is_some();
+
+        let scopes = self.resolve_configured_search_scopes(source, ref_id, ref_set)?;
+
+        if source_specific {
+            let scope = scopes
+                .into_iter()
+                .next()
+                .ok_or(RequestResolutionError::NoServedSearchScopes)?;
+
+            if !Self::served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id) {
+                return Err(RequestResolutionError::UnservedRef {
+                    source_id: scope.source,
+                    ref_id: scope.ref_id,
+                });
+            }
+
+            return Ok(vec![scope]);
         }
 
-        let source = self
-            .config
+        let served_scopes = scopes
+            .into_iter()
+            .filter(|scope| {
+                Self::served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id)
+            })
+            .collect::<Vec<_>>();
+
+        if served_scopes.is_empty() {
+            return Err(RequestResolutionError::NoServedSearchScopes);
+        }
+
+        Ok(served_scopes)
+    }
+
+    pub fn resolve_entry_ref(
+        &self,
+        source_id: &str,
+        ref_id: Option<&str>,
+    ) -> std::result::Result<String, RequestResolutionError> {
+        let snapshot = self.snapshot();
+        self.resolve_entry_ref_for_snapshot(&snapshot, source_id, ref_id)
+    }
+
+    pub fn resolve_entry_ref_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source_id: &str,
+        ref_id: Option<&str>,
+    ) -> std::result::Result<String, RequestResolutionError> {
+        let ref_id = match ref_id.and_then(non_empty) {
+            Some(ref_id) => {
+                self.ensure_configured_ref(source_id, ref_id)?;
+                ref_id.to_owned()
+            }
+            None => self.configured_default_ref(source_id)?.to_owned(),
+        };
+
+        if !Self::served_ref_exists_in_snapshot(snapshot, source_id, &ref_id) {
+            return Err(RequestResolutionError::UnservedRef {
+                source_id: source_id.to_owned(),
+                ref_id,
+            });
+        }
+
+        Ok(ref_id)
+    }
+
+    pub fn configured_source_exists(&self, source_id: &str) -> bool {
+        self.config.sources.contains_key(source_id)
+    }
+
+    pub fn configured_ref_exists(&self, source_id: &str, ref_id: &str) -> bool {
+        self.config
             .sources
             .get(source_id)
-            .with_context(|| format!("unknown source {source_id:?}"))?;
+            .is_some_and(|source| source.refs.iter().any(|candidate| candidate.id == ref_id))
+    }
+
+    pub fn served_ref_exists(&self, source_id: &str, ref_id: &str) -> bool {
+        let snapshot = self.snapshot();
+        Self::served_ref_exists_in_snapshot(&snapshot, source_id, ref_id)
+    }
+
+    pub fn served_ref_exists_in_snapshot(
+        snapshot: &ServedGenerationSnapshot,
+        source_id: &str,
+        ref_id: &str,
+    ) -> bool {
+        snapshot
+            .manifest
+            .targets
+            .iter()
+            .any(|target| target.source == source_id && target.ref_id == ref_id)
+    }
+
+    pub fn is_indexable_ref(&self, source_id: &str, ref_id: &str) -> bool {
+        let snapshot = self.snapshot();
+        self.is_indexable_ref_in_snapshot(&snapshot, source_id, ref_id)
+    }
+
+    pub fn is_indexable_ref_in_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source_id: &str,
+        ref_id: &str,
+    ) -> bool {
+        let Some(source) = self.config.sources.get(source_id) else {
+            return false;
+        };
+
+        self.ref_allowed_to_be_indexed(source, ref_id)
+            && Self::served_ref_exists_in_snapshot(snapshot, source_id, ref_id)
+    }
+
+    fn ref_allowed_to_be_indexed(&self, source: &SourceConfig, ref_id: &str) -> bool {
+        source.default_ref.as_deref() == Some(ref_id)
+    }
+
+    fn resolve_configured_search_scopes(
+        &self,
+        source: Option<&str>,
+        ref_id: Option<&str>,
+        ref_set: Option<&str>,
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        match (source, ref_id, ref_set) {
+            (Some(source_id), _, Some(ref_set_id)) => {
+                self.resolve_source_ref_set_scope(source_id, ref_id, ref_set_id)
+            }
+            (Some(source_id), Some(ref_id), None) => {
+                self.ensure_configured_ref(source_id, ref_id)?;
+
+                Ok(vec![SearchScope {
+                    source: source_id.to_owned(),
+                    ref_id: ref_id.to_owned(),
+                }])
+            }
+            (Some(source_id), None, None) => {
+                let default_ref = self.configured_default_ref(source_id)?;
+
+                Ok(vec![SearchScope {
+                    source: source_id.to_owned(),
+                    ref_id: default_ref.to_owned(),
+                }])
+            }
+            (None, Some(_), _) => Err(RequestResolutionError::RefRequiresSource),
+            (None, None, Some(ref_set_id)) => self.resolve_all_ref_set_scopes(ref_set_id),
+            (None, None, None) => self.resolve_default_all_scopes(),
+        }
+    }
+
+    fn resolve_default_all_scopes(
+        &self,
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        if let Some(default_ref_set) = self.config.default_ref_set() {
+            return self.resolve_all_ref_set_scopes(default_ref_set);
+        }
+
+        Ok(self
+            .config
+            .sources
+            .iter()
+            .filter_map(|(source_id, source)| {
+                source.default_ref.as_ref().map(|default_ref| SearchScope {
+                    source: source_id.clone(),
+                    ref_id: default_ref.clone(),
+                })
+            })
+            .collect())
+    }
+
+    fn resolve_all_ref_set_scopes(
+        &self,
+        ref_set_id: &str,
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        let ref_set = self.config.ref_sets.get(ref_set_id).ok_or_else(|| {
+            RequestResolutionError::UnknownRefSet {
+                ref_set: ref_set_id.to_owned(),
+            }
+        })?;
+
+        Ok(ref_set
+            .refs
+            .iter()
+            .flat_map(|(source_id, ref_ids)| {
+                ref_ids.iter().map(|ref_id| SearchScope {
+                    source: source_id.clone(),
+                    ref_id: ref_id.clone(),
+                })
+            })
+            .collect())
+    }
+
+    fn resolve_source_ref_set_scope(
+        &self,
+        source_id: &str,
+        ref_id: Option<&str>,
+        ref_set_id: &str,
+    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+        self.configured_source(source_id)?;
+
+        let ref_set = self.config.ref_sets.get(ref_set_id).ok_or_else(|| {
+            RequestResolutionError::UnknownRefSet {
+                ref_set: ref_set_id.to_owned(),
+            }
+        })?;
+
+        let refs = ref_set.refs.get(source_id).ok_or_else(|| {
+            RequestResolutionError::InvalidRefForRefSet {
+                ref_set: ref_set_id.to_owned(),
+                source_id: source_id.to_owned(),
+                ref_id: ref_id.unwrap_or("").to_owned(),
+            }
+        })?;
+
+        let selected_ref = if refs.len() == 1 {
+            let selected_ref = refs[0].as_str();
+
+            if let Some(ref_id) = ref_id {
+                self.ensure_configured_ref(source_id, ref_id)?;
+
+                if ref_id != selected_ref {
+                    return Err(RequestResolutionError::InvalidRefForRefSet {
+                        ref_set: ref_set_id.to_owned(),
+                        source_id: source_id.to_owned(),
+                        ref_id: ref_id.to_owned(),
+                    });
+                }
+            }
+
+            selected_ref
+        } else {
+            let Some(ref_id) = ref_id else {
+                return Err(RequestResolutionError::AmbiguousRefSetSource {
+                    ref_set: ref_set_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                });
+            };
+
+            self.ensure_configured_ref(source_id, ref_id)?;
+
+            if !refs.iter().any(|candidate| candidate == ref_id) {
+                return Err(RequestResolutionError::InvalidRefForRefSet {
+                    ref_set: ref_set_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    ref_id: ref_id.to_owned(),
+                });
+            }
+
+            ref_id
+        };
+
+        Ok(vec![SearchScope {
+            source: source_id.to_owned(),
+            ref_id: selected_ref.to_owned(),
+        }])
+    }
+
+    fn configured_source(
+        &self,
+        source_id: &str,
+    ) -> std::result::Result<&SourceConfig, RequestResolutionError> {
+        self.config
+            .sources
+            .get(source_id)
+            .ok_or_else(|| RequestResolutionError::UnknownSource {
+                source_id: source_id.to_owned(),
+            })
+    }
+
+    fn configured_default_ref(
+        &self,
+        source_id: &str,
+    ) -> std::result::Result<&str, RequestResolutionError> {
+        let source = self.configured_source(source_id)?;
 
         source
             .default_ref
-            .clone()
-            .with_context(|| format!("source {source_id:?} has no default ref"))
+            .as_deref()
+            .ok_or_else(|| RequestResolutionError::MissingDefaultRef {
+                source_id: source_id.to_owned(),
+            })
+    }
+
+    fn ensure_configured_ref(
+        &self,
+        source_id: &str,
+        ref_id: &str,
+    ) -> std::result::Result<(), RequestResolutionError> {
+        self.configured_source(source_id)?;
+
+        if !self.configured_ref_exists(source_id, ref_id) {
+            return Err(RequestResolutionError::UnknownRef {
+                source_id: source_id.to_owned(),
+                ref_id: ref_id.to_owned(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -497,8 +838,8 @@ mod tests {
         service.reconcile_generation(next_path, manifest).unwrap();
 
         let result = service
-            .search_with_index(
-                &held.index,
+            .search_with_snapshot(
+                &held,
                 SearchRequest {
                     query: "git".to_owned(),
                     limit: 10,

@@ -2,7 +2,7 @@ use maud::{Markup, PreEscaped, html};
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceKind;
-use nixsearch_index::manifest::IndexGenerationManifest;
+use nixsearch_service::ServedGenerationSnapshot;
 
 use crate::AppState;
 use crate::request::{PageRequest, PageState, SourceFilter};
@@ -19,7 +19,7 @@ pub fn render(
     state: &AppState,
     _request: &PageRequest,
     page_state: &PageState,
-    manifest: &IndexGenerationManifest,
+    served_generation: &ServedGenerationSnapshot,
 ) -> Markup {
     let config = &state.config;
     let source_filter = &page_state.source_filter;
@@ -34,7 +34,7 @@ pub fn render(
             format!("--glass-color: {color}; --home-accent: {color};")
         }
     };
-    let count = count_for(state, page_state, manifest);
+    let count = count_for(state, page_state, served_generation);
 
     html! {
         div #results.home-hero style=(hero_style) {
@@ -85,7 +85,7 @@ fn source_display_name<'a>(config: &'a AppConfig, source_id: &'a str) -> &'a str
 fn count_for(
     state: &AppState,
     page_state: &PageState,
-    manifest: &IndexGenerationManifest,
+    served_generation: &ServedGenerationSnapshot,
 ) -> Option<(usize, &'static str)> {
     let config = &state.config;
 
@@ -98,12 +98,16 @@ fn count_for(
         ),
     };
 
-    let scopes = state.search.search_scopes(source, ref_id, ref_set).ok()?;
+    let scopes = state
+        .search
+        .search_scopes_for_snapshot(served_generation, source, ref_id, ref_set)
+        .ok()?;
 
     let count: usize = scopes
         .iter()
         .map(|scope| {
-            manifest
+            served_generation
+                .manifest
                 .targets
                 .iter()
                 .filter(|target| target.source == scope.source && target.ref_id == scope.ref_id)

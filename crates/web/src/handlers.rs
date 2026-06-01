@@ -1,18 +1,20 @@
 use std::convert::Infallible;
-use std::sync::Arc;
 
-use anyhow::Result;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Uri, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::response::Response;
 use axum::response::{Html, IntoResponse, Sse, sse::Event};
 use datastar::prelude::{ExecuteScript, PatchElements};
 use futures_util::stream;
 use serde::Deserialize;
 use url::Url;
 
-use nixsearch_index::search::{EntryLookupResult, SearchIndex, SearchResult};
-use nixsearch_service::{EntryRequest, SearchRequest};
+use nixsearch_index::search::{EntryLookupResult, SearchResult};
+use nixsearch_service::{
+    EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
+    ServiceResult,
+};
 
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
@@ -119,42 +121,33 @@ pub async fn entry_page(
 pub async fn state_events(
     State(state): State<AppState>,
     Query(query): Query<StateQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let request = match page_request_from_public_url(&query.url) {
         Ok(request) => request,
         Err(error) => {
-            let html = templates::results::render_error(&error).into_string();
-            let event = PatchElements::new(html).write_as_axum_sse_event();
-            let events: Vec<std::result::Result<Event, Infallible>> = vec![Ok(event)];
-            return Sse::new(stream::iter(events));
+            return sse_error_response(StatusCode::BAD_REQUEST, &error);
         }
     };
 
-    let page_state = page_state(&state.config, &request);
-    let patch_results = should_patch_results(&state, query.previous_url.as_deref(), &request);
-    let needs_search = patch_results && normalized_query(&request.query).is_some();
-    let needs_entry = page_state.detail.is_some();
     let snapshot = state.search.snapshot();
-    let index = if needs_search || needs_entry {
-        Some(&snapshot.index)
-    } else {
-        None
+    let page_state = match resolve_page_state(&state, &snapshot, &request) {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            return sse_error_response(status_for_resolution_error(&error), &error.to_string());
+        }
     };
 
+    let patch_results =
+        should_patch_results(&state, &snapshot, query.previous_url.as_deref(), &request);
+    let needs_search = patch_results && page_state.q.is_some();
+    let needs_entry = page_state.detail.is_some();
+
     let results_html = if patch_results {
-        if normalized_query(&request.query).is_none() {
-            Some(
-                templates::home::render(&state, &request, &page_state, &snapshot.manifest)
-                    .into_string(),
-            )
+        if page_state.q.is_none() {
+            Some(templates::home::render(&state, &request, &page_state, &snapshot).into_string())
         } else {
-            let search_result = match index {
-                Some(index) => {
-                    run_search_with_index(&state, index, &request, &page_state, 0, DEFAULT_LIMIT)
-                        .map_err(|error| format!("{error:#}"))
-                }
-                None => unreachable!("search result requested without opening the index"),
-            };
+            let search_result =
+                run_search_with_snapshot(&state, &snapshot, &page_state, 0, DEFAULT_LIMIT);
 
             Some(match &search_result {
                 Ok(result) => templates::results::render(
@@ -164,6 +157,12 @@ pub async fn state_events(
                     &state.config,
                 )
                 .into_string(),
+                Err(ServiceError::Resolution(error)) => {
+                    return sse_error_response(
+                        status_for_resolution_error(error),
+                        &error.to_string(),
+                    );
+                }
                 Err(error) => templates::results::render_error(&format!("{error:#}")).into_string(),
             })
         }
@@ -171,7 +170,11 @@ pub async fn state_events(
         None
     };
 
-    let entry = entry_data_from_index(&state, &page_state, index);
+    let entry = entry_data_from_snapshot(
+        &state,
+        &page_state,
+        (needs_search || needs_entry).then_some(&snapshot),
+    );
     let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -187,11 +190,12 @@ pub async fn state_events(
         ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
     ));
 
-    Sse::new(stream::iter(events))
+    Sse::new(stream::iter(events)).into_response()
 }
 
 fn should_patch_results(
     state: &AppState,
+    snapshot: &ServedGenerationSnapshot,
     previous_url: Option<&str>,
     request: &PageRequest,
 ) -> bool {
@@ -201,8 +205,14 @@ fn should_patch_results(
 
     match page_request_from_public_url(previous_url) {
         Ok(previous_request) => {
-            let previous_state = page_state(&state.config, &previous_request);
-            let next_state = page_state(&state.config, request);
+            let previous_state = match resolve_page_state(state, snapshot, &previous_request) {
+                Ok(previous_state) => previous_state,
+                Err(_) => return true,
+            };
+            let next_state = match resolve_page_state(state, snapshot, request) {
+                Ok(next_state) => next_state,
+                Err(_) => return true,
+            };
 
             previous_state.q != next_state.q
                 || previous_state.source_filter != next_state.source_filter
@@ -216,13 +226,11 @@ fn should_patch_results(
 pub async fn results_slice(
     State(state): State<AppState>,
     Query(query): Query<SliceQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let request = match page_request_from_public_url(&query.url) {
         Ok(request) => request,
         Err(error) => {
-            return Json(serde_json::json!({
-                "error": error
-            }));
+            return json_error_response(StatusCode::BAD_REQUEST, &error);
         }
     };
 
@@ -249,10 +257,9 @@ pub async fn results_slice(
                 "count": count,
                 "endOffset": query.offset + count,
             }))
+            .into_response()
         }
-        Err(error) => Json(serde_json::json!({
-            "error": format!("{error:#}")
-        })),
+        Err(error) => json_error_response(status_for_service_error(&error), &format!("{error:#}")),
     }
 }
 
@@ -260,30 +267,33 @@ fn render_full_page_response(
     state: &AppState,
     page_urls: PageUrls,
     request: PageRequest,
-) -> Html<String> {
-    let page_state = page_state(&state.config, &request);
+) -> Response {
+    let snapshot = state.search.snapshot();
+
+    let page_state = match resolve_page_state(state, &snapshot, &request) {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            return html_error_response(status_for_resolution_error(&error), &error.to_string());
+        }
+    };
+
     let page = request.query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * DEFAULT_LIMIT;
     let needs_search = normalized_query(&request.query).is_some();
     let needs_entry = page_state.detail.is_some();
-    let snapshot = state.search.snapshot();
-    let index = if needs_search || needs_entry {
-        Some(&snapshot.index)
-    } else {
-        None
-    };
+
     let search_result = if needs_search {
-        match index {
-            Some(index) => {
-                run_search_with_index(state, index, &request, &page_state, offset, DEFAULT_LIMIT)
-                    .map_err(|error| format!("{error:#}"))
-            }
-            None => unreachable!("search result requested without opening the index"),
-        }
+        run_search_with_snapshot(state, &snapshot, &page_state, offset, DEFAULT_LIMIT)
+            .map_err(|error| format!("{error:#}"))
     } else {
         Ok(empty_search_result())
     };
-    let entry = entry_data_from_index(state, &page_state, index);
+
+    let entry = entry_data_from_snapshot(
+        state,
+        &page_state,
+        (needs_search || needs_entry).then_some(&snapshot),
+    );
 
     let view = match &search_result {
         Ok(result) => Ok(result),
@@ -299,18 +309,121 @@ fn render_full_page_response(
         view,
         &entry,
     );
-    Html(markup.into_string())
+
+    Html(markup.into_string()).into_response()
 }
 
-fn entry_data_from_index(
+fn resolve_page_state(
+    state: &AppState,
+    snapshot: &ServedGenerationSnapshot,
+    request: &PageRequest,
+) -> std::result::Result<PageState, RequestResolutionError> {
+    let page_state = page_state(&state.config, request);
+    validate_page_request(state, snapshot, request, &page_state)?;
+    Ok(page_state)
+}
+
+fn validate_page_request(
+    state: &AppState,
+    snapshot: &ServedGenerationSnapshot,
+    request: &PageRequest,
+    page_state: &PageState,
+) -> std::result::Result<(), RequestResolutionError> {
+    let raw_ref = request.query.ref_id.as_deref();
+    let raw_ref_set = request.query.ref_set.as_deref();
+
+    match &page_state.source_filter {
+        SourceFilter::All => {
+            let all_source_ref = if request.entry.is_some() {
+                None
+            } else {
+                raw_ref
+            };
+
+            state
+                .search
+                .search_scopes_for_snapshot(snapshot, None, all_source_ref, raw_ref_set)?;
+        }
+        SourceFilter::Named(source) => {
+            state.search.search_scopes_for_snapshot(
+                snapshot,
+                Some(source),
+                raw_ref,
+                raw_ref_set,
+            )?;
+        }
+    }
+
+    if request.entry.is_some()
+        && let Some(source) = request.source.as_deref()
+    {
+        let entry_ref_set = if page_state.source_filter == SourceFilter::All {
+            page_state.active_ref_set()
+        } else {
+            raw_ref_set
+        };
+
+        state
+            .search
+            .search_scopes_for_snapshot(snapshot, Some(source), raw_ref, entry_ref_set)?;
+    }
+
+    Ok(())
+}
+
+fn status_for_service_error(error: &ServiceError) -> StatusCode {
+    match error {
+        ServiceError::Resolution(error) => status_for_resolution_error(error),
+        ServiceError::Search(_) | ServiceError::EntryLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn status_for_resolution_error(error: &RequestResolutionError) -> StatusCode {
+    match error {
+        RequestResolutionError::RefRequiresSource
+        | RequestResolutionError::AmbiguousRefSetSource { .. }
+        | RequestResolutionError::InvalidRefForRefSet { .. } => StatusCode::BAD_REQUEST,
+        RequestResolutionError::UnknownSource { .. }
+        | RequestResolutionError::UnknownRef { .. }
+        | RequestResolutionError::UnknownRefSet { .. }
+        | RequestResolutionError::UnservedRef { .. }
+        | RequestResolutionError::MissingDefaultRef { .. }
+        | RequestResolutionError::NoServedSearchScopes => StatusCode::NOT_FOUND,
+    }
+}
+
+fn html_error_response(status: StatusCode, error: &str) -> Response {
+    let html = templates::results::render_error(error).into_string();
+    (status, Html(html)).into_response()
+}
+
+fn sse_error_response(status: StatusCode, error: &str) -> Response {
+    let html = templates::results::render_error(error).into_string();
+    let event = PatchElements::new(html).write_as_axum_sse_event();
+    let events: Vec<std::result::Result<Event, Infallible>> = vec![Ok(event)];
+
+    (status, Sse::new(stream::iter(events))).into_response()
+}
+
+fn json_error_response(status: StatusCode, error: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": error
+        })),
+    )
+        .into_response()
+}
+
+fn entry_data_from_snapshot(
     state: &AppState,
     page_state: &PageState,
-    index: Option<&Arc<SearchIndex>>,
+    snapshot: Option<&ServedGenerationSnapshot>,
 ) -> EntryData {
     let Some(detail) = page_state.detail.as_ref() else {
         return EntryData::Empty;
     };
-    let Some(index) = index else {
+    let Some(snapshot) = snapshot else {
         return EntryData::Error("search index was not opened".to_owned());
     };
     let lookup_ref = detail
@@ -332,8 +445,8 @@ fn entry_data_from_index(
 
     match state
         .search
-        .find_entry_with_index(
-            index,
+        .find_entry_with_snapshot(
+            snapshot,
             EntryRequest {
                 source: detail.source.clone(),
                 ref_id: lookup_ref.map(ToOwned::to_owned),
@@ -451,15 +564,15 @@ fn run_search(
     request: &PageRequest,
     offset: usize,
     limit: usize,
-) -> Result<SearchResult> {
-    if normalized_query(&request.query).is_none() {
+) -> ServiceResult<SearchResult> {
+    let snapshot = state.search.snapshot();
+    let page_state = resolve_page_state(state, &snapshot, request)?;
+
+    if page_state.q.is_none() {
         return Ok(empty_search_result());
     };
 
-    let snapshot = state.search.snapshot();
-    let page_state = page_state(&state.config, request);
-
-    run_search_with_index(state, &snapshot.index, request, &page_state, offset, limit)
+    run_search_with_snapshot(state, &snapshot, &page_state, offset, limit)
 }
 
 fn empty_search_result() -> SearchResult {
@@ -469,20 +582,19 @@ fn empty_search_result() -> SearchResult {
     }
 }
 
-fn run_search_with_index(
+fn run_search_with_snapshot(
     state: &AppState,
-    index: &SearchIndex,
-    request: &PageRequest,
+    snapshot: &ServedGenerationSnapshot,
     page_state: &PageState,
     offset: usize,
     limit: usize,
-) -> Result<SearchResult> {
-    let Some(q) = normalized_query(&request.query) else {
+) -> ServiceResult<SearchResult> {
+    let Some(q) = page_state.q.as_deref() else {
         return Ok(empty_search_result());
     };
 
-    state.search.search_with_index(
-        index,
+    state.search.search_with_snapshot(
+        snapshot,
         search_request_for_page_state(page_state, q, offset, limit),
     )
 }

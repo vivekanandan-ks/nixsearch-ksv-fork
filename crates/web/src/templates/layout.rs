@@ -56,7 +56,7 @@ pub fn render_full_page(
         Ok(result) if normalized_query(&request.query).is_some() => {
             results::render(page_state, &result.hits, result.total, &state.config)
         }
-        Ok(_) => home::render(state, request, page_state, &served_generation.manifest),
+        Ok(_) => home::render(state, request, page_state, served_generation),
         Err(error) => results::render_error(error),
     };
 
