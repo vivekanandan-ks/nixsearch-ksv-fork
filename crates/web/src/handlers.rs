@@ -134,17 +134,21 @@ pub async fn state_events(
     let patch_results = should_patch_results(&state, query.previous_url.as_deref(), &request);
     let needs_search = patch_results && normalized_query(&request.query).is_some();
     let needs_entry = page_state.detail.is_some();
+    let snapshot = state.search.snapshot();
     let index = if needs_search || needs_entry {
-        Some(state.search.current_index())
+        Some(&snapshot.index)
     } else {
         None
     };
 
     let results_html = if patch_results {
         if normalized_query(&request.query).is_none() {
-            Some(templates::home::render(&state, &request, &page_state).into_string())
+            Some(
+                templates::home::render(&state, &request, &page_state, &snapshot.manifest)
+                    .into_string(),
+            )
         } else {
-            let search_result = match &index {
+            let search_result = match index {
                 Some(index) => {
                     run_search_with_index(&state, index, &request, &page_state, 0, DEFAULT_LIMIT)
                         .map_err(|error| format!("{error:#}"))
@@ -167,7 +171,7 @@ pub async fn state_events(
         None
     };
 
-    let entry = entry_data_from_index(&state, &page_state, index.as_ref());
+    let entry = entry_data_from_index(&state, &page_state, index);
     let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -262,13 +266,14 @@ fn render_full_page_response(
     let offset = (page - 1) * DEFAULT_LIMIT;
     let needs_search = normalized_query(&request.query).is_some();
     let needs_entry = page_state.detail.is_some();
+    let snapshot = state.search.snapshot();
     let index = if needs_search || needs_entry {
-        Some(state.search.current_index())
+        Some(&snapshot.index)
     } else {
         None
     };
     let search_result = if needs_search {
-        match &index {
+        match index {
             Some(index) => {
                 run_search_with_index(state, index, &request, &page_state, offset, DEFAULT_LIMIT)
                     .map_err(|error| format!("{error:#}"))
@@ -278,15 +283,22 @@ fn render_full_page_response(
     } else {
         Ok(empty_search_result())
     };
-    let entry = entry_data_from_index(state, &page_state, index.as_ref());
+    let entry = entry_data_from_index(state, &page_state, index);
 
     let view = match &search_result {
         Ok(result) => Ok(result),
         Err(error) => Err(error.as_str()),
     };
 
-    let markup =
-        templates::layout::render_full_page(state, &request, &page_state, &page_urls, view, &entry);
+    let markup = templates::layout::render_full_page(
+        state,
+        &request,
+        &page_state,
+        &page_urls,
+        &snapshot,
+        view,
+        &entry,
+    );
     Html(markup.into_string())
 }
 
@@ -444,10 +456,10 @@ fn run_search(
         return Ok(empty_search_result());
     };
 
-    let index = state.search.current_index();
+    let snapshot = state.search.snapshot();
     let page_state = page_state(&state.config, request);
 
-    run_search_with_index(state, &index, request, &page_state, offset, limit)
+    run_search_with_index(state, &snapshot.index, request, &page_state, offset, limit)
 }
 
 fn empty_search_result() -> SearchResult {

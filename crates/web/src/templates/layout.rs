@@ -6,6 +6,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::server::{AnalyticsScriptConfig, ScriptAttributeValue};
 use nixsearch_config::source::SourceKind;
 use nixsearch_index::search::SearchResult;
+use nixsearch_service::ServedGenerationSnapshot;
 
 use crate::AppState;
 use crate::DATASTAR_JS_URL;
@@ -44,6 +45,7 @@ pub fn render_full_page(
     request: &PageRequest,
     page_state: &crate::request::PageState,
     page_urls: &PageUrls,
+    served_generation: &ServedGenerationSnapshot,
     search_result: Result<&SearchResult, &str>,
     entry: &EntryData,
 ) -> Markup {
@@ -54,7 +56,7 @@ pub fn render_full_page(
         Ok(result) if normalized_query(&request.query).is_some() => {
             results::render(page_state, &result.hits, result.total, &state.config)
         }
-        Ok(_) => home::render(state, request, page_state),
+        Ok(_) => home::render(state, request, page_state, &served_generation.manifest),
         Err(error) => results::render_error(error),
     };
 
@@ -127,7 +129,7 @@ pub fn render_full_page(
                     (results_markup)
                     (modal_markup)
                 }
-                (footer::render_footer(state))
+                (footer::render_footer(state, &served_generation.manifest))
 
                 script #source-metadata type="application/json" {
                     (PreEscaped(&source_metadata))

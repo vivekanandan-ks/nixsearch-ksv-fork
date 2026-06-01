@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use maud::{Markup, html};
+use nixsearch_index::manifest::IndexGenerationManifest;
 use time::OffsetDateTime;
 
 use crate::AppState;
@@ -8,9 +9,8 @@ use crate::maintenance;
 
 const PROJECT_GITHUB_URL: &str = "https://github.com/benkoppe/nixsearch";
 
-pub fn render_footer(state: &AppState) -> Markup {
-    let snapshot = state.search.snapshot();
-    let generated_at = snapshot.manifest.generated_at;
+pub fn render_footer(state: &AppState, manifest: &IndexGenerationManifest) -> Markup {
+    let generated_at = manifest.generated_at;
     let now = OffsetDateTime::now_utc();
 
     let elapsed = duration_between(generated_at, now);

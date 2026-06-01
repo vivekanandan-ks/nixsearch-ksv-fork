@@ -43,17 +43,26 @@ impl fmt::Debug for ServedGeneration {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServedGenerationSnapshot {
     pub path: Utf8PathBuf,
     pub manifest: IndexGenerationManifest,
+    pub index: Arc<SearchIndex>,
+}
+
+impl fmt::Debug for ServedGenerationSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServedGenerationSnapshot")
+            .field("path", &self.path)
+            .field("manifest", &self.manifest)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileOutcome {
     Unchanged,
-    ManifestUpdated,
-    Swapped,
+    Reloaded,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +143,7 @@ impl SearchService {
         ServedGenerationSnapshot {
             path: current.path.clone(),
             manifest: current.manifest.clone(),
+            index: Arc::clone(&current.index),
         }
     }
 
@@ -142,36 +152,21 @@ impl SearchService {
         path: Utf8PathBuf,
         manifest: IndexGenerationManifest,
     ) -> Result<ReconcileOutcome> {
-        if self
-            .current
-            .read()
-            .expect("served generation lock poisoned")
-            .path
-            != path
         {
-            return self.swap_generation(path, manifest);
+            let current = self
+                .current
+                .read()
+                .expect("served generation lock poisoned");
+
+            if current.path == path && current.manifest == manifest {
+                return Ok(ReconcileOutcome::Unchanged);
+            }
         }
 
-        let mut current = self
-            .current
-            .write()
-            .expect("served generation lock poisoned");
-
-        if current.path != path {
-            drop(current);
-            return self.swap_generation(path, manifest);
-        }
-
-        if current.manifest == manifest {
-            return Ok(ReconcileOutcome::Unchanged);
-        }
-
-        current.manifest = manifest;
-
-        Ok(ReconcileOutcome::ManifestUpdated)
+        self.reload_generation(path, manifest)
     }
 
-    fn swap_generation(
+    fn reload_generation(
         &self,
         path: Utf8PathBuf,
         manifest: IndexGenerationManifest,
@@ -183,13 +178,8 @@ impl SearchService {
             .write()
             .expect("served generation lock poisoned");
 
-        if current.path == path {
-            if current.manifest == manifest {
-                return Ok(ReconcileOutcome::Unchanged);
-            }
-
-            current.manifest = manifest;
-            return Ok(ReconcileOutcome::ManifestUpdated);
+        if current.path == path && current.manifest == manifest {
+            return Ok(ReconcileOutcome::Unchanged);
         }
 
         *current = ServedGeneration {
@@ -198,7 +188,7 @@ impl SearchService {
             index: Arc::new(index),
         };
 
-        Ok(ReconcileOutcome::Swapped)
+        Ok(ReconcileOutcome::Reloaded)
     }
 
     pub fn search_current(&self, request: SearchRequest) -> Result<SearchResult> {
@@ -423,6 +413,7 @@ mod tests {
 
         assert_eq!(snapshot.path, path);
         assert_eq!(snapshot.manifest.document_count, 7);
+        assert!(Arc::ptr_eq(&snapshot.index, &service.current_index()));
     }
 
     #[test]
@@ -443,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_updates_manifest_for_current_path() {
+    fn reconcile_generation_reloads_current_path_when_manifest_changes() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -458,9 +449,9 @@ mod tests {
             .reconcile_generation(path, manifest.clone())
             .unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::ManifestUpdated);
+        assert_eq!(outcome, ReconcileOutcome::Reloaded);
         assert_eq!(service.snapshot().manifest, manifest);
-        assert!(Arc::ptr_eq(&before, &service.current_index()));
+        assert!(!Arc::ptr_eq(&before, &service.current_index()));
     }
 
     #[test]
@@ -482,10 +473,42 @@ mod tests {
             .reconcile_generation(next_path.clone(), manifest)
             .unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Swapped);
+        assert_eq!(outcome, ReconcileOutcome::Reloaded);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest.generated_at, next_time);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
+    }
+
+    #[test]
+    fn held_snapshot_remains_usable_after_generation_reload() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let held = service.snapshot();
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let manifest = IndexStore::new(&index_dir)
+            .read_manifest(&next_path)
+            .unwrap();
+
+        service.reconcile_generation(next_path, manifest).unwrap();
+
+        let result = service
+            .search_with_index(
+                &held.index,
+                SearchRequest {
+                    query: "git".to_owned(),
+                    limit: 10,
+                    ..SearchRequest::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(held.manifest.generated_at, time::OffsetDateTime::UNIX_EPOCH);
+        assert!(result.total > 0);
     }
 
     #[test]

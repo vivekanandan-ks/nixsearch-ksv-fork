@@ -2,6 +2,7 @@ use maud::{Markup, PreEscaped, html};
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceKind;
+use nixsearch_index::manifest::IndexGenerationManifest;
 
 use crate::AppState;
 use crate::request::{PageRequest, PageState, SourceFilter};
@@ -14,7 +15,12 @@ static GLASS_SVG: &str = include_str!("../../magnify-glass.svg");
 /// The muted Nix-logo blue used when searching every source ("All" mode).
 const ALL_GLASS_COLOR: &str = "#5873B9";
 
-pub fn render(state: &AppState, _request: &PageRequest, page_state: &PageState) -> Markup {
+pub fn render(
+    state: &AppState,
+    _request: &PageRequest,
+    page_state: &PageState,
+    manifest: &IndexGenerationManifest,
+) -> Markup {
     let config = &state.config;
     let source_filter = &page_state.source_filter;
 
@@ -28,7 +34,7 @@ pub fn render(state: &AppState, _request: &PageRequest, page_state: &PageState) 
             format!("--glass-color: {color}; --home-accent: {color};")
         }
     };
-    let count = count_for(state, page_state);
+    let count = count_for(state, page_state, manifest);
 
     html! {
         div #results.home-hero style=(hero_style) {
@@ -76,7 +82,11 @@ fn source_display_name<'a>(config: &'a AppConfig, source_id: &'a str) -> &'a str
 /// Returns the entry count and its noun (e.g. `(123456, "packages and options")`)
 /// for the active set, or `None` when counts are unavailable (e.g. the index has
 /// no matching targets yet).
-fn count_for(state: &AppState, page_state: &PageState) -> Option<(usize, &'static str)> {
+fn count_for(
+    state: &AppState,
+    page_state: &PageState,
+    manifest: &IndexGenerationManifest,
+) -> Option<(usize, &'static str)> {
     let config = &state.config;
 
     let (source, ref_id, ref_set) = match &page_state.source_filter {
@@ -89,9 +99,6 @@ fn count_for(state: &AppState, page_state: &PageState) -> Option<(usize, &'stati
     };
 
     let scopes = state.search.search_scopes(source, ref_id, ref_set).ok()?;
-
-    let snapshot = state.search.snapshot();
-    let manifest = &snapshot.manifest;
 
     let count: usize = scopes
         .iter()
