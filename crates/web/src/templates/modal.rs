@@ -12,7 +12,7 @@ use super::{detail, source_tag};
 pub enum EntryData {
     Empty,
     Found(Box<SearchDocument>),
-    NotFound,
+    NotFound { entry: String },
     Ambiguous(Vec<SearchDocument>),
     Error(String),
 }
@@ -21,7 +21,7 @@ impl EntryData {
     pub fn document(&self) -> Option<&SearchDocument> {
         match self {
             Self::Found(document) => Some(document),
-            Self::Empty | Self::NotFound | Self::Ambiguous(_) | Self::Error(_) => None,
+            Self::Empty | Self::NotFound { .. } | Self::Ambiguous(_) | Self::Error(_) => None,
         }
     }
 }
@@ -30,7 +30,7 @@ pub fn render(config: &AppConfig, page_state: &PageState, entry: &EntryData) -> 
     match entry {
         EntryData::Empty => render_empty(),
         EntryData::Found(document) => render_entry(page_state, document, config),
-        EntryData::NotFound => render_error(config, page_state, "Entry not found."),
+        EntryData::NotFound { entry } => render_not_found(config, page_state, entry),
         EntryData::Ambiguous(documents) => render_ambiguous(page_state, documents, config),
         EntryData::Error(error) => render_error(config, page_state, error),
     }
@@ -101,6 +101,27 @@ fn render_error(config: &AppConfig, state: &PageState, message: &str) -> Markup 
                         a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
                     }
                     div.results-error { (message) }
+                }
+            }
+        }
+    }
+}
+
+fn render_not_found(config: &AppConfig, state: &PageState, entry: &str) -> Markup {
+    let close_href = close_url_for_state(config, state);
+
+    html! {
+        div #entry-modal-container {
+            a.modal-backdrop href=(close_href) aria-label="Close modal" {}
+            dialog #entry-modal data-close-url=(close_href) {
+                article.entry {
+                    header {
+                        h2 { "Entry not found" }
+                        a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
+                    }
+                    div.results-error {
+                        "Entry " code { (entry) } " was not found."
+                    }
                 }
             }
         }

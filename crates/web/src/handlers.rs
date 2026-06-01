@@ -140,7 +140,6 @@ pub async fn state_events(
 
     let patch_results =
         should_patch_results(&state, &snapshot, query.previous_url.as_deref(), &request);
-    let needs_search = patch_results && page_state.q.is_some();
     let needs_entry = page_state.detail.is_some();
 
     let results_html = if patch_results {
@@ -174,11 +173,16 @@ pub async fn state_events(
         None
     };
 
-    let entry = entry_data_from_snapshot(
+    let entry = match load_entry_data_from_snapshot(
         &state,
         &page_state,
-        (needs_search || needs_entry).then_some(&snapshot),
-    );
+        needs_entry.then_some(&snapshot),
+    ) {
+        Ok(entry) => entry,
+        Err(error) => {
+            return sse_entry_error_response(&state, &page_state, results_html, &error);
+        }
+    };
     let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -312,11 +316,21 @@ fn render_full_page_response(
         None => ResultsContent::Home,
     };
 
-    let entry = entry_data_from_snapshot(
-        state,
-        &page_state,
-        (needs_search || needs_entry).then_some(&snapshot),
-    );
+    let entry =
+        match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(&snapshot)) {
+            Ok(entry) => entry,
+            Err(error) => {
+                return render_full_page_with_entry_error_response(
+                    state,
+                    page_urls,
+                    &snapshot,
+                    &request,
+                    &page_state,
+                    &search_result,
+                    &error,
+                );
+            }
+        };
 
     let markup = templates::layout::render_full_page(
         state,
@@ -413,6 +427,81 @@ fn recovery_request_for_error(
     }
 }
 
+#[derive(Debug)]
+enum EntryLoadError {
+    NotFound { entry: String },
+    InvalidKind(String),
+    IndexUnavailable,
+    Lookup(ServiceError),
+}
+
+impl EntryLoadError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::InvalidKind(_) => StatusCode::BAD_REQUEST,
+            Self::IndexUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Lookup(error) => status_for_service_error(error),
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::NotFound { entry } => format!("Entry {entry:?} was not found."),
+            Self::InvalidKind(error) => error.clone(),
+            Self::IndexUnavailable => "search index was not opened".to_owned(),
+            Self::Lookup(error) => format!("{error:#}"),
+        }
+    }
+}
+
+fn render_full_page_with_entry_error_response(
+    state: &AppState,
+    page_urls: PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+    request: &PageRequest,
+    page_state: &PageState,
+    search_result: &Option<ServiceResult<SearchResult>>,
+    error: &EntryLoadError,
+) -> Response {
+    let search_error = match search_result {
+        Some(Err(error)) => Some(format!("{error:#}")),
+        _ => None,
+    };
+    let results_content = match search_result {
+        Some(Ok(result)) => ResultsContent::SearchResults(result),
+        Some(Err(_)) => ResultsContent::Error {
+            title: "Search failed",
+            message: search_error.as_deref().unwrap_or("search failed"),
+        },
+        None => ResultsContent::Home,
+    };
+    let entry = entry_data_for_load_error(error);
+
+    let markup = templates::layout::render_full_page(
+        state,
+        request,
+        page_state,
+        &page_urls,
+        snapshot,
+        results_content,
+        &entry,
+    );
+
+    (error.status(), Html(markup.into_string())).into_response()
+}
+
+fn entry_data_for_load_error(error: &EntryLoadError) -> EntryData {
+    match error {
+        EntryLoadError::NotFound { entry } => EntryData::NotFound {
+            entry: entry.clone(),
+        },
+        EntryLoadError::InvalidKind(_)
+        | EntryLoadError::IndexUnavailable
+        | EntryLoadError::Lookup(_) => EntryData::Error(error.message()),
+    }
+}
+
 fn resolve_page_state(
     state: &AppState,
     snapshot: &ServedGenerationSnapshot,
@@ -500,6 +589,31 @@ fn sse_error_response(status: StatusCode, error: &str) -> Response {
     (status, Sse::new(stream::iter(events))).into_response()
 }
 
+fn sse_entry_error_response(
+    state: &AppState,
+    page_state: &PageState,
+    results_html: Option<String>,
+    error: &EntryLoadError,
+) -> Response {
+    let entry = entry_data_for_load_error(error);
+    let modal_html = templates::modal::render(&state.config, page_state, &entry).into_string();
+
+    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+
+    if let Some(results_html) = results_html {
+        events.push(Ok(
+            PatchElements::new(results_html).write_as_axum_sse_event()
+        ));
+    }
+
+    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
+    events.push(Ok(
+        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
+    ));
+
+    (error.status(), Sse::new(stream::iter(events))).into_response()
+}
+
 fn json_error_response(status: StatusCode, error: &str) -> Response {
     (
         status,
@@ -510,16 +624,16 @@ fn json_error_response(status: StatusCode, error: &str) -> Response {
         .into_response()
 }
 
-fn entry_data_from_snapshot(
+fn load_entry_data_from_snapshot(
     state: &AppState,
     page_state: &PageState,
     snapshot: Option<&ServedGenerationSnapshot>,
-) -> EntryData {
+) -> std::result::Result<EntryData, EntryLoadError> {
     let Some(detail) = page_state.detail.as_ref() else {
-        return EntryData::Empty;
+        return Ok(EntryData::Empty);
     };
     let Some(snapshot) = snapshot else {
-        return EntryData::Error("search index was not opened".to_owned());
+        return Err(EntryLoadError::IndexUnavailable);
     };
     let lookup_ref = detail
         .ref_id
@@ -533,28 +647,23 @@ fn entry_data_from_snapshot(
             })
         });
 
-    let kind = match parse_document_kind(detail.kind.as_deref()) {
-        Ok(kind) => kind,
-        Err(error) => return EntryData::Error(error),
-    };
+    let kind = parse_document_kind(detail.kind.as_deref()).map_err(EntryLoadError::InvalidKind)?;
 
-    match state
-        .search
-        .find_entry_with_snapshot(
-            snapshot,
-            EntryRequest {
-                source: detail.source.clone(),
-                ref_id: lookup_ref.map(ToOwned::to_owned),
-                name: detail.entry.clone(),
-                kind,
-            },
-        )
-        .map_err(|error| format!("{error:#}"))
-    {
-        Ok(EntryLookupResult::Found(document)) => EntryData::Found(document),
-        Ok(EntryLookupResult::NotFound) => EntryData::NotFound,
-        Ok(EntryLookupResult::Ambiguous(documents)) => EntryData::Ambiguous(documents),
-        Err(error) => EntryData::Error(error),
+    match state.search.find_entry_with_snapshot(
+        snapshot,
+        EntryRequest {
+            source: detail.source.clone(),
+            ref_id: lookup_ref.map(ToOwned::to_owned),
+            name: detail.entry.clone(),
+            kind,
+        },
+    ) {
+        Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
+        Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
+            entry: detail.entry.clone(),
+        }),
+        Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
+        Err(error) => Err(EntryLoadError::Lookup(error)),
     }
 }
 

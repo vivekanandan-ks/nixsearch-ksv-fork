@@ -413,16 +413,6 @@ mod tests {
     async fn all_source_search_works_when_some_configured_refs_are_missing() {
         let tempdir = tempdir().unwrap();
 
-        async fn request_body(app: Router, uri: &str) -> (StatusCode, String) {
-            let response = app
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            let status = response.status();
-            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-
-            (status, String::from_utf8(bytes.to_vec()).unwrap())
-        }
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
 
@@ -575,6 +565,64 @@ mod tests {
         assert!(body.contains("value=\"git\""));
         assert!(body.contains("Page unavailable"));
         assert!(body.contains("explicit ref is required"));
+    }
+
+    #[tokio::test]
+    async fn missing_entry_page_returns_404_with_modal_error() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) =
+            request_body(app, "/fixtures/programs.missing.enable?q=git&ref=small").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("search-form"));
+        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("value=\"git\""));
+        assert!(body.contains("entry-modal"));
+        assert!(body.contains("Entry not found"));
+        assert!(body.contains("programs.missing.enable"));
+        assert!(body.contains("Close"));
+    }
+
+    #[tokio::test]
+    async fn missing_entry_page_preserves_all_source_modal_recovery_context() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) =
+            request_body(app, "/fixtures/programs.missing.enable?q=git&source=all").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("search-form"));
+        assert!(body.contains("action=\"/\""));
+        assert!(body.contains("value=\"git\""));
+        assert!(body.contains("entry-modal"));
+        assert!(body.contains("Entry not found"));
+        assert!(body.contains("programs.missing.enable"));
+        assert!(body.contains("Close"));
+    }
+
+    #[tokio::test]
+    async fn state_events_missing_entry_returns_404_with_modal_error() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(
+            app,
+            "/-/state/events?url=%2Ffixtures%2Fprograms.missing.enable",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("Entry not found"));
+        assert!(body.contains("programs.missing.enable"));
     }
 
     #[tokio::test]
