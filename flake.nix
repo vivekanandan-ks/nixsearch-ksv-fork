@@ -1,5 +1,5 @@
 {
-  description = "Description for the project";
+  description = "Fast, no-nonsense Nix search engine";
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
