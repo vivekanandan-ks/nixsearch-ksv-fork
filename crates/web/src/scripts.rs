@@ -96,6 +96,24 @@ mod tests {
     }
 
     #[test]
+    fn navigation_script_blurs_search_on_escape() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"evt.key === "Escape""#));
+        assert!(script.contains("document.activeElement === input"));
+        assert!(script.contains("input.blur();"));
+    }
+
+    #[test]
+    fn navigation_script_moves_results_with_j_and_k() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"evt.key === "j" || evt.key === "k""#));
+        assert!(script.contains("!isEditableTarget(evt.target)"));
+        assert!(script.contains(r#"moveResultSelection(evt.key === "j" ? 1 : -1)"#));
+    }
+
+    #[test]
     fn dialog_reconcile_script_loads_asset() {
         assert!(dialog_reconcile_script().contains("entry-modal"));
         assert!(dialog_reconcile_script().contains("showModal"));

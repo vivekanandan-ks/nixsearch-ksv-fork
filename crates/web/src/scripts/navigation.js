@@ -1019,7 +1019,14 @@
     return !!target.closest("input, textarea, select, [contenteditable]");
   }
 
+  function isEntryModalOpen() {
+    const dialog = document.getElementById("entry-modal");
+    return !!dialog && dialog.open;
+  }
+
   document.addEventListener("keydown", (evt) => {
+    if (isEntryModalOpen()) return;
+
     if (
       evt.ctrlKey &&
       !evt.metaKey &&
@@ -1029,9 +1036,6 @@
     ) {
       const key = evt.key.toLowerCase();
       if (key === "n" || key === "p") {
-        const dialog = document.getElementById("entry-modal");
-        if (dialog && dialog.open) return;
-
         if (moveResultSelection(key === "n" ? 1 : -1)) evt.preventDefault();
         return;
       }
@@ -1044,19 +1048,34 @@
       !evt.altKey &&
       !evt.isComposing
     ) {
-      const dialog = document.getElementById("entry-modal");
-      if (dialog && dialog.open) return;
-
       if (cycleSourceFilter(evt.key === "]" ? 1 : -1)) evt.preventDefault();
+      return;
+    }
+
+    if (evt.key === "Escape") {
+      const input = document.querySelector('[data-nixsearch-input="q"]');
+      if (input && document.activeElement === input) {
+        evt.preventDefault();
+        input.blur();
+      }
+      return;
+    }
+
+    if (
+      (evt.key === "j" || evt.key === "k") &&
+      !evt.metaKey &&
+      !evt.ctrlKey &&
+      !evt.altKey &&
+      !evt.isComposing &&
+      !isEditableTarget(evt.target)
+    ) {
+      if (moveResultSelection(evt.key === "j" ? 1 : -1)) evt.preventDefault();
       return;
     }
 
     if (evt.key !== "/") return;
     if (evt.metaKey || evt.ctrlKey || evt.altKey || evt.isComposing) return;
     if (isEditableTarget(evt.target)) return;
-
-    const dialog = document.getElementById("entry-modal");
-    if (dialog && dialog.open) return;
 
     const input = document.querySelector('[data-nixsearch-input="q"]');
     if (!input) return;
