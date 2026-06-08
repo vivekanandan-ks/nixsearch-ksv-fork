@@ -1024,6 +1024,12 @@
     return !!dialog && dialog.open;
   }
 
+  function isSourceCycleShortcut(evt) {
+    if (evt.key !== "[" && evt.key !== "]") return false;
+    if (evt.metaKey || evt.altKey || evt.isComposing) return false;
+    return evt.ctrlKey || !isEditableTarget(evt.target);
+  }
+
   document.addEventListener("keydown", (evt) => {
     if (isEntryModalOpen()) return;
 
@@ -1041,13 +1047,7 @@
       }
     }
 
-    if (
-      (evt.key === "[" || evt.key === "]") &&
-      evt.ctrlKey &&
-      !evt.metaKey &&
-      !evt.altKey &&
-      !evt.isComposing
-    ) {
+    if (isSourceCycleShortcut(evt)) {
       if (cycleSourceFilter(evt.key === "]" ? 1 : -1)) evt.preventDefault();
       return;
     }

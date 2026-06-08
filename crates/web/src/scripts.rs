@@ -114,6 +114,16 @@ mod tests {
     }
 
     #[test]
+    fn navigation_script_cycles_sources_with_bare_brackets_outside_inputs() {
+        let script = navigation_script();
+
+        assert!(script.contains("function isSourceCycleShortcut(evt)"));
+        assert!(script.contains(r#"if (evt.key !== "[" && evt.key !== "]") return false;"#));
+        assert!(script.contains("return evt.ctrlKey || !isEditableTarget(evt.target);"));
+        assert!(script.contains("if (isSourceCycleShortcut(evt))"));
+    }
+
+    #[test]
     fn dialog_reconcile_script_loads_asset() {
         assert!(dialog_reconcile_script().contains("entry-modal"));
         assert!(dialog_reconcile_script().contains("showModal"));
