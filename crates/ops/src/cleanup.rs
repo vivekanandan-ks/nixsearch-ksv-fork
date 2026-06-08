@@ -11,7 +11,7 @@ use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::SearchIndex;
 use nixsearch_index::store::IndexStore;
 
-use crate::lock;
+use crate::lock::{self, UpdateLock};
 
 #[derive(Debug, Default)]
 pub struct CleanupReport {
@@ -38,11 +38,11 @@ struct CompleteGeneration {
 }
 
 pub async fn cleanup_locked(config: &AppConfig) -> Result<CleanupReport> {
-    let _lock = lock::acquire_update_lock(&config.data.index_dir)?;
-    Ok(cleanup_under_lock(config).await)
+    let update_lock = lock::acquire_update_lock(&config.data.index_dir)?;
+    Ok(cleanup_under_lock(config, &update_lock).await)
 }
 
-pub async fn cleanup_under_lock(config: &AppConfig) -> CleanupReport {
+pub async fn cleanup_under_lock(config: &AppConfig, _update_lock: &UpdateLock) -> CleanupReport {
     let mut report = CleanupReport::default();
 
     prune_index_generations(config, &mut report);

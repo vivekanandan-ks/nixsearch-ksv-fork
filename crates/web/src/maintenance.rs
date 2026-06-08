@@ -333,7 +333,7 @@ async fn run_cleanup_after_reload(config: &AppConfig) {
         }
     };
 
-    let report = cleanup::cleanup_under_lock(config).await;
+    let report = cleanup::cleanup_under_lock(config, &update_lock).await;
     cleanup::log_report(&report);
 
     drop(update_lock);

@@ -152,7 +152,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
     );
 
     let index_dir = config.data.index_dir.clone();
-    let _lock = tokio::task::spawn_blocking(move || lock::acquire_update_lock(&index_dir))
+    let update_lock = tokio::task::spawn_blocking(move || lock::acquire_update_lock(&index_dir))
         .await
         .context("failed to join maintenance lock task")??;
 
@@ -213,7 +213,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
                 )
             })?;
 
-            let report = cleanup::cleanup_under_lock(config).await;
+            let report = cleanup::cleanup_under_lock(config, &update_lock).await;
             cleanup::log_report(&report);
 
             Ok(generation)

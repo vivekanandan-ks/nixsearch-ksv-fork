@@ -16,7 +16,7 @@ use super::load_required_config;
 
 pub(super) async fn rebuild(args: SelectionArgs) -> Result<()> {
     let config = load_required_config(&args.config)?;
-    let _lock = acquire_update_lock(&config.data.index_dir)?;
+    let update_lock = acquire_update_lock(&config.data.index_dir)?;
 
     let store = artifact_store_from_config(&config)?;
     let targets = select_targets(&config, args.source.as_deref(), args.ref_id.as_deref())?;
@@ -30,7 +30,7 @@ pub(super) async fn rebuild(args: SelectionArgs) -> Result<()> {
 
     build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await?;
 
-    let report = cleanup::cleanup_under_lock(&config).await;
+    let report = cleanup::cleanup_under_lock(&config, &update_lock).await;
     cleanup::log_report(&report);
 
     Ok(())
