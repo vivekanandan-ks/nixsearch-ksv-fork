@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -31,6 +32,8 @@ pub struct NixCleanupOutcome {
     pub status_code: Option<i32>,
 }
 
+const NIXSEARCH_GCROOTS_DIR: &str = "/nix/var/nix/gcroots/nixsearch-runtime";
+
 #[derive(Debug)]
 struct CompleteGeneration {
     path: Utf8PathBuf,
@@ -47,13 +50,20 @@ pub async fn cleanup_under_lock(config: &AppConfig, _update_lock: &UpdateLock) -
 
     prune_index_generations(config, &mut report);
 
-    if config.maintenance.nix_store.gc {
-        report.nix_gc = Some(run_nix_cleanup("gc", &["store", "gc"], &["--gc"]).await);
-    }
+    let runtime_roots_prepared =
+        !config.maintenance.nix_store.gc || protect_runtime_gc_roots(&mut report);
 
     if config.maintenance.nix_store.optimise {
         report.nix_optimise =
             Some(run_nix_cleanup("optimise", &["store", "optimise"], &["--optimise"]).await);
+    }
+
+    if config.maintenance.nix_store.gc {
+        report.nix_gc = Some(if runtime_roots_prepared {
+            run_nix_cleanup("gc", &["store", "gc"], &["--gc"]).await
+        } else {
+            skipped_nix_cleanup("gc", "nix store gc")
+        });
     }
 
     report
@@ -349,6 +359,167 @@ fn sync_dir_best_effort(path: &Utf8Path, report: &mut CleanupReport) {
     }
 }
 
+fn protect_runtime_gc_roots(report: &mut CleanupReport) -> bool {
+    let roots = runtime_store_roots(report);
+
+    if roots.is_empty() {
+        report.warnings.push(
+            "failed to identify any runtime Nix store paths; skipping Nix store GC".to_owned(),
+        );
+        return false;
+    }
+
+    let roots_dir = Path::new(NIXSEARCH_GCROOTS_DIR);
+    if let Err(error) = fs::create_dir_all(roots_dir) {
+        report.warnings.push(format!(
+            "failed to create runtime GC roots directory {}: {error}; skipping Nix store GC",
+            roots_dir.display()
+        ));
+        return false;
+    }
+
+    let mut rooted_any = false;
+    for (index, root) in roots.iter().enumerate() {
+        let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
+            report.warnings.push(format!(
+                "failed to derive runtime GC root name for {}; skipping it",
+                root.display()
+            ));
+            continue;
+        };
+
+        let link = roots_dir.join(format!("{index}-{name}"));
+        if let Err(error) = replace_symlink(root, &link) {
+            report.warnings.push(format!(
+                "failed to create runtime GC root {} -> {}: {error}",
+                link.display(),
+                root.display()
+            ));
+            continue;
+        }
+
+        rooted_any = true;
+    }
+
+    if !rooted_any {
+        report
+            .warnings
+            .push("failed to create any runtime GC roots; skipping Nix store GC".to_owned());
+        return false;
+    }
+
+    sync_std_dir_best_effort(roots_dir, report);
+    true
+}
+
+fn runtime_store_roots(report: &mut CleanupReport) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    match std::env::current_exe() {
+        Ok(path) => candidates.push(path),
+        Err(error) => report
+            .warnings
+            .push(format!("failed to resolve current executable: {error}")),
+    }
+
+    for command in ["nix", "nix-store"] {
+        if let Some(path) = command_path(command) {
+            candidates.push(path);
+        }
+    }
+
+    for variable in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(value));
+        }
+    }
+
+    if let Some(value) = std::env::var_os("NIX_PATH") {
+        candidates.extend(nix_path_store_candidates(&value));
+    }
+
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        let Some(root) = store_root_for_path(&candidate) else {
+            continue;
+        };
+
+        if !roots.iter().any(|existing| existing == &root) {
+            roots.push(root);
+        }
+    }
+
+    roots
+}
+
+fn command_path(command: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+
+    for dir in std::env::split_paths(&paths) {
+        let path = dir.join(command);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn nix_path_store_candidates(value: &std::ffi::OsStr) -> Vec<PathBuf> {
+    value
+        .to_string_lossy()
+        .split(':')
+        .filter_map(|entry| {
+            let path = entry.split_once('=').map_or(entry, |(_, path)| path);
+            path.starts_with("/nix/store/").then(|| PathBuf::from(path))
+        })
+        .collect()
+}
+
+fn store_root_for_path(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    store_root_from_canonical_path(&canonical)
+}
+
+fn store_root_from_canonical_path(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+
+    match (components.next(), components.next(), components.next()) {
+        (
+            Some(std::path::Component::RootDir),
+            Some(std::path::Component::Normal(nix)),
+            Some(std::path::Component::Normal(store)),
+        ) if nix == "nix" && store == "store" => {}
+        _ => return None,
+    }
+
+    let store_entry = components.next()?;
+    let std::path::Component::Normal(store_entry) = store_entry else {
+        return None;
+    };
+
+    Some(PathBuf::from("/nix/store").join(store_entry))
+}
+
+fn replace_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    match fs::remove_file(link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    std::os::unix::fs::symlink(target, link)
+}
+
+fn sync_std_dir_best_effort(path: &Path, report: &mut CleanupReport) {
+    if let Err(error) = fs::File::open(path).and_then(|file| file.sync_all()) {
+        report.warnings.push(format!(
+            "failed to sync runtime GC roots directory {}: {error}",
+            path.display()
+        ));
+    }
+}
+
 async fn run_nix_cleanup(
     operation: &'static str,
     primary_args: &[&str],
@@ -425,6 +596,16 @@ async fn run_nix_cleanup(
     }
 }
 
+fn skipped_nix_cleanup(operation: &'static str, command: &str) -> NixCleanupOutcome {
+    NixCleanupOutcome {
+        operation,
+        command: command.to_owned(),
+        success: false,
+        skipped: true,
+        status_code: None,
+    }
+}
+
 fn command_display(program: &str, args: &[&str]) -> String {
     std::iter::once(program)
         .chain(args.iter().copied())
@@ -444,7 +625,9 @@ pub(crate) fn should_try_legacy_nix_store(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::cleanup::should_try_legacy_nix_store;
+    use std::path::Path;
+
+    use crate::cleanup::{should_try_legacy_nix_store, store_root_from_canonical_path};
 
     #[test]
     fn legacy_fallback_detects_unsupported_new_nix_cli() {
@@ -453,5 +636,18 @@ mod tests {
             "experimental Nix feature 'nix-command' is disabled"
         ));
         assert!(!should_try_legacy_nix_store("network failed"));
+    }
+
+    #[test]
+    fn store_root_from_canonical_path_extracts_top_level_store_path() {
+        assert_eq!(
+            store_root_from_canonical_path(Path::new("/nix/store/abc123-nix/bin/nix")).unwrap(),
+            Path::new("/nix/store/abc123-nix")
+        );
+    }
+
+    #[test]
+    fn store_root_from_canonical_path_rejects_non_store_paths() {
+        assert!(store_root_from_canonical_path(Path::new("/usr/bin/nix")).is_none());
     }
 }
