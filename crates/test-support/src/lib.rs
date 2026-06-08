@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use nixsearch_config::maintenance::MaintenanceConfig;
 use tempfile::TempDir;
 
 use nixsearch_config::app::{AppConfig, RefSetConfig};
@@ -174,6 +175,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
             index_dir: index_dir.as_ref().to_owned(),
         },
         server: ServerConfig::default(),
+        maintenance: MaintenanceConfig::default(),
         sources: [(
             SOURCE_FIXTURES.to_owned(),
             SourceConfig {

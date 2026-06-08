@@ -8,9 +8,8 @@ use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::store::IndexStore;
-use nixsearch_ops::generate;
-use nixsearch_ops::lock;
 use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
+use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::SearchService;
 
 mod handlers;
@@ -213,6 +212,9 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
                     generation.path
                 )
             })?;
+
+            let report = cleanup::cleanup_under_lock(config).await;
+            cleanup::log_report(&report);
 
             Ok(generation)
         }

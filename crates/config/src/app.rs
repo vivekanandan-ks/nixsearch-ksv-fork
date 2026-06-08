@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::DataConfig;
 use crate::error::{ConfigError, Result};
+use crate::maintenance::MaintenanceConfig;
 use crate::server::ServerConfig;
 use crate::source::{RawSourceConfig, SourceConfig, source_key_order_from_toml};
 use crate::validation::validate_id;
@@ -16,6 +17,7 @@ use crate::validation::validate_id;
 pub struct AppConfig {
     pub data: DataConfig,
     pub server: ServerConfig,
+    pub maintenance: MaintenanceConfig,
     pub sources: IndexMap<String, SourceConfig>,
     pub ref_sets: IndexMap<String, RefSetConfig>,
 }
@@ -78,6 +80,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         self.data.validate()?;
         self.server.validate()?;
+        self.maintenance.validate()?;
 
         for (source_id, source) in &self.sources {
             source.validate(source_id)?;
@@ -277,6 +280,7 @@ fn ref_set_key_order_from_toml(path: &Path) -> Vec<String> {
 struct RawAppConfig {
     data: DataConfig,
     server: ServerConfig,
+    maintenance: MaintenanceConfig,
     sources: IndexMap<String, RawSourceConfig>,
     ref_sets: IndexMap<String, RefSetConfig>,
 }
@@ -292,6 +296,7 @@ impl RawAppConfig {
         Ok(AppConfig {
             data: self.data,
             server: self.server,
+            maintenance: self.maintenance,
             sources,
             ref_sets: self.ref_sets,
         })

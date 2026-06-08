@@ -4,11 +4,12 @@ use anyhow::{Context, Result};
 
 use nixsearch_config::app::AppConfig;
 
-use crate::args::{ArtifactCommand, Command, IndexCommand};
+use crate::args::{ArtifactCommand, Command, IndexCommand, MaintenanceCommand};
 
 mod artifact;
 mod config;
 mod index;
+mod maintenance;
 mod search;
 mod serve;
 mod update;
@@ -26,6 +27,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
         Command::Index { command } => match command {
             IndexCommand::Rebuild(args) => index::rebuild(args).await,
             IndexCommand::Inspect(args) => index::inspect(args),
+        },
+        Command::Maintenance { command } => match command {
+            MaintenanceCommand::Cleanup(args) => maintenance::cleanup(args).await,
         },
     }
 }

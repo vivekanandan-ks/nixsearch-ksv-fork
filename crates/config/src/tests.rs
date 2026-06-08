@@ -149,6 +149,71 @@ fn default_config_is_valid() {
 }
 
 #[test]
+fn default_config_includes_maintenance_defaults() {
+    let config = AppConfig::load(None).unwrap();
+
+    assert_eq!(config.maintenance.index_generations.keep, 3);
+    assert_eq!(
+        config.maintenance.index_generations.delete_failed_after,
+        "24h"
+    );
+    assert!(!config.maintenance.nix_store.gc);
+    assert!(!config.maintenance.nix_store.optimise);
+}
+
+#[test]
+fn loads_maintenance_config() {
+    let config = load_toml(
+        r#"
+        [maintenance.index_generations]
+        keep = 4
+        delete_failed_after = "12h"
+
+        [maintenance.nix_store]
+        gc = true
+        optimise = true
+        "#,
+    );
+
+    assert_eq!(config.maintenance.index_generations.keep, 4);
+    assert_eq!(
+        config
+            .maintenance
+            .index_generations
+            .parse_delete_failed_after()
+            .unwrap(),
+        std::time::Duration::from_secs(12 * 60 * 60)
+    );
+    assert!(config.maintenance.nix_store.gc);
+    assert!(config.maintenance.nix_store.optimise);
+}
+
+#[test]
+fn rejects_too_low_generation_keep() {
+    let error = load_toml_error(
+        r#"
+        [maintenance.index_generations]
+        keep = 1
+        "#,
+    );
+
+    assert_error_contains(&error, "maintenance.index_generations.keep");
+}
+
+#[test]
+fn rejects_unknown_maintenance_field() {
+    let error = load_toml_error(
+        r#"
+        [maintenance.index_generations]
+        keep = 3
+        typo = true
+        "#,
+    );
+
+    assert_error_contains(&error, "typo");
+}
+
+#[test]
 fn loads_config_file() {
     let config = load_toml(
         r#"

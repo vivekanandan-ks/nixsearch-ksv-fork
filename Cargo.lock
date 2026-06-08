@@ -2155,6 +2155,8 @@ dependencies = [
  "nixsearch-source",
  "nixsearch-store",
  "tempfile",
+ "time",
+ "tokio",
  "tracing",
 ]
 

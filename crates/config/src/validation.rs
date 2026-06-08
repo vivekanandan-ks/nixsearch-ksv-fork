@@ -97,3 +97,44 @@ pub(crate) fn producer_error<T>(source_id: &str, ref_id: &str, message: &str) ->
         "sources.{source_id}.refs.{ref_id}: {message}"
     )))
 }
+
+pub(crate) fn parse_duration_value(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let s = s.trim();
+
+    if s.is_empty() {
+        return Err("duration must not be empty".to_owned());
+    }
+
+    let split_pos = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+
+    let (number, unit) = s.split_at(split_pos);
+
+    if number.is_empty() {
+        return Err(format!("invalid number in {s:?}"));
+    }
+
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("invalid number in {s:?}"))?;
+
+    if !value.is_finite() || value <= 0.0 {
+        return Err("duration must be positive".to_owned());
+    }
+
+    let seconds = match unit.trim() {
+        "s" | "sec" | "secs" => value,
+        "m" | "min" | "mins" => value * 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => value * 3600.0,
+        "d" | "day" | "days" => value * 86400.0,
+        other => return Err(format!("unknown time unit {other:?}; use s, m, h, or d")),
+    };
+
+    if !seconds.is_finite() {
+        return Err("duration is out of range".to_owned());
+    }
+
+    std::time::Duration::try_from_secs_f64(seconds)
+        .map_err(|_| "duration is out of range".to_owned())
+}

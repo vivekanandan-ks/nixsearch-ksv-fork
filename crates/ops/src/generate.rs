@@ -102,96 +102,114 @@ async fn build_and_publish_generation_with_policy(
     }
 
     let generation_path = index_store.create_generation_path()?;
+    let mut publish_started = false;
 
-    let index = SearchIndex::create_or_replace(&generation_path)?;
-    let mut writer = index.writer()?;
+    let result: Result<GenerationBuildResult> = async {
+        let index = SearchIndex::create_or_replace(&generation_path)?;
+        let mut writer = index.writer()?;
 
-    let mut total_documents = 0usize;
-    let mut manifest_targets = Vec::new();
-    let mut successful_targets = Vec::new();
-    let mut skipped_targets = Vec::new();
-    let mut failed_refresh_targets = Vec::new();
+        let mut total_documents = 0usize;
+        let mut manifest_targets = Vec::new();
+        let mut successful_targets = Vec::new();
+        let mut skipped_targets = Vec::new();
+        let mut failed_refresh_targets = Vec::new();
 
-    for target in targets {
-        let key = TargetKey::from(&target);
+        for target in targets {
+            let key = TargetKey::from(&target);
 
-        let outcome = produce_target_with_policy(
-            artifact_store,
-            &target,
-            refresh_keys,
-            policy,
-            producer,
-            &mut failed_refresh_targets,
-            &mut skipped_targets,
-        )
-        .await?;
+            let outcome = produce_target_with_policy(
+                artifact_store,
+                &target,
+                refresh_keys,
+                policy,
+                producer,
+                &mut failed_refresh_targets,
+                &mut skipped_targets,
+            )
+            .await?;
 
-        let (produced, status) = match outcome {
-            TargetProduceOutcome::Refreshed(produced) => (produced, "refreshed"),
-            TargetProduceOutcome::Retained(produced) => (produced, "retained"),
-            TargetProduceOutcome::Skipped => continue,
-        };
+            let (produced, status) = match outcome {
+                TargetProduceOutcome::Refreshed(produced) => (produced, "refreshed"),
+                TargetProduceOutcome::Retained(produced) => (produced, "retained"),
+                TargetProduceOutcome::Skipped => continue,
+            };
 
-        let documents = consume_target(artifact_store, &target, &produced).await?;
+            let documents = consume_target(artifact_store, &target, &produced).await?;
 
-        for document in &documents {
-            writer.add_document(document)?;
+            for document in &documents {
+                writer.add_document(document)?;
+            }
+
+            total_documents += documents.len();
+            successful_targets.push(key);
+
+            manifest_targets.push(IndexTargetManifest {
+                source: target.source_id.clone(),
+                ref_id: target.ref_config.id.clone(),
+                artifact_kind: produced.artifact_ref.kind,
+                document_count: documents.len(),
+                artifact_hash: Some(produced.metadata.content_hash.clone()),
+                revision: produced.metadata.revision.clone(),
+            });
+
+            tracing::info!(
+                "{} {} documents: {}/{}",
+                status,
+                documents.len(),
+                target.source_id,
+                target.ref_config.id
+            );
         }
 
-        total_documents += documents.len();
-        successful_targets.push(key);
+        if policy == GenerationFailurePolicy::TolerateBootstrapNixFailures {
+            if successful_targets.is_empty() {
+                bail!("bootstrap generation produced no targets; all configured targets failed");
+            }
 
-        manifest_targets.push(IndexTargetManifest {
-            source: target.source_id.clone(),
-            ref_id: target.ref_config.id.clone(),
-            artifact_kind: produced.artifact_ref.kind,
-            document_count: documents.len(),
-            artifact_hash: Some(produced.metadata.content_hash.clone()),
-            revision: produced.metadata.revision.clone(),
-        });
+            if let Some(required_success_targets) = required_success_targets
+                && (required_success_targets.is_empty()
+                    || !successful_targets
+                        .iter()
+                        .any(|target| required_success_targets.contains(target)))
+            {
+                bail!("bootstrap generation produced no default search targets");
+            }
+        }
+
+        writer.commit()?;
+
+        let manifest = IndexGenerationManifest::new(total_documents, manifest_targets);
+        index_store.write_manifest(&generation_path, &manifest)?;
+
+        publish_started = true;
+        index_store.publish(&generation_path)?;
 
         tracing::info!(
-            "{} {} documents: {}/{}",
-            status,
-            documents.len(),
-            target.source_id,
-            target.ref_config.id
+            generation = %generation_path.as_str(),
+            documents = total_documents,
+            "published index generation"
+        );
+
+        Ok(GenerationBuildResult {
+            path: generation_path.clone(),
+            successful_targets,
+            skipped_targets,
+            failed_refresh_targets,
+        })
+    }
+    .await;
+
+    if result.is_err()
+        && !publish_started
+        && let Err(error) = std::fs::remove_dir_all(&generation_path)
+    {
+        tracing::warn!(
+            generation = %generation_path,
+            "failed to clean up incomplete index generation: {error}"
         );
     }
 
-    if policy == GenerationFailurePolicy::TolerateBootstrapNixFailures {
-        if successful_targets.is_empty() {
-            bail!("bootstrap generation produced no targets; all configured targets failed");
-        }
-
-        if let Some(required_success_targets) = required_success_targets
-            && (required_success_targets.is_empty()
-                || !successful_targets
-                    .iter()
-                    .any(|target| required_success_targets.contains(target)))
-        {
-            bail!("bootstrap generation produced no default search targets");
-        }
-    }
-
-    writer.commit()?;
-
-    let manifest = IndexGenerationManifest::new(total_documents, manifest_targets);
-    index_store.write_manifest(&generation_path, &manifest)?;
-    index_store.publish(&generation_path)?;
-
-    tracing::info!(
-        generation = %generation_path.as_str(),
-        documents = total_documents,
-        "published index generation"
-    );
-
-    Ok(GenerationBuildResult {
-        path: generation_path,
-        successful_targets,
-        skipped_targets,
-        failed_refresh_targets,
-    })
+    result
 }
 
 async fn produce_target_with_policy(

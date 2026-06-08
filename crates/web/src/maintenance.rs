@@ -9,9 +9,8 @@ use time::OffsetDateTime;
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
-use nixsearch_ops::generate;
-use nixsearch_ops::lock;
 use nixsearch_ops::targets::{TargetKey, all_targets};
+use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::{ReconcileOutcome, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -138,6 +137,10 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
 
             tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
             continue;
+        }
+
+        if reconcile_outcome == ReconcileOutcome::Reloaded {
+            run_cleanup_after_reload(&config).await;
         }
 
         if !modes.scheduled_enabled && !modes.recovery_enabled {
@@ -315,6 +318,25 @@ async fn run_locked_regeneration(
             MaintenanceOutcome::Failed
         }
     }
+}
+
+async fn run_cleanup_after_reload(config: &AppConfig) {
+    let update_lock = match lock::try_acquire_update_lock(&config.data.index_dir) {
+        Ok(Some(update_lock)) => update_lock,
+        Ok(None) => {
+            tracing::info!("index cleanup skipped; maintenance lock is held");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!("failed to acquire maintenance lock for cleanup: {error:#}");
+            return;
+        }
+    };
+
+    let report = cleanup::cleanup_under_lock(config).await;
+    cleanup::log_report(&report);
+
+    drop(update_lock);
 }
 
 pub(crate) fn current_generation_needs_regeneration(

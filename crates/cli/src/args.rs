@@ -35,6 +35,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
+
+    /// Run maintenance tasks.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -53,6 +59,12 @@ pub(crate) enum IndexCommand {
 
     /// Inspect the current published index generation.
     Inspect(ConfigArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MaintenanceCommand {
+    /// Prune old indexes and run configured store cleanup.
+    Cleanup(ConfigArgs),
 }
 
 #[derive(Debug, Args)]

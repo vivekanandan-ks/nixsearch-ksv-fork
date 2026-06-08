@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::{Result, bail};
 
 use nixsearch_index::store::IndexStore;
+use nixsearch_ops::cleanup;
 use nixsearch_ops::generate::build_and_publish_generation;
 use nixsearch_ops::lock::acquire_update_lock;
 use nixsearch_ops::produce::artifact_store_from_config;
@@ -43,6 +44,9 @@ pub(super) async fn update(args: SelectionArgs) -> Result<()> {
         &selected_keys,
     )
     .await?;
+
+    let report = cleanup::cleanup_under_lock(&config).await;
+    cleanup::log_report(&report);
 
     Ok(())
 }

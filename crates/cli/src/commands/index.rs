@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::store::IndexStore;
+use nixsearch_ops::cleanup;
 use nixsearch_ops::generate::build_and_publish_generation;
 use nixsearch_ops::lock::acquire_update_lock;
 use nixsearch_ops::produce::artifact_store_from_config;
@@ -28,6 +29,10 @@ pub(super) async fn rebuild(args: SelectionArgs) -> Result<()> {
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
 
     build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await?;
+
+    let report = cleanup::cleanup_under_lock(&config).await;
+    cleanup::log_report(&report);
+
     Ok(())
 }
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{ConfigError, Result};
-use crate::validation::validate_non_empty;
+use crate::validation::{parse_duration_value, validate_non_empty};
 
 const MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -185,44 +185,7 @@ impl ScheduleConfig {
 }
 
 pub(crate) fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
-    let s = s.trim();
-
-    if s.is_empty() {
-        return Err("interval must not be empty".to_owned());
-    }
-
-    let split_pos = s
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(s.len());
-
-    let (number, unit) = s.split_at(split_pos);
-
-    if number.is_empty() {
-        return Err(format!("invalid number in {s:?}"));
-    }
-
-    let value: f64 = number
-        .parse()
-        .map_err(|_| format!("invalid number in {s:?}"))?;
-
-    if !value.is_finite() || value <= 0.0 {
-        return Err("interval must be positive".to_owned());
-    }
-
-    let seconds = match unit.trim() {
-        "s" | "sec" | "secs" => value,
-        "m" | "min" | "mins" => value * 60.0,
-        "h" | "hr" | "hrs" | "hour" | "hours" => value * 3600.0,
-        "d" | "day" | "days" => value * 86400.0,
-        other => return Err(format!("unknown time unit {other:?}; use s, m, h, or d")),
-    };
-
-    if !seconds.is_finite() {
-        return Err("interval is out of range".to_owned());
-    }
-
-    let duration = std::time::Duration::try_from_secs_f64(seconds)
-        .map_err(|_| "interval is out of range".to_owned())?;
+    let duration = parse_duration_value(s)?;
 
     if duration < MIN_SCHEDULE_INTERVAL {
         return Err(format!(
