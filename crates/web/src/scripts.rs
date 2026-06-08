@@ -13,6 +13,7 @@ pub fn datastar_script() -> &'static str {
     ))
 }
 
+#[cfg(test)]
 pub fn dialog_reconcile_script() -> &'static str {
     include_str!("scripts/dialog-reconcile.js")
 }
@@ -133,13 +134,16 @@ mod tests {
         assert!(script.contains("nixsearchHeadMetadataUrl"));
         assert!(script.contains("nixsearchHeadMetadataPendingUrl"));
         assert!(script.contains("nixsearchReturnHeadMetadata"));
+        assert!(script.contains("nixsearchReturnHeadMetadataUrl"));
         assert!(script.contains("initial-history-metadata"));
         assert!(script.contains("returnHeadMetadata"));
+        assert!(script.contains("returnHeadMetadataUrl"));
+        assert!(script.contains("function publicUrlKey"));
         assert!(script.contains("exactHeadMetadataFromState"));
         assert!(script.contains("pendingHistoryState"));
         assert!(script.contains("history.replaceState("));
         assert!(script.contains("history.pushState(nextState"));
-        assert!(script.contains("target !== currentPublicUrl()"));
+        assert!(script.contains("publicUrlKey(targetUrl) !== publicUrlKey()"));
     }
 
     #[test]
@@ -148,7 +152,23 @@ mod tests {
 
         assert!(script.contains(r#"link.matches(".modal-backdrop, [data-role='entry-close']")"#));
         assert!(script.contains("closeEntryModal(dialog)"));
-        assert!(script.contains("restoreMetadata: returnMetadata, syncInputs: true"));
+        assert!(script.contains("const returnMetadataUrl = state.nixsearchReturnHeadMetadataUrl;"));
+        assert!(script.contains("returnMetadataUrl === closeTargetKey"));
+        assert!(script.contains("reconcileMode: \"unless-restored\""));
+        assert!(script.contains("reconcileSameUrl: true"));
+        assert!(script.contains("optimisticallyRemoveEntryModal()"));
+        assert!(script.contains("container.innerHTML = \"\";"));
+        assert!(script.contains("classList.remove(\"modal-open\")"));
+    }
+
+    #[test]
+    fn navigation_script_guards_modal_patches_by_target_url() {
+        let script = navigation_script();
+
+        assert!(script.contains("window.nixsearchApplyModalPatch = applyModalPatch;"));
+        assert!(script.contains("publicUrlKey(targetUrl) !== publicUrlKey()"));
+        assert!(script.contains("modalContainerFromHtml(html)"));
+        assert!(script.contains("existing.replaceWith(parsed)"));
     }
 
     #[test]

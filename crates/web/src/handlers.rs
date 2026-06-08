@@ -24,8 +24,10 @@ use crate::request::{
     PageQuery, PageRequest, PageState, SourceFilter, decode_path_value, non_empty,
     normalized_query, page_request_from_public_uri, page_state, parse_document_kind, public_uri,
 };
-use crate::scripts::{datastar_script, dialog_reconcile_script};
-use crate::templates::layout::{PageMetadata, ResultsContent, head_metadata_script};
+use crate::scripts::datastar_script;
+use crate::templates::layout::{
+    InitialReturnMetadata, ResultsContent, head_metadata_script, modal_patch_script,
+};
 use crate::templates::{self, modal::EntryData};
 use crate::urls::close_url_for_state;
 
@@ -229,10 +231,11 @@ pub async fn state_events(
         ));
     }
 
-    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
-    events.push(Ok(
-        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
-    ));
+    events.push(Ok(ExecuteScript::new(modal_patch_script(
+        &modal_html,
+        &target_public_url,
+    ))
+    .write_as_axum_sse_event()));
 
     if navigation.has_complete_metadata(&page_state, &search_result, &entry) {
         let metadata = templates::layout::page_head_metadata(
@@ -553,7 +556,7 @@ fn initial_return_metadata(
     snapshot: &ServedGenerationSnapshot,
     page_state: &PageState,
     results_content: ResultsContent<'_>,
-) -> Option<PageMetadata> {
+) -> Option<InitialReturnMetadata> {
     page_state.detail.as_ref()?;
 
     let close_url = close_url_for_state(&state.config, page_state);
@@ -567,7 +570,7 @@ fn initial_return_metadata(
         origin: page_urls.origin.clone(),
     };
 
-    Some(templates::layout::page_head_metadata(
+    let metadata = templates::layout::page_head_metadata(
         state,
         &close_request,
         &close_state,
@@ -575,7 +578,12 @@ fn initial_return_metadata(
         snapshot,
         results_content,
         &EntryData::Empty,
-    ))
+    );
+
+    Some(InitialReturnMetadata {
+        metadata,
+        url: close_path,
+    })
 }
 
 fn resolve_page_state(
@@ -712,10 +720,11 @@ fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoad
         ));
     }
 
-    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
-    events.push(Ok(
-        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
-    ));
+    events.push(Ok(ExecuteScript::new(modal_patch_script(
+        &modal_html,
+        context.target_public_url,
+    ))
+    .write_as_axum_sse_event()));
     events.push(Ok(ExecuteScript::new(head_metadata_script(
         &metadata,
         Some(context.target_public_url),

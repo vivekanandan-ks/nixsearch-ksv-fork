@@ -783,6 +783,7 @@ mod tests {
         );
         assert!(body.contains(r#"<script id="initial-history-metadata" type="application/json">"#));
         assert!(body.contains(r#""returnHeadMetadata":{"#));
+        assert!(body.contains(r#""returnHeadMetadataUrl":"/?q=git""#));
         assert!(body.contains(r#""url":"https://search.example.com/?q=git""#));
         assert!(body.contains(" results for git"));
         assert!(body.contains(r#""canonicalUrl":null"#));
@@ -1267,6 +1268,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("entry-modal"));
+        assert!(body.contains("nixsearchApplyModalPatch"));
         assert!(body.contains("nixsearchApplyHeadMetadata"));
         assert!(body.contains(
             r#""canonicalUrl":"https://search.example.com/fixtures/programs.git.enable""#
@@ -1289,6 +1291,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("entry-modal-container"));
+        assert!(body.contains("nixsearchApplyModalPatch"));
         assert!(body.contains("nixsearchApplyHeadMetadata"));
         assert!(body.contains(" results for git"));
         assert!(body.contains(r#""canonicalUrl":null"#));

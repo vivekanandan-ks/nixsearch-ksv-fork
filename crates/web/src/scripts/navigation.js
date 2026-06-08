@@ -29,9 +29,10 @@
     }
   }
 
-  function normalizePublicUrl(url = currentPublicUrl()) {
+  function publicUrlKey(url = currentPublicUrl()) {
     const parsed = new URL(url || currentPublicUrl(), window.location.href);
-    return parsed.pathname + parsed.search;
+    const query = parsed.searchParams.toString();
+    return parsed.pathname + (query ? "?" + query : "");
   }
 
   function headMetaContent(attribute, value) {
@@ -58,11 +59,21 @@
 
   function applyReturnMetadataState(state, extra = {}) {
     const next = { ...state };
+    const returnMetadataPair = extra.returnMetadataPair
+      ? extra.returnMetadataPair
+      : extra.returnHeadMetadata && extra.returnHeadMetadataUrl
+        ? {
+            metadata: extra.returnHeadMetadata,
+            urlKey: publicUrlKey(extra.returnHeadMetadataUrl),
+          }
+        : null;
 
-    if (extra.returnHeadMetadata) {
-      next.nixsearchReturnHeadMetadata = extra.returnHeadMetadata;
+    if (returnMetadataPair && returnMetadataPair.metadata && returnMetadataPair.urlKey) {
+      next.nixsearchReturnHeadMetadata = returnMetadataPair.metadata;
+      next.nixsearchReturnHeadMetadataUrl = returnMetadataPair.urlKey;
     } else if (extra.clearReturnHeadMetadata) {
       delete next.nixsearchReturnHeadMetadata;
+      delete next.nixsearchReturnHeadMetadataUrl;
     }
 
     return next;
@@ -80,7 +91,7 @@
     const next = applyReturnMetadataState(state, extra);
 
     next.nixsearchHeadMetadata = metadata;
-    next.nixsearchHeadMetadataUrl = normalizePublicUrl(url);
+    next.nixsearchHeadMetadataUrl = publicUrlKey(url);
     delete next.nixsearchHeadMetadataPendingUrl;
 
     return next;
@@ -93,7 +104,7 @@
         : {};
     const next = applyReturnMetadataState(state, extra);
 
-    next.nixsearchHeadMetadataPendingUrl = normalizePublicUrl(url);
+    next.nixsearchHeadMetadataPendingUrl = publicUrlKey(url);
     delete next.nixsearchHeadMetadata;
     delete next.nixsearchHeadMetadataUrl;
 
@@ -106,7 +117,7 @@
   ) {
     if (!state || typeof state !== "object") return null;
     if (!state.nixsearchHeadMetadata) return null;
-    if (state.nixsearchHeadMetadataUrl !== normalizePublicUrl(url)) return null;
+    if (state.nixsearchHeadMetadataUrl !== publicUrlKey(url)) return null;
 
     return state.nixsearchHeadMetadata;
   }
@@ -141,9 +152,13 @@
   function restoreHeadMetadata(metadata) {
     if (!metadata) return false;
 
-    if (!writeHeadMetadata(metadata)) return false;
-    storeExactHistoryHeadMetadata(currentHeadMetadata());
-    return true;
+    try {
+      if (!writeHeadMetadata(metadata)) return false;
+      storeExactHistoryHeadMetadata(currentHeadMetadata());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function metaByAttribute(attribute, value) {
@@ -193,17 +208,22 @@
 
   function applyHeadMetadata(metadata, url = currentPublicUrl()) {
     if (!metadata || typeof metadata !== "object") return;
-    const target = url ? normalizePublicUrl(url) : currentPublicUrl();
-    if (url && target !== currentPublicUrl()) return false;
+    const target = url ? publicUrlKey(url) : publicUrlKey();
+    if (url && target !== publicUrlKey()) return false;
 
-    if (!writeHeadMetadata(metadata)) return false;
-    storeExactHistoryHeadMetadata(currentHeadMetadata());
-    return true;
+    try {
+      if (!writeHeadMetadata(metadata)) return false;
+      storeExactHistoryHeadMetadata(currentHeadMetadata());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   window.nixsearchApplyHeadMetadata = applyHeadMetadata;
   storeExactHistoryHeadMetadata(currentHeadMetadata(), {
     returnHeadMetadata: initialHistoryMetadata.returnHeadMetadata,
+    returnHeadMetadataUrl: initialHistoryMetadata.returnHeadMetadataUrl,
   });
 
   function replaceVisiblePageInUrl(page) {
@@ -354,15 +374,34 @@
     return parsed.pathname.split("/").filter(Boolean).length >= 2;
   }
 
-  function returnHeadMetadataForNavigation(current, target, currentMetadata) {
+  function isPopstateModalClose(previous, current) {
+    if (!urlHasEntryDetail(previous) || urlHasEntryDetail(current)) return false;
+
+    const dialog = document.getElementById("entry-modal");
+    if (!dialog) return true;
+
+    const closeUrl = dialog.getAttribute("data-close-url");
+    return !!closeUrl && publicUrlKey(closeUrl) === publicUrlKey(current);
+  }
+
+  function returnMetadataPairForNavigation(current, target, currentMetadata) {
     if (!urlHasEntryDetail(target)) return null;
 
     const state = currentHistoryState();
-    if (urlHasEntryDetail(current) && state.nixsearchReturnHeadMetadata) {
-      return state.nixsearchReturnHeadMetadata;
+    if (
+      urlHasEntryDetail(current) &&
+      state.nixsearchReturnHeadMetadata &&
+      state.nixsearchReturnHeadMetadataUrl
+    ) {
+      return {
+        metadata: state.nixsearchReturnHeadMetadata,
+        urlKey: state.nixsearchReturnHeadMetadataUrl,
+      };
     }
 
-    return currentMetadata;
+    return currentMetadata
+      ? { metadata: currentMetadata, urlKey: publicUrlKey(current) }
+      : null;
   }
 
   function getActiveSourceTab() {
@@ -843,6 +882,71 @@
 
   window.nixsearchRestoreResultFocus = restoreResultFocus;
 
+  function syncModalStateSafely() {
+    try {
+      syncModalState();
+    } catch {
+      document.documentElement.classList.toggle("modal-open", isEntryModalOpen());
+    }
+  }
+
+  function modalContainerFromHtml(html) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = html || "";
+    return wrapper.querySelector("#entry-modal-container");
+  }
+
+  function applyModalPatch(html, targetUrl) {
+    if (publicUrlKey(targetUrl) !== publicUrlKey()) return false;
+
+    document.querySelectorAll("dialog[open]").forEach((dialog) => {
+      try {
+        dialog.close();
+      } catch {}
+    });
+
+    const existing = document.getElementById("entry-modal-container");
+    const parsed = modalContainerFromHtml(html);
+    let container = existing;
+
+    if (existing && parsed) {
+      existing.replaceWith(parsed);
+      container = parsed;
+    } else if (existing) {
+      existing.innerHTML = "";
+    } else {
+      container = document.createElement("div");
+      container.id = "entry-modal-container";
+      if (parsed) container.innerHTML = parsed.innerHTML;
+      (document.querySelector("main.main") || document.body).appendChild(container);
+    }
+
+    const dialog = document.getElementById("entry-modal");
+    document.querySelectorAll("dialog[open]").forEach((openDialog) => {
+      if (openDialog === dialog) return;
+      try {
+        openDialog.close();
+      } catch {}
+    });
+
+    if (dialog && !dialog.open) {
+      try {
+        dialog.showModal();
+      } catch {}
+    }
+
+    syncModalStateSafely();
+    if (!dialog) {
+      try {
+        restoreResultFocus();
+      } catch {}
+    }
+
+    return true;
+  }
+
+  window.nixsearchApplyModalPatch = applyModalPatch;
+
   function firstVisibleResultRowIndex(rows) {
     const visible = firstVisibleResultRow();
     const index = visible ? rows.indexOf(visible) : -1;
@@ -883,30 +987,61 @@
 
   function navigate(
     url,
-    { push = true, syncInputs = false, restoreMetadata = null } = {},
+    {
+      push = true,
+      syncInputs = false,
+      restoreMetadata = null,
+      onRestoreMetadata = null,
+      reconcileMode = "always",
+      reconcileSameUrl = false,
+    } = {},
   ) {
     const next = new URL(url, window.location.href);
     const target = next.pathname + next.search;
     const current = currentPublicUrl();
     const currentMetadata = exactHeadMetadataFromState(currentHistoryState(), current);
-    const returnHeadMetadata = returnHeadMetadataForNavigation(
+    const returnMetadataPair = returnMetadataPairForNavigation(
       current,
       target,
       currentMetadata,
     );
+    const loadsResults = shouldLoadResults(current, target);
+
+    const notifyRestoreMetadata = (restored) => {
+      if (!onRestoreMetadata) return true;
+
+      try {
+        return onRestoreMetadata(restored) !== false;
+      } catch {
+        return false;
+      }
+    };
 
     if (target === current) {
       if (syncInputs) {
         syncInputsFromUrl();
       }
+      const restoredMetadata = restoreMetadata
+        ? restoreHeadMetadata(restoreMetadata)
+        : false;
+      const restoreCallbackOk = restoreMetadata
+        ? notifyRestoreMetadata(restoredMetadata)
+        : true;
+      const skipReconcile =
+        reconcileMode === "unless-restored" &&
+        restoredMetadata &&
+        !loadsResults &&
+        restoreCallbackOk;
+
       if (restoreMetadata) {
-        restoreHeadMetadata(restoreMetadata);
+        setLoading(loadsResults);
       }
+      if (skipReconcile) currentUrl = currentPublicUrl();
+      if (reconcileSameUrl && !skipReconcile) reconcile(current);
       return false;
     }
 
-    const loadsResults = shouldLoadResults(current, target);
-    const nextState = pendingHistoryState(target, { returnHeadMetadata });
+    const nextState = pendingHistoryState(target, { returnMetadataPair });
 
     if (push) {
       history.pushState(nextState, "", target);
@@ -918,26 +1053,93 @@
       syncInputsFromUrl();
     }
 
-    if (restoreMetadata) {
-      restoreHeadMetadata(restoreMetadata);
-    }
+    const restoredMetadata = restoreMetadata
+      ? restoreHeadMetadata(restoreMetadata)
+      : false;
+    const restoreCallbackOk = restoreMetadata
+      ? notifyRestoreMetadata(restoredMetadata)
+      : true;
 
     setLoading(loadsResults);
     if (loadsResults) {
       window.scrollTo(0, 0);
     }
+    if (
+      reconcileMode === "unless-restored" &&
+      restoredMetadata &&
+      !loadsResults &&
+      restoreCallbackOk
+    ) {
+      currentUrl = currentPublicUrl();
+      return true;
+    }
     reconcile(current);
     return true;
+  }
+
+  function ensureEntryModalContainer() {
+    let container = document.getElementById("entry-modal-container");
+    if (container) return container;
+
+    container = document.createElement("div");
+    container.id = "entry-modal-container";
+    (document.querySelector("main.main") || document.body).appendChild(container);
+    return container;
+  }
+
+  function optimisticallyRemoveEntryModal() {
+    try {
+      const dialog = document.getElementById("entry-modal");
+      if (dialog && dialog.open) dialog.close();
+
+      const container = ensureEntryModalContainer();
+      container.innerHTML = "";
+      document.documentElement.classList.remove("modal-open");
+
+      try {
+        syncModalState();
+      } catch {
+        document.documentElement.classList.remove("modal-open");
+      }
+
+      try {
+        restoreResultFocus();
+      } catch {}
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function closeEntryModal(dialog) {
     const url = dialog.getAttribute("data-close-url");
     if (!url) return false;
-    const returnMetadata = currentHistoryState().nixsearchReturnHeadMetadata;
+    const state = currentHistoryState();
+    const returnMetadata = state.nixsearchReturnHeadMetadata;
+    const returnMetadataUrl = state.nixsearchReturnHeadMetadataUrl;
+    const closeTargetKey = publicUrlKey(url);
+    const canRestoreReturnMetadata =
+      returnMetadata &&
+      returnMetadataUrl === closeTargetKey &&
+      !shouldLoadResults(currentPublicUrl(), url);
 
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();
-    navigate(url, { restoreMetadata: returnMetadata, syncInputs: true });
+
+    if (canRestoreReturnMetadata) {
+      navigate(url, {
+        restoreMetadata: returnMetadata,
+        syncInputs: true,
+        reconcileMode: "unless-restored",
+        reconcileSameUrl: true,
+        onRestoreMetadata: (restored) =>
+          restored ? optimisticallyRemoveEntryModal() : false,
+      });
+    } else {
+      navigate(url, { syncInputs: true, reconcileSameUrl: true });
+    }
+
     return true;
   }
 
@@ -1248,11 +1450,24 @@
 
   window.addEventListener("popstate", (evt) => {
     const previous = currentUrl;
+    const current = currentPublicUrl();
+    const loadsResults = shouldLoadResults(previous, current);
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();
     syncInputsFromUrl();
-    restoreHeadMetadata(exactHeadMetadataFromState(evt.state, currentPublicUrl()));
-    setLoading(shouldLoadResults(previous, currentPublicUrl()));
+    const restoredMetadata = restoreHeadMetadata(
+      exactHeadMetadataFromState(evt.state, current),
+    );
+    setLoading(loadsResults);
+    if (
+      isPopstateModalClose(previous, current) &&
+      restoredMetadata &&
+      !loadsResults &&
+      optimisticallyRemoveEntryModal()
+    ) {
+      currentUrl = current;
+      return;
+    }
     reconcile(previous);
   });
 

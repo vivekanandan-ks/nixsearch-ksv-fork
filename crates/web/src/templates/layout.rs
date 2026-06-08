@@ -47,6 +47,12 @@ pub(crate) struct PageMetadata {
     robots: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InitialReturnMetadata {
+    pub metadata: PageMetadata,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct IndexMetadata {
     canonical_url: Option<String>,
@@ -61,7 +67,7 @@ pub fn render_full_page(
     served_generation: &ServedGenerationSnapshot,
     results_content: ResultsContent<'_>,
     entry: &EntryData,
-    initial_return_metadata: Option<&PageMetadata>,
+    initial_return_metadata: Option<&InitialReturnMetadata>,
 ) -> Markup {
     let q = request.query.q.as_deref().unwrap_or("");
     let source_filter = &page_state.source_filter;
@@ -264,6 +270,15 @@ pub(crate) fn head_metadata_script(
         serde_json::to_string(&target_public_url).expect("target URL should serialize");
     format!(
         "if (window.nixsearchApplyHeadMetadata) window.nixsearchApplyHeadMetadata({json}, {target_json});"
+    )
+}
+
+pub(crate) fn modal_patch_script(modal_html: &str, target_public_url: &str) -> String {
+    let html_json = serde_json::to_string(modal_html).expect("modal HTML should serialize");
+    let target_json =
+        serde_json::to_string(target_public_url).expect("target URL should serialize");
+    format!(
+        "if (window.nixsearchApplyModalPatch) window.nixsearchApplyModalPatch({html_json}, {target_json});"
     )
 }
 
@@ -572,11 +587,13 @@ fn source_metadata_json(config: &AppConfig) -> String {
 #[serde(rename_all = "camelCase")]
 struct InitialHistoryMetadata<'a> {
     return_head_metadata: Option<&'a PageMetadata>,
+    return_head_metadata_url: Option<&'a str>,
 }
 
-fn initial_history_metadata_json(return_head_metadata: &PageMetadata) -> String {
+fn initial_history_metadata_json(return_metadata: &InitialReturnMetadata) -> String {
     json_script_content(&InitialHistoryMetadata {
-        return_head_metadata: Some(return_head_metadata),
+        return_head_metadata: Some(&return_metadata.metadata),
+        return_head_metadata_url: Some(&return_metadata.url),
     })
 }
 
