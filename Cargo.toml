@@ -21,6 +21,7 @@ futures-util = "0.3"
 httpmock = "0.8"
 indexmap = { version = "2", features = ["serde"] }
 object_store = "0.13"
+percent-encoding = "2.3"
 predicates = "3"
 reqwest = "0.13"
 rusqlite = { version = "0.39", features = ["bundled"] }

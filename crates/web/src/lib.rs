@@ -22,6 +22,9 @@ mod templates;
 mod urls;
 
 const DEFAULT_LIMIT: usize = 50;
+const MAX_PAGE: usize = 1000;
+const MAX_OFFSET: usize = (MAX_PAGE - 1) * DEFAULT_LIMIT;
+
 const DATASTAR_JS_URL: &str = "/-/assets/datastar.js";
 const RECONCILE_EVENTS_URL: &str = "/-/state/events";
 const RESULTS_SLICE_URL: &str = "/-/results/slice";
@@ -50,18 +53,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     let state = AppState { config, search };
 
-    let app = Router::new()
-        .route("/-/health", get(handlers::health))
-        .route(RECONCILE_EVENTS_URL, get(handlers::state_events))
-        .route(RESULTS_SLICE_URL, get(handlers::results_slice))
-        .route("/favicon.ico", get(handlers::favicon))
-        .route("/apple-touch-icon.png", get(handlers::apple_touch_icon))
-        .route(DATASTAR_JS_URL, get(handlers::datastar_js))
-        .route("/", get(handlers::root_page))
-        .route("/{source}", get(handlers::source_page))
-        .route("/{source}/{*entry}", get(handlers::entry_page))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = app_router(state).layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -74,6 +66,23 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .context("web server failed")?;
 
     Ok(())
+}
+
+fn app_router(state: AppState) -> Router {
+    Router::new()
+        .route("/-/health", get(handlers::health))
+        .route(RECONCILE_EVENTS_URL, get(handlers::state_events))
+        .route(RESULTS_SLICE_URL, get(handlers::results_slice))
+        .route("/robots.txt", get(handlers::robots_txt))
+        .route("/sitemap.xml", get(handlers::sitemap_xml))
+        .route("/sitemaps", get(handlers::sitemaps_not_found))
+        .route("/sitemaps/{*path}", get(handlers::sitemaps_not_found))
+        .route("/favicon.ico", get(handlers::favicon))
+        .route("/apple-touch-icon.png", get(handlers::apple_touch_icon))
+        .route(DATASTAR_JS_URL, get(handlers::datastar_js))
+        .route("/", get(handlers::public_page))
+        .route("/{*path}", get(handlers::public_page))
+        .with_state(state)
 }
 
 async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::PublishedGeneration> {
@@ -302,7 +311,6 @@ mod tests {
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use axum::routing::get;
     use nixsearch_config::app::AppConfig;
     use nixsearch_index::search::SearchIndex;
     use nixsearch_index::store::IndexStore;
@@ -318,21 +326,21 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
-    use super::{
-        AppState, RECONCILE_EVENTS_URL, RESULTS_SLICE_URL, ensure_current_generation, handlers,
-    };
+    use crate::app_router;
+
+    use super::{AppState, ensure_current_generation};
 
     fn test_app(config: AppConfig) -> Router {
         let config = Arc::new(config);
         let search = SearchService::open_current(Arc::clone(&config)).unwrap();
 
-        Router::new()
-            .route(RECONCILE_EVENTS_URL, get(handlers::state_events))
-            .route(RESULTS_SLICE_URL, get(handlers::results_slice))
-            .route("/", get(handlers::root_page))
-            .route("/{source}", get(handlers::source_page))
-            .route("/{source}/{*entry}", get(handlers::entry_page))
-            .with_state(AppState { config, search })
+        app_router(AppState { config, search })
+    }
+
+    struct TestResponse {
+        status: StatusCode,
+        content_type: String,
+        body: String,
     }
 
     async fn request_status(app: Router, uri: &str) -> StatusCode {
@@ -343,14 +351,36 @@ mod tests {
     }
 
     async fn request_body(app: Router, uri: &str) -> (StatusCode, String) {
+        let response = request_test_response(app, uri).await;
+
+        (response.status, response.body)
+    }
+
+    async fn request_content_type_and_body(app: Router, uri: &str) -> (StatusCode, String, String) {
+        let response = request_test_response(app, uri).await;
+
+        (response.status, response.content_type, response.body)
+    }
+
+    async fn request_test_response(app: Router, uri: &str) -> TestResponse {
         let response = app
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
+        TestResponse {
+            status,
+            content_type,
+            body: String::from_utf8(bytes.to_vec()).unwrap(),
+        }
     }
 
     fn app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
@@ -512,6 +542,169 @@ mod tests {
         let app = test_app(app_config_with_extra_fixture_source(&index_dir, "extra"));
 
         assert_eq!(request_status(app, "/?q=git").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reserved_routes_take_precedence_over_public_pages() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+
+        let (status, content_type, body) =
+            request_content_type_and_body(app.clone(), "/robots.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/plain"));
+        assert!(body.contains("User-agent: *"));
+        assert!(body.contains("Sitemap: http://localhost/sitemap.xml"));
+
+        let (status, content_type, body) =
+            request_content_type_and_body(app.clone(), "/sitemap.xml").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("application/xml"));
+        assert!(body.contains(r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">"#));
+        assert!(body.contains("<loc>http://localhost/</loc>"));
+
+        let (status, content_type, body) =
+            request_content_type_and_body(app.clone(), "/sitemaps").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(content_type.starts_with("text/plain"));
+        assert_eq!(body, "not found");
+
+        let (status, _, body) =
+            request_content_type_and_body(app.clone(), "/sitemaps/shard.xml").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "not found");
+
+        assert_eq!(
+            request_status(app.clone(), "/favicon.ico").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            request_status(app, "/apple-touch-icon.png").await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn sitemap_escapes_request_derived_origin() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sitemap.xml")
+                    .header("x-forwarded-host", "example.com&x=<tag>")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(body.contains("http://example.com&amp;x=&lt;tag&gt;/"));
+        assert!(!body.contains("http://example.com&x=<tag>/"));
+    }
+
+    #[tokio::test]
+    async fn full_page_invalid_public_query_returns_400() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+
+        assert_eq!(
+            request_status(app.clone(), "/?q=git&q=git").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request_status(app.clone(), "/?kind=app").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request_status(app.clone(), "/fixtures/").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request_status(app, "/?q=git&page=1001").await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_outer_param_guards_return_expected_errors() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+
+        let (status, content_type, body) =
+            request_content_type_and_body(app.clone(), "/-/state/events?url=%2F&url=%2Ffixtures")
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(content_type.starts_with("text/plain"));
+        assert!(body.contains("duplicate url"));
+
+        let (status, content_type, body) = request_content_type_and_body(
+            app.clone(),
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=-1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(content_type.starts_with("application/json"));
+        assert!(body.contains("offset"));
+    }
+
+    #[tokio::test]
+    async fn state_events_accepts_datastar_transport_metadata() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(
+            app,
+            "/-/state/events?url=%2F%3Fq%3Dh&previous_url=%2F&datastar=%7B%7D",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("unknown query parameter"));
+    }
+
+    #[tokio::test]
+    async fn endpoint_inner_public_request_guards_are_endpoint_specific() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+
+        let (status, body) =
+            request_body(app.clone(), "/-/state/events?url=%2F%3Fkind%3Dapp").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Request failed"));
+        assert!(body.contains("kind app"));
+
+        let (status, body) =
+            request_body(app.clone(), "/-/results/slice?url=%2Ffixtures&offset=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("requires q"));
+
+        let (status, body) = request_body(
+            app,
+            "/-/results/slice?url=%2F%3Fq%3Dgit%26kind%3Dservice&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("kind app and service"));
     }
 
     #[tokio::test]

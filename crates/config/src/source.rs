@@ -8,7 +8,7 @@ use nixsearch_core::source_link::SourceLinkConfig;
 
 use crate::error::{ConfigError, Result};
 use crate::producer::{EvalModuleConfig, EvalModuleRefConfig, ProducerConfig};
-use crate::validation::{validate_hex_color, validate_id};
+use crate::validation::{validate_hex_color, validate_id, validate_source_id};
 
 pub(crate) const NIXPKGS_COLOR: &str = "#4ade80";
 pub(crate) const NIXOS_COLOR: &str = "#60a5fa";
@@ -456,7 +456,7 @@ pub struct SourceConfig {
 
 impl SourceConfig {
     pub(crate) fn validate(&self, source_id: &str) -> Result<()> {
-        validate_id("source id", source_id)?;
+        validate_source_id("source id", source_id)?;
 
         if let Some(color) = &self.color {
             validate_hex_color(&format!("sources.{source_id}.color"), color)?;

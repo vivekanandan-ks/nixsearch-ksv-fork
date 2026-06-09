@@ -31,7 +31,7 @@ pub(crate) fn public_uri_for_request(
     headers: &HeaderMap,
     raw_url: &str,
 ) -> std::result::Result<Uri, String> {
-    let uri = public_uri(raw_url)?;
+    let uri = public_uri(raw_url).map_err(|error| error.to_string())?;
 
     if let Some(url_origin) = absolute_url_origin(raw_url) {
         let trusted_origin = origin_for_request(config, headers);
@@ -323,7 +323,7 @@ mod tests {
         let uri = public_uri_for_request(
             &config,
             &headers,
-            "https://search.example.com/fixtures?q=git#ignored",
+            "https://search.example.com/fixtures?q=git",
         )
         .unwrap();
 

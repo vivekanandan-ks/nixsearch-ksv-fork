@@ -685,6 +685,30 @@ fn rejects_invalid_source_ids() {
 }
 
 #[test]
+fn rejects_reserved_source_ids() {
+    for source_id in [
+        "-",
+        ".",
+        "..",
+        "robots.txt",
+        "sitemap.xml",
+        "sitemaps",
+        "favicon.ico",
+        "apple-touch-icon.png",
+    ] {
+        let error = load_toml_error(&format!(
+            r#"
+            [sources."{source_id}"]
+            name = "Reserved"
+            kind = "options"
+            "#
+        ));
+
+        assert_error_contains(&error, "reserved for web routing");
+    }
+}
+
+#[test]
 fn validates_nix_build_options_required_fields_by_deserialization() {
     let error = load_toml_error(
         r#"

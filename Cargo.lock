@@ -2246,6 +2246,7 @@ dependencies = [
  "nixsearch-ops",
  "nixsearch-service",
  "nixsearch-test-support",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",

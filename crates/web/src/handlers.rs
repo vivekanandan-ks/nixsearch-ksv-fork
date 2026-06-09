@@ -1,13 +1,12 @@
 use std::convert::Infallible;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::response::{Html, IntoResponse, Sse, sse::Event};
 use datastar::prelude::{ExecuteScript, PatchElements};
 use futures_util::stream;
-use serde::Deserialize;
 
 use nixsearch_index::search::{EntryLookupResult, SearchResult};
 use nixsearch_service::{
@@ -21,8 +20,8 @@ use crate::origin::{
     PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query, public_uri_for_request,
 };
 use crate::request::{
-    PageQuery, PageRequest, PageState, SourceFilter, decode_path_value, non_empty,
-    normalized_query, page_request_from_public_uri, page_state, parse_document_kind, public_uri,
+    PageRequest, PageState, SourceFilter, non_empty, normalized_query,
+    page_request_from_public_uri, page_state, parse_document_kind, public_uri,
 };
 use crate::scripts::datastar_script;
 use crate::templates::layout::{
@@ -30,19 +29,6 @@ use crate::templates::layout::{
 };
 use crate::templates::{self, modal::EntryData};
 use crate::urls::close_url_for_state;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StateQuery {
-    url: String,
-    previous_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SliceQuery {
-    url: String,
-    offset: usize,
-    limit: Option<usize>,
-}
 
 pub async fn health() -> &'static str {
     "ok"
@@ -69,66 +55,70 @@ pub async fn datastar_js() -> impl IntoResponse {
     )
 }
 
-pub async fn root_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
+pub async fn robots_txt(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let urls = page_urls(state.config.as_ref(), &headers, &uri);
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!(
+            "User-agent: *\nAllow: /\nSitemap: {}/sitemap.xml\n",
+            urls.origin
+        ),
+    )
+        .into_response()
+}
+
+pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let urls = page_urls(state.config.as_ref(), &headers, &uri);
+    let root_url = format!("{}/", urls.origin);
+    let loc = html_escape::encode_text(&root_url);
+
+    (
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>{loc}</loc></url></urlset>"#
+        ),
+    )
+        .into_response()
+}
+
+pub async fn sitemaps_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "not found",
+    )
+        .into_response()
+}
+
+pub async fn public_page(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let request = match page_request_from_public_uri(&uri) {
+        Ok(request) => request,
+        Err(error) => {
+            let page_urls = page_urls(state.config.as_ref(), &headers, &uri);
+            return render_parse_error_response(&state, page_urls, &error.to_string());
+        }
+    };
+
     render_full_page_response(
         &state,
         page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: None,
-            entry: None,
-            query,
-        },
+        request,
     )
 }
 
-pub async fn source_page(
-    State(state): State<AppState>,
-    Path(source): Path<String>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
-    render_full_page_response(
-        &state,
-        page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: Some(source),
-            entry: None,
-            query,
-        },
-    )
-}
+pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let query = match crate::request::state_events_query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                error.to_string(),
+            )
+                .into_response();
+        }
+    };
 
-pub async fn entry_page(
-    State(state): State<AppState>,
-    Path((source, entry)): Path<(String, String)>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
-    let entry = decode_path_value(&entry).unwrap_or(entry);
-
-    render_full_page_response(
-        &state,
-        page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: Some(source),
-            entry: Some(entry),
-            query,
-        },
-    )
-}
-
-pub async fn state_events(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<StateQuery>,
-) -> Response {
     let target_uri = match public_uri_for_request(&state.config, &headers, &query.url) {
         Ok(uri) => uri,
         Err(error) => {
@@ -142,7 +132,7 @@ pub async fn state_events(
     let request = match page_request_from_public_uri(&target_uri) {
         Ok(request) => request,
         Err(error) => {
-            return sse_error_response(&page_urls, &error, Some(&target_public_url));
+            return sse_error_response(&page_urls, &error.to_string(), Some(&target_public_url));
         }
     };
 
@@ -165,11 +155,18 @@ pub async fn state_events(
     let has_entry_detail = page_state.detail.is_some();
 
     let search_result = if navigation.needs_search_result(&page_state) {
+        let offset = match search_offset(&request) {
+            Ok(offset) => offset,
+            Err(error) => {
+                return sse_error_response(&page_urls, &error, Some(&target_public_url));
+            }
+        };
+
         Some(run_search_with_snapshot(
             &state,
             &snapshot,
             &page_state,
-            search_offset(&request),
+            offset,
             DEFAULT_LIMIT,
         ))
     } else {
@@ -312,9 +309,11 @@ fn state_events_navigation(
     }
 }
 
-fn search_offset(request: &PageRequest) -> usize {
-    let page = request.query.page.unwrap_or(1).max(1);
-    (page - 1) * DEFAULT_LIMIT
+fn search_offset(request: &PageRequest) -> std::result::Result<usize, String> {
+    let page = request.query.page.unwrap_or(1);
+    page.checked_sub(1)
+        .and_then(|page_index| page_index.checked_mul(DEFAULT_LIMIT))
+        .ok_or_else(|| "page offset overflow".to_owned())
 }
 
 fn search_error_message(search_result: &Option<ServiceResult<SearchResult>>) -> Option<String> {
@@ -341,8 +340,15 @@ fn results_content_for_search<'a>(
 pub async fn results_slice(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<SliceQuery>,
+    uri: Uri,
 ) -> Response {
+    let query = match crate::request::slice_query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+    };
+
     let uri = match public_uri_for_request(&state.config, &headers, &query.url) {
         Ok(uri) => uri,
         Err(error) => {
@@ -352,19 +358,28 @@ pub async fn results_slice(
     let request = match page_request_from_public_uri(&uri) {
         Ok(request) => request,
         Err(error) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &error);
+            return json_error_response(StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
 
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .clamp(1, DEFAULT_LIMIT * 4);
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
+    if normalized_query(&request.query).is_none() {
+        return json_error_response(StatusCode::BAD_REQUEST, "result slice requires q");
+    }
     let search_result = run_search(&state, &request, query.offset, limit);
 
     match search_result {
         Ok(result) => {
             let count = result.hits.len();
+            let end_offset = match query.offset.checked_add(count) {
+                Some(end_offset) => end_offset,
+                None => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "result slice offset overflow",
+                    );
+                }
+            };
             let rows_html = templates::results::render_rows_only(
                 &request,
                 &result.hits,
@@ -377,7 +392,7 @@ pub async fn results_slice(
                 "offset": query.offset,
                 "limit": limit,
                 "count": count,
-                "endOffset": query.offset + count,
+                "endOffset": end_offset,
             }))
             .into_response()
         }
@@ -403,11 +418,16 @@ fn render_full_page_response(
     let needs_entry = page_state.detail.is_some();
 
     let search_result = if needs_search {
+        let offset = match search_offset(&request) {
+            Ok(offset) => offset,
+            Err(error) => return render_parse_error_response(state, page_urls, &error),
+        };
+
         Some(run_search_with_snapshot(
             state,
             &snapshot,
             &page_state,
-            search_offset(&request),
+            offset,
             DEFAULT_LIMIT,
         ))
     } else {
@@ -479,6 +499,28 @@ fn render_full_page_error_response(
         Html(markup.into_string()),
     )
         .into_response()
+}
+
+fn render_parse_error_response(state: &AppState, page_urls: PageUrls, message: &str) -> Response {
+    let snapshot = state.search.snapshot();
+    let request = PageRequest::default();
+    let page_state = page_state(&state.config, &request);
+
+    let markup = templates::layout::render_full_page(
+        state,
+        &request,
+        &page_state,
+        &page_urls,
+        &snapshot,
+        ResultsContent::Error {
+            title: "Bad request",
+            message,
+        },
+        &EntryData::Empty,
+        None,
+    );
+
+    (StatusCode::BAD_REQUEST, Html(markup.into_string())).into_response()
 }
 
 #[derive(Debug)]

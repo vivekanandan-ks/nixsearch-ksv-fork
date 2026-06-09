@@ -22,6 +22,29 @@ pub(crate) fn validate_id(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+const RESERVED_SOURCE_IDS: &[&str] = &[
+    "-",
+    ".",
+    "..",
+    "robots.txt",
+    "sitemap.xml",
+    "sitemaps",
+    "favicon.ico",
+    "apple-touch-icon.png",
+];
+
+pub(crate) fn validate_source_id(name: &str, value: &str) -> Result<()> {
+    validate_id(name, value)?;
+
+    if RESERVED_SOURCE_IDS.contains(&value) {
+        return Err(ConfigError::Validation(format!(
+            "{name} is reserved for web routing: {value:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_hex_color(name: &str, value: &str) -> Result<()> {
     let Some(hex) = value.strip_prefix('#') else {
         return Err(ConfigError::Validation(format!(
