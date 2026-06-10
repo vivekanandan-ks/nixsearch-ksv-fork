@@ -30,7 +30,7 @@ impl DocumentKind {
         }
     }
 
-    pub fn is_supported_indexed_entry_kind(&self) -> bool {
+    pub fn is_supported_indexed_entry(&self) -> bool {
         matches!(self, Self::Package | Self::Option)
     }
 }
@@ -798,24 +798,10 @@ impl SearchDocument {
         &self.common().kind
     }
 
-    pub fn is_supported_indexed_entry(&self) -> bool {
-        is_supported_indexed_entry_kind(self.kind())
-    }
-
     pub fn is_seo_eligible_entry(&self) -> bool {
-        is_seo_eligible_entry_document(self)
-    }
-}
-
-pub fn is_supported_indexed_entry_kind(kind: &DocumentKind) -> bool {
-    matches!(kind, DocumentKind::Package | DocumentKind::Option)
-}
-
-pub fn is_seo_eligible_entry_document(document: &SearchDocument) -> bool {
-    match document {
-        SearchDocument::Package(_) => true,
-        SearchDocument::Option(option) => {
-            option.internal != Some(true) && option.visible != Some(false)
+        match self {
+            Self::Package(_) => true,
+            Self::Option(option) => option.internal != Some(true) && option.visible != Some(false),
         }
     }
 }
@@ -824,10 +810,7 @@ pub fn is_seo_eligible_entry_document(document: &SearchDocument) -> bool {
 mod tests {
     use crate::ingest::IngestContext;
 
-    use super::{
-        CommonDoc, DocText, DocumentKind, OptionDoc, PackageDoc, SearchDocument,
-        is_seo_eligible_entry_document, is_supported_indexed_entry_kind,
-    };
+    use super::{CommonDoc, DocText, DocumentKind, OptionDoc, PackageDoc, SearchDocument};
 
     #[test]
     fn common_doc_uses_context_identity() {
@@ -1023,10 +1006,10 @@ mod tests {
 
     #[test]
     fn supported_indexed_entry_kinds_are_package_and_option() {
-        assert!(is_supported_indexed_entry_kind(&DocumentKind::Package));
-        assert!(is_supported_indexed_entry_kind(&DocumentKind::Option));
-        assert!(!is_supported_indexed_entry_kind(&DocumentKind::App));
-        assert!(!is_supported_indexed_entry_kind(&DocumentKind::Service));
+        assert!(DocumentKind::Package.is_supported_indexed_entry());
+        assert!(DocumentKind::Option.is_supported_indexed_entry());
+        assert!(!DocumentKind::App.is_supported_indexed_entry());
+        assert!(!DocumentKind::Service.is_supported_indexed_entry());
     }
 
     #[test]
@@ -1039,7 +1022,7 @@ mod tests {
         };
         let document = SearchDocument::Package(PackageDoc::new(&context, "git"));
 
-        assert!(is_seo_eligible_entry_document(&document));
+        assert!(document.is_seo_eligible_entry());
     }
 
     #[test]
@@ -1052,18 +1035,14 @@ mod tests {
         };
 
         let visible = SearchDocument::Option(OptionDoc::new(&context, "services.nginx.enable"));
-        assert!(is_seo_eligible_entry_document(&visible));
+        assert!(visible.is_seo_eligible_entry());
 
         let mut internal = OptionDoc::new(&context, "internal.option");
         internal.internal = Some(true);
-        assert!(!is_seo_eligible_entry_document(&SearchDocument::Option(
-            internal
-        )));
+        assert!(!SearchDocument::Option(internal).is_seo_eligible_entry());
 
         let mut hidden = OptionDoc::new(&context, "hidden.option");
         hidden.visible = Some(false);
-        assert!(!is_seo_eligible_entry_document(&SearchDocument::Option(
-            hidden
-        )));
+        assert!(!SearchDocument::Option(hidden).is_seo_eligible_entry());
     }
 }

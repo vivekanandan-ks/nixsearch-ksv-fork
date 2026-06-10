@@ -79,9 +79,6 @@ pub enum ServiceError {
 
     #[error("entry lookup failed")]
     EntryLookup(#[source] anyhow::Error),
-
-    #[error("entry facts lookup failed")]
-    EntryFacts(#[source] anyhow::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -307,6 +304,32 @@ impl SearchService {
             .map_err(ServiceError::EntryLookup)
     }
 
+    pub fn find_entry_with_facts_with_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        request: EntryRequest,
+        facts: &EntryFacts,
+    ) -> ServiceResult<EntryLookupResult> {
+        let ref_id = self.resolve_entry_ref_for_snapshot(
+            snapshot,
+            &request.source,
+            request.ref_id.as_deref(),
+        )?;
+
+        snapshot
+            .index
+            .find_entry_with_facts(
+                EntryLookup {
+                    source: request.source,
+                    ref_id,
+                    name: request.name,
+                    kind: request.kind,
+                },
+                facts,
+            )
+            .map_err(ServiceError::EntryLookup)
+    }
+
     pub fn entry_facts_current(&self, request: EntryRequest) -> ServiceResult<EntryFacts> {
         let snapshot = self.snapshot();
         self.entry_facts_with_snapshot(&snapshot, request)
@@ -331,7 +354,7 @@ impl SearchService {
                 name: request.name,
                 kind: request.kind,
             })
-            .map_err(ServiceError::EntryFacts)
+            .map_err(ServiceError::EntryLookup)
     }
 
     pub fn search_scopes(

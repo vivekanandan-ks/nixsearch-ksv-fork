@@ -8,9 +8,7 @@ use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
-use nixsearch_core::document::{
-    DocumentKind, SearchDocument, is_seo_eligible_entry_document, is_supported_indexed_entry_kind,
-};
+use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
 use crate::schema::{IndexFields, build_schema};
@@ -78,9 +76,6 @@ pub enum EntryFactsStatus {
 
 #[derive(Debug, Clone)]
 pub struct EntryFacts {
-    pub source: String,
-    pub ref_id: String,
-    pub name: String,
     pub requested_kind: Option<DocumentKind>,
     pub package_count: usize,
     pub option_count: usize,
@@ -113,9 +108,7 @@ impl EntryFacts {
 
     pub fn unique_supported_kind(&self) -> Option<DocumentKind> {
         match self.requested_kind.as_ref() {
-            Some(kind)
-                if is_supported_indexed_entry_kind(kind) && self.count_for_kind(kind) == 1 =>
-            {
+            Some(kind) if kind.is_supported_indexed_entry() && self.count_for_kind(kind) == 1 => {
                 Some(kind.clone())
             }
             Some(_) => None,
@@ -404,14 +397,25 @@ impl SearchIndex {
     pub fn find_entry(&self, lookup: EntryLookup) -> Result<EntryLookupResult> {
         let facts = self.entry_facts(lookup.clone())?;
 
+        self.find_entry_with_facts(lookup, &facts)
+    }
+
+    pub fn find_entry_with_facts(
+        &self,
+        lookup: EntryLookup,
+        facts: &EntryFacts,
+    ) -> Result<EntryLookupResult> {
         match facts.status() {
             EntryFactsStatus::NotFound => Ok(EntryLookupResult::NotFound),
             EntryFactsStatus::Unique => {
                 let representative = facts
                     .representative
+                    .as_ref()
                     .context("unique entry facts did not include representative")?;
 
-                Ok(EntryLookupResult::Found(Box::new(representative.document)))
+                Ok(EntryLookupResult::Found(Box::new(
+                    representative.document.clone(),
+                )))
             }
             EntryFactsStatus::Ambiguous => {
                 let searcher = self.reader.searcher();
@@ -432,9 +436,6 @@ impl SearchIndex {
             self.count_exact_entry_kind(&searcher, &lookup, &DocumentKind::Option)?;
 
         let mut facts = EntryFacts {
-            source: lookup.source.clone(),
-            ref_id: lookup.ref_id.clone(),
-            name: lookup.name.clone(),
             requested_kind: lookup.kind.clone(),
             package_count,
             option_count,
@@ -443,7 +444,7 @@ impl SearchIndex {
 
         if let Some(kind) = facts.unique_supported_kind() {
             let document = self.exact_entry_representative(&searcher, &lookup, &kind)?;
-            let seo_eligible = is_seo_eligible_entry_document(&document);
+            let seo_eligible = document.is_seo_eligible_entry();
 
             facts.representative = Some(EntryRepresentative {
                 document,
@@ -609,7 +610,7 @@ fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query
 
 fn supported_lookup_kinds(lookup: &EntryLookup) -> Vec<DocumentKind> {
     match &lookup.kind {
-        Some(kind) if is_supported_indexed_entry_kind(kind) => vec![kind.clone()],
+        Some(kind) if kind.is_supported_indexed_entry() => vec![kind.clone()],
         Some(_) => Vec::new(),
         None => vec![DocumentKind::Package, DocumentKind::Option],
     }

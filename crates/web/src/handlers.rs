@@ -529,7 +529,6 @@ enum EntryLoadError {
     InvalidKind(String),
     IndexUnavailable,
     Lookup(ServiceError),
-    Facts(ServiceError),
 }
 
 impl EntryLoadError {
@@ -538,7 +537,7 @@ impl EntryLoadError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidKind(_) => StatusCode::BAD_REQUEST,
             Self::IndexUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Lookup(error) | Self::Facts(error) => status_for_service_error(error),
+            Self::Lookup(error) => status_for_service_error(error),
         }
     }
 
@@ -547,7 +546,7 @@ impl EntryLoadError {
             Self::NotFound { entry } => format!("Entry {entry:?} was not found."),
             Self::InvalidKind(error) => error.clone(),
             Self::IndexUnavailable => "search index was not opened".to_owned(),
-            Self::Lookup(error) | Self::Facts(error) => format!("{error:#}"),
+            Self::Lookup(error) => format!("{error:#}"),
         }
     }
 }
@@ -589,8 +588,7 @@ fn entry_data_for_load_error(error: &EntryLoadError) -> EntryData {
         },
         EntryLoadError::InvalidKind(_)
         | EntryLoadError::IndexUnavailable
-        | EntryLoadError::Lookup(_)
-        | EntryLoadError::Facts(_) => EntryData::Error(error.message()),
+        | EntryLoadError::Lookup(_) => EntryData::Error(error.message()),
     }
 }
 
@@ -691,9 +689,7 @@ fn validate_page_request(
 fn status_for_service_error(error: &ServiceError) -> StatusCode {
     match error {
         ServiceError::Resolution(error) => status_for_resolution_error(error),
-        ServiceError::Search(_) | ServiceError::EntryLookup(_) | ServiceError::EntryFacts(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        ServiceError::Search(_) | ServiceError::EntryLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -825,7 +821,7 @@ fn load_entry_data_from_snapshot(
     let facts = state
         .search
         .entry_facts_with_snapshot(snapshot, entry_request.clone())
-        .map_err(EntryLoadError::Facts)?;
+        .map_err(EntryLoadError::Lookup)?;
 
     match facts.status() {
         EntryFactsStatus::NotFound => Err(EntryLoadError::NotFound {
@@ -838,17 +834,19 @@ fn load_entry_data_from_snapshot(
 
             Ok(EntryData::Found(Box::new(representative.document)))
         }
-        EntryFactsStatus::Ambiguous => match state
-            .search
-            .find_entry_with_snapshot(snapshot, entry_request)
-        {
-            Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
-            Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
-            Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
-                entry: detail.entry.clone(),
-            }),
-            Err(error) => Err(EntryLoadError::Lookup(error)),
-        },
+        EntryFactsStatus::Ambiguous => {
+            match state
+                .search
+                .find_entry_with_facts_with_snapshot(snapshot, entry_request, &facts)
+            {
+                Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
+                Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
+                Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
+                    entry: detail.entry.clone(),
+                }),
+                Err(error) => Err(EntryLoadError::Lookup(error)),
+            }
+        }
     }
 }
 
