@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use time::OffsetDateTime;
 
-use crate::manifest::IndexGenerationManifest;
+use crate::manifest::{IndexGenerationManifest, refresh_generation_id, validate_generation_id};
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -228,7 +228,11 @@ impl IndexStore {
     ) -> Result<()> {
         let generation_path = self.validate_generation_path(generation_path)?;
         let path = self.manifest_path(&generation_path);
-        let bytes = serde_json::to_vec_pretty(manifest)
+
+        let mut manifest = manifest.clone();
+        refresh_generation_id(&mut manifest).context("failed to compute index generation id")?;
+
+        let bytes = serde_json::to_vec_pretty(&manifest)
             .context("failed to serialize index generation manifest")?;
 
         let temp_path =
@@ -251,8 +255,13 @@ impl IndexStore {
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read index metadata {}", path.as_str()))?;
 
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed to parse index metadata {}", path.as_str()))
+        let manifest: IndexGenerationManifest = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse index metadata {}", path.as_str()))?;
+
+        validate_generation_id(&manifest)
+            .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
+
+        Ok(manifest)
     }
 
     pub fn current_manifest(&self) -> Result<IndexGenerationManifest> {
@@ -278,7 +287,7 @@ mod tests {
 
     use nixsearch_core::artifact::ArtifactKind;
 
-    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, canonical_generation_id};
     use crate::store::IndexStore;
 
     const SOURCE_FIXTURES: &str = "fixtures";
@@ -545,7 +554,8 @@ mod tests {
                 revision: None,
             }],
             time::OffsetDateTime::UNIX_EPOCH,
-        );
+        )
+        .unwrap();
 
         store.write_manifest(&generation, &manifest).unwrap();
         store.publish(&generation).unwrap();
@@ -579,7 +589,7 @@ mod tests {
         let external_generation =
             Utf8PathBuf::from_path_buf(tempdir.path().join("external-generation")).unwrap();
         fs::create_dir(&external_generation).unwrap();
-        let manifest = IndexGenerationManifest::new(0, Vec::new());
+        let manifest = IndexGenerationManifest::new(0, Vec::new()).unwrap();
 
         let error = store
             .write_manifest(&external_generation, &manifest)
@@ -595,7 +605,7 @@ mod tests {
         let generation = store.create_generation_path().unwrap();
         let nested = generation.join("nested");
         fs::create_dir(&nested).unwrap();
-        let manifest = IndexGenerationManifest::new(0, Vec::new());
+        let manifest = IndexGenerationManifest::new(0, Vec::new()).unwrap();
 
         let error = store.write_manifest(&nested, &manifest).unwrap_err();
 
@@ -610,5 +620,131 @@ mod tests {
         let manifest = store.try_current_manifest().unwrap();
 
         assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn index_store_read_manifest_rejects_missing_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let missing_id = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "document_count": 10,
+            "targets": [
+                {
+                    "source": SOURCE_FIXTURES,
+                    "ref_id": REF_SMALL,
+                    "artifact_kind": "options-json",
+                    "document_count": 10,
+                    "artifact_hash": "abc123"
+                }
+            ]
+        });
+
+        fs::write(
+            store.manifest_path(&generation),
+            serde_json::to_vec_pretty(&missing_id).unwrap(),
+        )
+        .unwrap();
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("missing field `generation_id`"));
+    }
+
+    #[test]
+    fn index_store_write_manifest_stores_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            10,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 10,
+                artifact_hash: Some("abc123".into()),
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        store.write_manifest(&generation, &manifest).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.manifest_path(&generation)).unwrap()).unwrap();
+        let loaded = store.read_manifest(&generation).unwrap();
+        let stored_id = raw["generation_id"].as_str().unwrap();
+
+        assert!(stored_id.starts_with("sha256:"));
+        assert_eq!(stored_id, canonical_generation_id(&loaded).unwrap());
+    }
+
+    #[test]
+    fn index_store_write_manifest_overwrites_stale_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let mut manifest = IndexGenerationManifest::with_generated_at(
+            10,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 10,
+                artifact_hash: Some("abc123".into()),
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        manifest.generation_id = "sha256:wrong".to_owned();
+        let expected = canonical_generation_id(&manifest).unwrap();
+
+        store.write_manifest(&generation, &manifest).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.manifest_path(&generation)).unwrap()).unwrap();
+
+        assert_eq!(raw["generation_id"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn index_store_read_manifest_rejects_mismatched_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let invalid = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "generation_id": "sha256:wrong",
+            "document_count": 10,
+            "targets": [
+                {
+                    "source": SOURCE_FIXTURES,
+                    "ref_id": REF_SMALL,
+                    "artifact_kind": "options-json",
+                    "document_count": 10,
+                    "artifact_hash": "abc123"
+                }
+            ]
+        });
+
+        fs::write(
+            store.manifest_path(&generation),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
 }

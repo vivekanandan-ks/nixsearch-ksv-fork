@@ -47,6 +47,7 @@ pub(super) fn inspect(args: ConfigArgs) -> Result<()> {
     println!("  path = {}", current_path.as_str());
     println!("  schema_version = {}", manifest.schema_version);
     println!("  generated_at = {}", manifest.generated_at);
+    println!("  generation_id = {}", manifest.generation_id);
     println!("  documents = {}", manifest.document_count);
     println!("  targets = {}", manifest.targets.len());
 

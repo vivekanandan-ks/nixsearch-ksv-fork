@@ -7,7 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceConfig;
 use nixsearch_core::document::DocumentKind;
-use nixsearch_index::manifest::IndexGenerationManifest;
+use nixsearch_index::manifest::{IndexGenerationManifest, validate_generation_id};
 use nixsearch_index::search::{
     EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult, SearchScope,
 };
@@ -155,6 +155,9 @@ impl SearchService {
         path: Utf8PathBuf,
         manifest: IndexGenerationManifest,
     ) -> Result<Self> {
+        validate_generation_id(&manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
         let index = open_index(&path)?;
 
         Ok(Self {
@@ -203,6 +206,9 @@ impl SearchService {
         path: Utf8PathBuf,
         manifest: IndexGenerationManifest,
     ) -> Result<ReconcileOutcome> {
+        validate_generation_id(&manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
         {
             let current = self
                 .current
@@ -637,6 +643,7 @@ mod tests {
     use tempfile::tempdir;
 
     use nixsearch_core::document::DocumentKind;
+    use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
     use nixsearch_index::search::EntryLookupResult;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
@@ -1083,7 +1090,27 @@ mod tests {
 
         assert_eq!(snapshot.path, path);
         assert_eq!(snapshot.manifest.document_count, 7);
+        assert_eq!(
+            snapshot.manifest.generation_id,
+            canonical_generation_id(&snapshot.manifest).unwrap()
+        );
+        assert_ne!(snapshot.manifest.generation_id, snapshot.path.as_str());
         assert!(Arc::ptr_eq(&snapshot.index, &service.current_index()));
+    }
+
+    #[test]
+    fn from_generation_rejects_mismatched_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let mut manifest = store.read_manifest(&path).unwrap();
+        manifest.generation_id = "sha256:wrong".to_owned();
+
+        let config = Arc::new(app_config(&index_dir));
+        let error = SearchService::from_generation(config, path, manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
 
     #[test]
@@ -1114,6 +1141,7 @@ mod tests {
         let before = service.current_index();
         let mut manifest = service.snapshot().manifest;
         manifest.document_count += 1;
+        refresh_generation_id(&mut manifest).unwrap();
 
         let outcome = service
             .reconcile_generation(path, manifest.clone())
@@ -1122,6 +1150,22 @@ mod tests {
         assert_eq!(outcome, ReconcileOutcome::Reloaded);
         assert_eq!(service.snapshot().manifest, manifest);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
+    }
+
+    #[test]
+    fn reconcile_generation_rejects_mismatched_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let mut manifest = service.snapshot().manifest;
+        manifest.generation_id = "sha256:wrong".to_owned();
+
+        let error = service.reconcile_generation(path, manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
 
     #[test]

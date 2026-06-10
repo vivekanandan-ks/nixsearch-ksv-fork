@@ -178,7 +178,7 @@ async fn build_and_publish_generation_with_policy(
 
         writer.commit()?;
 
-        let manifest = IndexGenerationManifest::new(total_documents, manifest_targets);
+        let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
         index_store.write_manifest(&generation_path, &manifest)?;
 
         publish_started = true;

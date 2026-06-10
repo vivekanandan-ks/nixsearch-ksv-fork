@@ -140,7 +140,7 @@ pub fn publish_documents_with_manifest_targets(
     writer.commit().unwrap();
 
     let manifest =
-        IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at);
+        IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at).unwrap();
 
     store.write_manifest(&generation, &manifest).unwrap();
     store.publish(&generation).unwrap();

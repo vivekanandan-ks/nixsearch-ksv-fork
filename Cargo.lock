@@ -2110,10 +2110,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "hex",
  "nixsearch-core",
  "nixsearch-test-support",
  "serde",
  "serde_json",
+ "sha2",
  "tantivy",
  "tempfile",
  "time",
