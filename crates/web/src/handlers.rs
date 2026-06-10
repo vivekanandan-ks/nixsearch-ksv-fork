@@ -8,7 +8,7 @@ use axum::response::{Html, IntoResponse, Sse, sse::Event};
 use datastar::prelude::{ExecuteScript, PatchElements};
 use futures_util::stream;
 
-use nixsearch_index::search::{EntryLookupResult, SearchResult};
+use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult, SearchResult};
 use nixsearch_service::{
     EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
     ServiceResult,
@@ -529,6 +529,7 @@ enum EntryLoadError {
     InvalidKind(String),
     IndexUnavailable,
     Lookup(ServiceError),
+    Facts(ServiceError),
 }
 
 impl EntryLoadError {
@@ -537,7 +538,7 @@ impl EntryLoadError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidKind(_) => StatusCode::BAD_REQUEST,
             Self::IndexUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Lookup(error) => status_for_service_error(error),
+            Self::Lookup(error) | Self::Facts(error) => status_for_service_error(error),
         }
     }
 
@@ -546,7 +547,7 @@ impl EntryLoadError {
             Self::NotFound { entry } => format!("Entry {entry:?} was not found."),
             Self::InvalidKind(error) => error.clone(),
             Self::IndexUnavailable => "search index was not opened".to_owned(),
-            Self::Lookup(error) => format!("{error:#}"),
+            Self::Lookup(error) | Self::Facts(error) => format!("{error:#}"),
         }
     }
 }
@@ -588,7 +589,8 @@ fn entry_data_for_load_error(error: &EntryLoadError) -> EntryData {
         },
         EntryLoadError::InvalidKind(_)
         | EntryLoadError::IndexUnavailable
-        | EntryLoadError::Lookup(_) => EntryData::Error(error.message()),
+        | EntryLoadError::Lookup(_)
+        | EntryLoadError::Facts(_) => EntryData::Error(error.message()),
     }
 }
 
@@ -689,7 +691,9 @@ fn validate_page_request(
 fn status_for_service_error(error: &ServiceError) -> StatusCode {
     match error {
         ServiceError::Resolution(error) => status_for_resolution_error(error),
-        ServiceError::Search(_) | ServiceError::EntryLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ServiceError::Search(_) | ServiceError::EntryLookup(_) | ServiceError::EntryFacts(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
 
@@ -811,21 +815,40 @@ fn load_entry_data_from_snapshot(
 
     let kind = parse_document_kind(detail.kind.as_deref()).map_err(EntryLoadError::InvalidKind)?;
 
-    match state.search.find_entry_with_snapshot(
-        snapshot,
-        EntryRequest {
-            source: detail.source.clone(),
-            ref_id: lookup_ref.map(ToOwned::to_owned),
-            name: detail.entry.clone(),
-            kind,
-        },
-    ) {
-        Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
-        Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
+    let entry_request = EntryRequest {
+        source: detail.source.clone(),
+        ref_id: lookup_ref.map(ToOwned::to_owned),
+        name: detail.entry.clone(),
+        kind,
+    };
+
+    let facts = state
+        .search
+        .entry_facts_with_snapshot(snapshot, entry_request.clone())
+        .map_err(EntryLoadError::Facts)?;
+
+    match facts.status() {
+        EntryFactsStatus::NotFound => Err(EntryLoadError::NotFound {
             entry: detail.entry.clone(),
         }),
-        Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
-        Err(error) => Err(EntryLoadError::Lookup(error)),
+        EntryFactsStatus::Unique => {
+            let representative = facts
+                .representative
+                .ok_or(EntryLoadError::IndexUnavailable)?;
+
+            Ok(EntryData::Found(Box::new(representative.document)))
+        }
+        EntryFactsStatus::Ambiguous => match state
+            .search
+            .find_entry_with_snapshot(snapshot, entry_request)
+        {
+            Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
+            Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
+            Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
+                entry: detail.entry.clone(),
+            }),
+            Err(error) => Err(EntryLoadError::Lookup(error)),
+        },
     }
 }
 

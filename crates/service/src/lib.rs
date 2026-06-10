@@ -9,7 +9,8 @@ use nixsearch_config::source::SourceConfig;
 use nixsearch_core::document::DocumentKind;
 use nixsearch_index::manifest::{IndexGenerationManifest, validate_generation_id};
 use nixsearch_index::search::{
-    EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult, SearchScope,
+    EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
+    SearchScope,
 };
 use nixsearch_index::store::IndexStore;
 
@@ -78,6 +79,9 @@ pub enum ServiceError {
 
     #[error("entry lookup failed")]
     EntryLookup(#[source] anyhow::Error),
+
+    #[error("entry facts lookup failed")]
+    EntryFacts(#[source] anyhow::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -301,6 +305,33 @@ impl SearchService {
                 kind: request.kind,
             })
             .map_err(ServiceError::EntryLookup)
+    }
+
+    pub fn entry_facts_current(&self, request: EntryRequest) -> ServiceResult<EntryFacts> {
+        let snapshot = self.snapshot();
+        self.entry_facts_with_snapshot(&snapshot, request)
+    }
+
+    pub fn entry_facts_with_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        request: EntryRequest,
+    ) -> ServiceResult<EntryFacts> {
+        let ref_id = self.resolve_entry_ref_for_snapshot(
+            snapshot,
+            &request.source,
+            request.ref_id.as_deref(),
+        )?;
+
+        snapshot
+            .index
+            .entry_facts(EntryLookup {
+                source: request.source,
+                ref_id,
+                name: request.name,
+                kind: request.kind,
+            })
+            .map_err(ServiceError::EntryFacts)
     }
 
     pub fn search_scopes(
@@ -644,7 +675,7 @@ mod tests {
 
     use nixsearch_core::document::DocumentKind;
     use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
-    use nixsearch_index::search::EntryLookupResult;
+    use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult};
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         options_target, publish_canonical_index, publish_canonical_index_with_generated_at,
@@ -729,6 +760,30 @@ mod tests {
             .unwrap();
 
         assert!(matches!(result, EntryLookupResult::Found(_)));
+    }
+
+    #[test]
+    fn entry_facts_current_resolves_unique_entry() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let facts = service
+            .entry_facts_current(EntryRequest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: Some(REF_SMALL.to_owned()),
+                name: "programs.git.enable".to_owned(),
+                kind: Some(DocumentKind::Option),
+            })
+            .unwrap();
+
+        assert_eq!(facts.status(), EntryFactsStatus::Unique);
+        assert_eq!(facts.option_count, 1);
+        assert_eq!(facts.package_count, 0);
+        assert_eq!(facts.seo_eligible(), Some(true));
     }
 
     #[test]

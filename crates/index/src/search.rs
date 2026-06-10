@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use tantivy::collector::{Count, TopDocs};
-use tantivy::schema::{TantivyDocument, Value as _};
-use tantivy::{DocAddress, Index, IndexReader, Searcher};
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::schema::{IndexRecordOption, TantivyDocument, Value as _};
+use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{
+    DocumentKind, SearchDocument, is_seo_eligible_entry_document, is_supported_indexed_entry_kind,
+};
 
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
 use crate::schema::{IndexFields, build_schema};
@@ -58,6 +61,77 @@ pub enum EntryLookupResult {
     Found(Box<SearchDocument>),
     NotFound,
     Ambiguous(Vec<SearchDocument>),
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryRepresentative {
+    pub document: SearchDocument,
+    pub seo_eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryFactsStatus {
+    NotFound,
+    Unique,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryFacts {
+    pub source: String,
+    pub ref_id: String,
+    pub name: String,
+    pub requested_kind: Option<DocumentKind>,
+    pub package_count: usize,
+    pub option_count: usize,
+    pub representative: Option<EntryRepresentative>,
+}
+
+impl EntryFacts {
+    pub fn count_for_kind(&self, kind: &DocumentKind) -> usize {
+        match kind {
+            DocumentKind::Package => self.package_count,
+            DocumentKind::Option => self.option_count,
+            DocumentKind::App | DocumentKind::Service => 0,
+        }
+    }
+
+    pub fn supported_count(&self) -> usize {
+        match &self.requested_kind {
+            Some(kind) => self.count_for_kind(kind),
+            None => self.package_count + self.option_count,
+        }
+    }
+
+    pub fn status(&self) -> EntryFactsStatus {
+        match self.supported_count() {
+            0 => EntryFactsStatus::NotFound,
+            1 => EntryFactsStatus::Unique,
+            _ => EntryFactsStatus::Ambiguous,
+        }
+    }
+
+    pub fn unique_supported_kind(&self) -> Option<DocumentKind> {
+        match self.requested_kind.as_ref() {
+            Some(kind)
+                if is_supported_indexed_entry_kind(kind) && self.count_for_kind(kind) == 1 =>
+            {
+                Some(kind.clone())
+            }
+            Some(_) => None,
+            None if self.package_count == 1 && self.option_count == 0 => {
+                Some(DocumentKind::Package)
+            }
+            None if self.option_count == 1 && self.package_count == 0 => Some(DocumentKind::Option),
+            None => None,
+        }
+    }
+
+    pub fn seo_eligible(&self) -> Option<bool> {
+        self.representative
+            .as_ref()
+            .map(|representative| representative.seo_eligible)
+    }
 }
 
 impl SearchIndex {
@@ -328,59 +402,179 @@ impl SearchIndex {
     }
 
     pub fn find_entry(&self, lookup: EntryLookup) -> Result<EntryLookupResult> {
+        let facts = self.entry_facts(lookup.clone())?;
+
+        match facts.status() {
+            EntryFactsStatus::NotFound => Ok(EntryLookupResult::NotFound),
+            EntryFactsStatus::Unique => {
+                let representative = facts
+                    .representative
+                    .context("unique entry facts did not include representative")?;
+
+                Ok(EntryLookupResult::Found(Box::new(representative.document)))
+            }
+            EntryFactsStatus::Ambiguous => {
+                let searcher = self.reader.searcher();
+                let documents =
+                    self.ambiguous_entry_documents(&searcher, &lookup, facts.supported_count())?;
+
+                Ok(EntryLookupResult::Ambiguous(documents))
+            }
+        }
+    }
+
+    pub fn entry_facts(&self, lookup: EntryLookup) -> Result<EntryFacts> {
         let searcher = self.reader.searcher();
 
-        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.source, &lookup.source),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.ref_id, &lookup.ref_id),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.name_exact, &lookup.name),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-        ];
+        let package_count =
+            self.count_exact_entry_kind(&searcher, &lookup, &DocumentKind::Package)?;
+        let option_count =
+            self.count_exact_entry_kind(&searcher, &lookup, &DocumentKind::Option)?;
 
-        if let Some(kind) = lookup.kind {
-            clauses.push((
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.kind, kind.as_str()),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ));
+        let mut facts = EntryFacts {
+            source: lookup.source.clone(),
+            ref_id: lookup.ref_id.clone(),
+            name: lookup.name.clone(),
+            requested_kind: lookup.kind.clone(),
+            package_count,
+            option_count,
+            representative: None,
+        };
+
+        if let Some(kind) = facts.unique_supported_kind() {
+            let document = self.exact_entry_representative(&searcher, &lookup, &kind)?;
+            let seo_eligible = is_seo_eligible_entry_document(&document);
+
+            facts.representative = Some(EntryRepresentative {
+                document,
+                seo_eligible,
+            });
         }
 
-        let query = tantivy::query::BooleanQuery::new(clauses);
+        Ok(facts)
+    }
+
+    fn count_exact_entry_kind(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+        kind: &DocumentKind,
+    ) -> Result<usize> {
+        let query = self.exact_entry_kind_query(lookup, kind);
+
+        searcher
+            .search(&*query, &Count)
+            .with_context(|| format!("failed to count exact {} entry facts", kind.as_str()))
+    }
+
+    fn exact_entry_representative(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+        kind: &DocumentKind,
+    ) -> Result<SearchDocument> {
+        let query = self.exact_entry_kind_query(lookup, kind);
+        let top_docs = searcher
+            .search(&*query, &TopDocs::with_limit(1).order_by_score())
+            .with_context(|| {
+                format!(
+                    "failed to retrieve unique exact {} entry representative",
+                    kind.as_str()
+                )
+            })?;
+
+        let Some((_, address)) = top_docs.into_iter().next() else {
+            bail!(
+                "exact {} entry count was one but representative was not found",
+                kind.as_str()
+            );
+        };
+
+        let document = self.document_at_with_searcher(searcher, address)?;
+
+        if !document_deserialized_as_kind(&document, kind) {
+            bail!(
+                "unique exact {} entry representative deserialized as {}",
+                kind.as_str(),
+                document_variant_name(&document)
+            );
+        }
+
+        Ok(document)
+    }
+
+    fn ambiguous_entry_documents(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+        count: usize,
+    ) -> Result<Vec<SearchDocument>> {
+        let Some(query) = self.supported_entry_query(lookup) else {
+            return Ok(Vec::new());
+        };
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(10).order_by_score())
-            .context("entry lookup failed")?;
+            .search(&*query, &TopDocs::with_limit(count).order_by_score())
+            .context("failed to retrieve ambiguous entry documents")?;
 
         let mut documents = Vec::with_capacity(top_docs.len());
 
         for (_, address) in top_docs {
-            documents.push(self.document_at(address)?);
+            documents.push(self.document_at_with_searcher(searcher, address)?);
         }
 
-        match documents.len() {
-            0 => Ok(EntryLookupResult::NotFound),
-            1 => Ok(EntryLookupResult::Found(Box::new(documents.remove(0)))),
-            _ => Ok(EntryLookupResult::Ambiguous(documents)),
+        Ok(documents)
+    }
+
+    fn supported_entry_query(&self, lookup: &EntryLookup) -> Option<Box<dyn Query>> {
+        let kinds = supported_lookup_kinds(lookup);
+
+        if kinds.is_empty() {
+            return None;
         }
+
+        let mut clauses = self.exact_entry_identity_clauses(lookup);
+
+        if kinds.len() == 1 {
+            clauses.push((Occur::Must, self.entry_kind_query(&kinds[0])));
+        } else {
+            let kind_clauses = kinds
+                .iter()
+                .map(|kind| (Occur::Should, self.entry_kind_query(kind)))
+                .collect::<Vec<_>>();
+
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(kind_clauses))));
+        }
+
+        Some(Box::new(BooleanQuery::new(clauses)))
+    }
+
+    fn exact_entry_kind_query(&self, lookup: &EntryLookup, kind: &DocumentKind) -> Box<dyn Query> {
+        let mut clauses = self.exact_entry_identity_clauses(lookup);
+        clauses.push((Occur::Must, self.entry_kind_query(kind)));
+
+        Box::new(BooleanQuery::new(clauses))
+    }
+
+    fn exact_entry_identity_clauses(&self, lookup: &EntryLookup) -> Vec<(Occur, Box<dyn Query>)> {
+        vec![
+            (
+                Occur::Must,
+                exact_term_query(self.fields.source, &lookup.source),
+            ),
+            (
+                Occur::Must,
+                exact_term_query(self.fields.ref_id, &lookup.ref_id),
+            ),
+            (
+                Occur::Must,
+                exact_term_query(self.fields.name_exact, &lookup.name),
+            ),
+        ]
+    }
+
+    fn entry_kind_query(&self, kind: &DocumentKind) -> Box<dyn Query> {
+        exact_term_query(self.fields.kind, kind.as_str())
     }
 
     fn document_at(&self, address: DocAddress) -> Result<SearchDocument> {
@@ -403,5 +597,81 @@ impl SearchIndex {
             .context("entry document did not contain stored_json")?;
 
         serde_json::from_str(stored_json).context("failed to deserialize entry document")
+    }
+}
+
+fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query> {
+    Box::new(TermQuery::new(
+        Term::from_field_text(field, value),
+        IndexRecordOption::Basic,
+    ))
+}
+
+fn supported_lookup_kinds(lookup: &EntryLookup) -> Vec<DocumentKind> {
+    match &lookup.kind {
+        Some(kind) if is_supported_indexed_entry_kind(kind) => vec![kind.clone()],
+        Some(_) => Vec::new(),
+        None => vec![DocumentKind::Package, DocumentKind::Option],
+    }
+}
+
+fn document_deserialized_as_kind(document: &SearchDocument, kind: &DocumentKind) -> bool {
+    matches!(
+        (document, kind),
+        (SearchDocument::Package(_), DocumentKind::Package)
+            | (SearchDocument::Option(_), DocumentKind::Option)
+    ) && document.kind() == kind
+}
+
+fn document_variant_name(document: &SearchDocument) -> &'static str {
+    match document {
+        SearchDocument::Package(_) => "package",
+        SearchDocument::Option(_) => "option",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tantivy::doc;
+    use tempfile::tempdir;
+
+    use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
+
+    use super::*;
+
+    #[test]
+    fn corrupt_unique_entry_representative_is_an_error() {
+        let tempdir = tempdir().unwrap();
+        let index_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+            .expect("test path must be valid UTF-8");
+
+        let index = SearchIndex::create_or_replace(&index_path).unwrap();
+        let mut writer = index.index.writer(crate::WRITER_MEMORY_BYTES).unwrap();
+
+        writer
+            .add_document(doc!(
+                index.fields.id => "fixtures/small/option/corrupt.entry",
+                index.fields.source => SOURCE_FIXTURES,
+                index.fields.ref_id => REF_SMALL,
+                index.fields.kind => "option",
+                index.fields.name_exact => "corrupt.entry",
+                index.fields.name_text => "corrupt.entry",
+                index.fields.stored_json => "{not valid json",
+            ))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(&index_path).unwrap();
+        let error = index
+            .entry_facts(EntryLookup {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                name: "corrupt.entry".to_owned(),
+                kind: Some(DocumentKind::Option),
+            })
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to deserialize entry document"));
     }
 }

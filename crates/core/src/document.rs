@@ -29,6 +29,10 @@ impl DocumentKind {
             Self::Service => "service",
         }
     }
+
+    pub fn is_supported_indexed_entry_kind(&self) -> bool {
+        matches!(self, Self::Package | Self::Option)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -793,13 +797,37 @@ impl SearchDocument {
     pub fn kind(&self) -> &DocumentKind {
         &self.common().kind
     }
+
+    pub fn is_supported_indexed_entry(&self) -> bool {
+        is_supported_indexed_entry_kind(self.kind())
+    }
+
+    pub fn is_seo_eligible_entry(&self) -> bool {
+        is_seo_eligible_entry_document(self)
+    }
+}
+
+pub fn is_supported_indexed_entry_kind(kind: &DocumentKind) -> bool {
+    matches!(kind, DocumentKind::Package | DocumentKind::Option)
+}
+
+pub fn is_seo_eligible_entry_document(document: &SearchDocument) -> bool {
+    match document {
+        SearchDocument::Package(_) => true,
+        SearchDocument::Option(option) => {
+            option.internal != Some(true) && option.visible != Some(false)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::ingest::IngestContext;
 
-    use super::{CommonDoc, DocText, DocumentKind, PackageDoc};
+    use super::{
+        CommonDoc, DocText, DocumentKind, OptionDoc, PackageDoc, SearchDocument,
+        is_seo_eligible_entry_document, is_supported_indexed_entry_kind,
+    };
 
     #[test]
     fn common_doc_uses_context_identity() {
@@ -991,5 +1019,51 @@ mod tests {
         let value = DocText::Plain("Already plain.".to_owned());
 
         assert_eq!(value.plain_text(), "Already plain.");
+    }
+
+    #[test]
+    fn supported_indexed_entry_kinds_are_package_and_option() {
+        assert!(is_supported_indexed_entry_kind(&DocumentKind::Package));
+        assert!(is_supported_indexed_entry_kind(&DocumentKind::Option));
+        assert!(!is_supported_indexed_entry_kind(&DocumentKind::App));
+        assert!(!is_supported_indexed_entry_kind(&DocumentKind::Service));
+    }
+
+    #[test]
+    fn package_document_is_seo_eligible() {
+        let context = IngestContext {
+            source: "nixpkgs".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+        let document = SearchDocument::Package(PackageDoc::new(&context, "git"));
+
+        assert!(is_seo_eligible_entry_document(&document));
+    }
+
+    #[test]
+    fn option_document_visibility_controls_seo_eligibility() {
+        let context = IngestContext {
+            source: "nixos".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+
+        let visible = SearchDocument::Option(OptionDoc::new(&context, "services.nginx.enable"));
+        assert!(is_seo_eligible_entry_document(&visible));
+
+        let mut internal = OptionDoc::new(&context, "internal.option");
+        internal.internal = Some(true);
+        assert!(!is_seo_eligible_entry_document(&SearchDocument::Option(
+            internal
+        )));
+
+        let mut hidden = OptionDoc::new(&context, "hidden.option");
+        hidden.visible = Some(false);
+        assert!(!is_seo_eligible_entry_document(&SearchDocument::Option(
+            hidden
+        )));
     }
 }

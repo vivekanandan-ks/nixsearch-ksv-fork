@@ -3,7 +3,8 @@ use tempfile::tempdir;
 
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::search::{
-    EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions, SearchScope,
+    EntryFactsStatus, EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions,
+    SearchScope,
 };
 
 use nixsearch_test_support::{
@@ -957,4 +958,138 @@ fn find_entry_returns_ambiguous_without_kind() {
     assert_eq!(documents.len(), 2);
     assert!(kinds.contains(&&DocumentKind::Option));
     assert!(kinds.contains(&&DocumentKind::Package));
+}
+
+#[test]
+fn entry_facts_count_more_than_ten_exactly() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = (0..11)
+        .map(|_| option_doc_for(&context, "duplicate.entry", "Duplicate option."))
+        .collect();
+
+    let (_tempdir, index) = build_index(docs);
+
+    let facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            name: "duplicate.entry".to_owned(),
+            kind: Some(DocumentKind::Option),
+        })
+        .unwrap();
+
+    assert_eq!(facts.option_count, 11);
+    assert_eq!(facts.package_count, 0);
+    assert_eq!(facts.supported_count(), 11);
+    assert_eq!(facts.status(), EntryFactsStatus::Ambiguous);
+    assert!(facts.representative.is_none());
+}
+
+#[test]
+fn find_entry_ambiguity_uses_exact_counts_not_top_docs_limit() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = (0..11)
+        .map(|_| option_doc_for(&context, "duplicate.entry", "Duplicate option."))
+        .collect();
+
+    let (_tempdir, index) = build_index(docs);
+
+    let result = index
+        .find_entry(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            name: "duplicate.entry".to_owned(),
+            kind: Some(DocumentKind::Option),
+        })
+        .unwrap();
+
+    let EntryLookupResult::Ambiguous(documents) = result else {
+        panic!("expected ambiguous entry lookup");
+    };
+
+    assert_eq!(documents.len(), 11);
+}
+
+#[test]
+fn entry_facts_exposes_unique_package_and_option_representatives() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![
+        option_doc_for(&context, "programs.git.enable", "Git option."),
+        package_doc_for(&context, "git", "Git package."),
+    ]);
+
+    let option_facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            name: "programs.git.enable".to_owned(),
+            kind: Some(DocumentKind::Option),
+        })
+        .unwrap();
+
+    assert_eq!(option_facts.status(), EntryFactsStatus::Unique);
+    assert_eq!(option_facts.seo_eligible(), Some(true));
+    assert_eq!(
+        option_facts
+            .representative
+            .as_ref()
+            .map(|representative| representative.document.name()),
+        Some("programs.git.enable")
+    );
+
+    let package_facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            name: "git".to_owned(),
+            kind: Some(DocumentKind::Package),
+        })
+        .unwrap();
+
+    assert_eq!(package_facts.status(), EntryFactsStatus::Unique);
+    assert_eq!(package_facts.seo_eligible(), Some(true));
+    assert_eq!(
+        package_facts
+            .representative
+            .as_ref()
+            .map(|representative| representative.document.name()),
+        Some("git")
+    );
+}
+
+#[test]
+fn internal_and_hidden_options_are_not_seo_eligible() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+    let mut internal = match option_doc_for(&context, "internal.entry", "Internal option.") {
+        SearchDocument::Option(option) => option,
+        SearchDocument::Package(_) => unreachable!(),
+    };
+    internal.internal = Some(true);
+
+    let mut hidden = match option_doc_for(&context, "hidden.entry", "Hidden option.") {
+        SearchDocument::Option(option) => option,
+        SearchDocument::Package(_) => unreachable!(),
+    };
+    hidden.visible = Some(false);
+
+    let (_tempdir, index) = build_index(vec![
+        SearchDocument::Option(internal),
+        SearchDocument::Option(hidden),
+    ]);
+
+    for name in ["internal.entry", "hidden.entry"] {
+        let facts = index
+            .entry_facts(EntryLookup {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                name: name.to_owned(),
+                kind: Some(DocumentKind::Option),
+            })
+            .unwrap();
+
+        assert_eq!(facts.status(), EntryFactsStatus::Unique);
+        assert_eq!(facts.seo_eligible(), Some(false));
+        assert!(facts.representative.is_some());
+    }
 }

@@ -6,6 +6,7 @@ use serde::Serialize;
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::server::{AnalyticsScriptConfig, ScriptAttributeValue};
 use nixsearch_config::source::SourceKind;
+use nixsearch_core::document::is_seo_eligible_entry_document;
 use nixsearch_index::search::SearchResult;
 use nixsearch_service::ServedGenerationSnapshot;
 
@@ -332,6 +333,10 @@ fn page_index_metadata(
     match entry {
         EntryData::Found(document) => {
             let common = document.common();
+
+            if !is_seo_eligible_entry_document(document) {
+                return noindex_metadata();
+            }
 
             if state.search.is_indexable_ref_in_snapshot(
                 served_generation,

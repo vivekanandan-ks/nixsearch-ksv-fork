@@ -312,16 +312,17 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use nixsearch_config::app::AppConfig;
+    use nixsearch_core::document::SearchDocument;
     use nixsearch_index::search::SearchIndex;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
-        assert_canonical_options_manifest_targets, publish_canonical_options_index,
-        publish_fixture_options_index_for_refs,
+        assert_canonical_options_manifest_targets, options_target, publish_canonical_options_index,
+        publish_documents_with_manifest_targets, publish_fixture_options_index_for_refs,
     };
     use nixsearch_service::SearchService;
     use nixsearch_test_support::{
         REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
-        multi_ref_app_config, utf8_path_buf,
+        ingest_context_for, multi_ref_app_config, option_doc_for, utf8_path_buf,
     };
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -1043,6 +1044,47 @@ mod tests {
             "https://search.example.com/fixtures/programs.git.enable",
         );
         assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn internal_and_hidden_entry_pages_render_but_emit_noindex() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        let mut internal = match option_doc_for(&context, "internal.entry", "Internal option.") {
+            SearchDocument::Option(option) => option,
+            SearchDocument::Package(_) => unreachable!(),
+        };
+        internal.internal = Some(true);
+
+        let mut hidden = match option_doc_for(&context, "hidden.entry", "Hidden option.") {
+            SearchDocument::Option(option) => option,
+            SearchDocument::Package(_) => unreachable!(),
+        };
+        hidden.visible = Some(false);
+
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                SearchDocument::Option(internal),
+                SearchDocument::Option(hidden),
+            ],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
+        );
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        for entry in ["internal.entry", "hidden.entry"] {
+            let (status, body) = request_body(app.clone(), &format!("/fixtures/{entry}")).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("entry-modal"));
+            assert!(body.contains(entry));
+            assert_no_canonical(&body);
+            assert_has_robots(&body);
+        }
     }
 
     #[tokio::test]
