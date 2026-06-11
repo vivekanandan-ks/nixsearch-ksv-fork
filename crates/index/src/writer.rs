@@ -18,14 +18,6 @@ impl SearchIndexWriter {
         document: &SearchDocument,
         annotation: &SearchHitAnnotation,
     ) -> Result<()> {
-        if document.kind() != &annotation.current_hit_kind {
-            anyhow::bail!(
-                "document kind {} did not match annotation kind {}",
-                document.kind().as_str(),
-                annotation.current_hit_kind.as_str()
-            );
-        }
-
         match document {
             SearchDocument::Option(option) => self.add_option(option, annotation),
             SearchDocument::Package(package) => self.add_package(package, annotation),

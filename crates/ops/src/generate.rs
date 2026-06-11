@@ -1,14 +1,11 @@
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::producer::ProducerConfig;
-use nixsearch_core::document::SearchDocument;
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
@@ -19,6 +16,7 @@ use nixsearch_store::{ArtifactStore, StoreError};
 
 use crate::consume::consume_target;
 use crate::produce::{artifact_store_from_config, produce_target, produced_from_existing_artifact};
+use crate::spool::DocumentSpool;
 use crate::targets::{TargetKey, TargetRef, all_targets, default_search_target_keys};
 
 #[derive(Debug, Clone)]
@@ -368,92 +366,4 @@ pub async fn regenerate_all(config: &AppConfig) -> Result<Utf8PathBuf> {
 
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
     build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await
-}
-
-struct DocumentSpool {
-    _tempdir: tempfile::TempDir,
-    path: Utf8PathBuf,
-}
-
-impl DocumentSpool {
-    fn create() -> Result<Self> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("nixsearch-generation-spool-")
-            .tempdir()
-            .context("failed to create generation document spool")?;
-        let path = Utf8PathBuf::from_path_buf(tempdir.path().join("documents.jsonl"))
-            .map_err(|path| anyhow::anyhow!("spool path is not UTF-8: {}", path.display()))?;
-
-        Ok(Self {
-            _tempdir: tempdir,
-            path,
-        })
-    }
-
-    fn writer(&self) -> Result<DocumentSpoolWriter> {
-        let file = File::create(&self.path)
-            .with_context(|| format!("failed to create document spool {}", self.path))?;
-
-        Ok(DocumentSpoolWriter {
-            writer: BufWriter::new(file),
-        })
-    }
-
-    fn reader(&self) -> Result<DocumentSpoolReader> {
-        let file = File::open(&self.path)
-            .with_context(|| format!("failed to open document spool {}", self.path))?;
-
-        Ok(DocumentSpoolReader {
-            reader: BufReader::new(file),
-            line_number: 0,
-        })
-    }
-}
-
-struct DocumentSpoolWriter {
-    writer: BufWriter<File>,
-}
-
-impl DocumentSpoolWriter {
-    fn push(&mut self, document: &SearchDocument) -> Result<()> {
-        serde_json::to_writer(&mut self.writer, document)
-            .context("failed to serialize document into spool")?;
-        self.writer
-            .write_all(b"\n")
-            .context("failed to write document spool newline")?;
-        Ok(())
-    }
-
-    fn finish(mut self) -> Result<()> {
-        self.writer
-            .flush()
-            .context("failed to flush document spool")
-    }
-}
-
-struct DocumentSpoolReader {
-    reader: BufReader<File>,
-    line_number: usize,
-}
-
-impl Iterator for DocumentSpoolReader {
-    type Item = Result<SearchDocument>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
-
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None,
-            Ok(_) => {
-                self.line_number += 1;
-                Some(serde_json::from_str(line.trim_end()).with_context(|| {
-                    format!(
-                        "failed to deserialize document spool line {}",
-                        self.line_number
-                    )
-                }))
-            }
-            Err(error) => Some(Err(error).context("failed to read document spool")),
-        }
-    }
 }

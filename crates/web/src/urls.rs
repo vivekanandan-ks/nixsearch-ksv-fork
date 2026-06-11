@@ -46,7 +46,7 @@ pub fn canonical_source_path(config: &AppConfig, source: &str, ref_id: &str) -> 
 }
 
 #[cfg(test)]
-pub fn canonical_entry_path(config: &AppConfig, source: &str, entry: &str, ref_id: &str) -> String {
+fn canonical_entry_path(config: &AppConfig, source: &str, entry: &str, ref_id: &str) -> String {
     entry_url_for(
         source,
         entry,
@@ -66,7 +66,7 @@ pub fn paginated_search_url(source: Option<&str>, query: &PageQuery, page: usize
     search_url_for(source, &paged_query)
 }
 
-pub fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuery) -> String {
+fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuery) -> String {
     let path = format!("{}/{}", source_path(source), encode_path(entry));
     let page_str = query.page.filter(|&p| p > 1).map(|p| p.to_string());
 
@@ -198,7 +198,7 @@ pub fn entry_url_for_hit(
         config,
         state,
         &hit.document,
-        entry_url_kind(&hit.annotation),
+        entry_url_kind(&hit.document, &hit.annotation),
         page,
     )
 }
@@ -213,41 +213,44 @@ pub fn entry_url_for_annotated_document(
         config,
         state,
         &entry.document,
-        entry_url_kind(&entry.annotation),
+        entry_url_kind(&entry.document, &entry.annotation),
         page,
     )
 }
 
-pub fn canonical_entry_path_for_annotation(
+pub fn canonical_entry_path_for_document(
     config: &AppConfig,
-    source: &str,
-    entry: &str,
-    ref_id: &str,
+    document: &SearchDocument,
     annotation: &SearchHitAnnotation,
 ) -> String {
+    let common = document.common();
+
     entry_url_for(
-        source,
-        entry,
-        entry_url_kind(annotation),
+        &common.source,
+        &common.name,
+        entry_url_kind(document, annotation),
         &PageQuery {
-            ref_id: ref_id_for_link(config, source, ref_id),
+            ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
             ..PageQuery::default()
         },
     )
 }
 
-fn entry_url_kind(annotation: &SearchHitAnnotation) -> Option<&'static str> {
+fn entry_url_kind(
+    document: &SearchDocument,
+    annotation: &SearchHitAnnotation,
+) -> Option<&'static str> {
     if !annotation.ambiguous_entry_url {
         return None;
     }
 
-    match annotation.current_hit_kind {
-        DocumentKind::Package | DocumentKind::Option => Some(annotation.current_hit_kind.as_str()),
+    match document.kind() {
+        DocumentKind::Package | DocumentKind::Option => Some(document.kind().as_str()),
         DocumentKind::App | DocumentKind::Service => None,
     }
 }
 
-pub fn entry_url_for_document(
+fn entry_url_for_document(
     config: &AppConfig,
     state: &PageState,
     document: &SearchDocument,
@@ -418,7 +421,6 @@ mod tests {
     fn hit(document: SearchDocument, ambiguous_entry_url: bool) -> SearchHit {
         SearchHit {
             annotation: SearchHitAnnotation {
-                current_hit_kind: document.kind().clone(),
                 ambiguous_entry_url,
                 unique_within_kind: true,
             },
@@ -551,25 +553,33 @@ mod tests {
     }
 
     #[test]
-    fn canonical_entry_path_for_annotation_includes_only_required_kind() {
+    fn canonical_entry_path_for_document_includes_only_required_kind() {
         let config = app_config("./data/indexes");
+        let clean_document = package_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+            "ripgrep",
+            "Ripgrep package.",
+        );
+        let ambiguous_document = package_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+            "git",
+            "Git package.",
+        );
         let clean = SearchHitAnnotation {
-            current_hit_kind: DocumentKind::Package,
             ambiguous_entry_url: false,
             unique_within_kind: true,
         };
         let ambiguous = SearchHitAnnotation {
-            current_hit_kind: DocumentKind::Package,
             ambiguous_entry_url: true,
             unique_within_kind: true,
         };
 
         assert_eq!(
-            canonical_entry_path_for_annotation(&config, "fixtures", "ripgrep", "small", &clean),
+            canonical_entry_path_for_document(&config, &clean_document, &clean),
             "/fixtures/ripgrep"
         );
         assert_eq!(
-            canonical_entry_path_for_annotation(&config, "fixtures", "git", "small", &ambiguous),
+            canonical_entry_path_for_document(&config, &ambiguous_document, &ambiguous),
             "/fixtures/git?kind=package"
         );
     }

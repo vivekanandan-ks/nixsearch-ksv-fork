@@ -17,7 +17,7 @@ use crate::origin::PageUrls;
 use crate::request::{PageRequest, PageState, SourceFilter, non_empty, normalized_query};
 use crate::scripts::navigation_script;
 use crate::urls::{
-    canonical_entry_path_for_annotation, canonical_home_path, canonical_source_path, source_path,
+    canonical_entry_path_for_document, canonical_home_path, canonical_source_path, source_path,
 };
 
 use super::footer;
@@ -350,13 +350,7 @@ fn page_index_metadata(
                 &common.ref_id,
             ) {
                 return canonical_metadata(page_urls.absolute_url(
-                    &canonical_entry_path_for_annotation(
-                        &state.config,
-                        &common.source,
-                        &common.name,
-                        &common.ref_id,
-                        &entry.annotation,
-                    ),
+                    &canonical_entry_path_for_document(&state.config, document, &entry.annotation),
                 ));
             }
 
@@ -664,7 +658,6 @@ mod tests {
     fn found_entry(document: SearchDocument) -> EntryData {
         EntryData::Found(crate::entry::AnnotatedEntryDocument {
             annotation: SearchHitAnnotation {
-                current_hit_kind: document.kind().clone(),
                 ambiguous_entry_url: false,
                 unique_within_kind: true,
             },

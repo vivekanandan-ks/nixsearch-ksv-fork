@@ -1,10 +1,22 @@
 use nixsearch_core::document::SearchDocument;
 use nixsearch_index::annotation::SearchHitAnnotation;
+use nixsearch_index::search::EntryFacts;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AnnotatedEntryDocument {
     pub document: Box<SearchDocument>,
     pub annotation: SearchHitAnnotation,
+}
+
+impl AnnotatedEntryDocument {
+    pub(crate) fn from_facts(document: SearchDocument, facts: &EntryFacts) -> Self {
+        let annotation = facts.annotation_for_document(&document);
+
+        Self {
+            document: Box::new(document),
+            annotation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

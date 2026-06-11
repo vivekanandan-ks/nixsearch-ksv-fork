@@ -399,6 +399,55 @@ mod tests {
         config
     }
 
+    fn publish_ambiguous_package_option_index(index_dir: &camino::Utf8Path) {
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "git", "Git option."),
+                package_doc_for(&context, "git", "Git package."),
+            ],
+            vec![
+                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
+                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 1),
+            ],
+        );
+    }
+
+    fn publish_ambiguous_package_option_search_index(index_dir: &camino::Utf8Path) {
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "git", "Git option."),
+                package_doc_for(&context, "git", "Git package."),
+                package_doc_for(&context, "ripgrep", "Ripgrep package."),
+            ],
+            vec![
+                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
+                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 2),
+            ],
+        );
+    }
+
+    fn publish_duplicate_option_index(index_dir: &camino::Utf8Path) {
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "duplicate.entry", "First duplicate option."),
+                option_doc_for(&context, "duplicate.entry", "Second duplicate option."),
+            ],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
+        );
+    }
+
     fn assert_has_canonical(body: &str, expected: &str) {
         let tag = format!(r#"<link rel="canonical" href="{expected}">"#);
         assert!(body.contains(&tag), "missing canonical tag {tag:?}");
@@ -1070,20 +1119,7 @@ mod tests {
     async fn ambiguous_package_option_entries_canonicalize_with_kind() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
-        publish_documents_with_manifest_targets(
-            &index_dir,
-            time::OffsetDateTime::now_utc(),
-            vec![
-                option_doc_for(&context, "git", "Git option."),
-                package_doc_for(&context, "git", "Git package."),
-            ],
-            vec![
-                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
-                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 1),
-            ],
-        );
+        publish_ambiguous_package_option_index(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
 
@@ -1110,17 +1146,7 @@ mod tests {
     async fn same_kind_duplicate_entry_emits_noindex() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
-        publish_documents_with_manifest_targets(
-            &index_dir,
-            time::OffsetDateTime::now_utc(),
-            vec![
-                option_doc_for(&context, "duplicate.entry", "First duplicate option."),
-                option_doc_for(&context, "duplicate.entry", "Second duplicate option."),
-            ],
-            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
-        );
+        publish_duplicate_option_index(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let (status, body) = request_body(app, "/fixtures/duplicate.entry?kind=option").await;
@@ -1134,21 +1160,7 @@ mod tests {
     async fn result_links_use_kind_only_for_ambiguous_entry_urls() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
-        publish_documents_with_manifest_targets(
-            &index_dir,
-            time::OffsetDateTime::now_utc(),
-            vec![
-                option_doc_for(&context, "git", "Git option."),
-                package_doc_for(&context, "git", "Git package."),
-                package_doc_for(&context, "ripgrep", "Ripgrep package."),
-            ],
-            vec![
-                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
-                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 2),
-            ],
-        );
+        publish_ambiguous_package_option_search_index(&index_dir);
 
         let app = test_app(app_config(&index_dir));
         let (status, body) = request_body(app.clone(), "/?q=git&kind=option").await;

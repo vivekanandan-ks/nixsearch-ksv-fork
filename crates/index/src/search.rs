@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, TantivyDocument, Value as _};
+use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
 use nixsearch_core::document::{DocumentKind, SearchDocument};
@@ -136,7 +136,6 @@ impl EntryFacts {
 
     pub fn annotation_for_document(&self, document: &SearchDocument) -> SearchHitAnnotation {
         SearchHitAnnotation {
-            current_hit_kind: document.kind().clone(),
             ambiguous_entry_url: self.package_count > 0 && self.option_count > 0,
             unique_within_kind: self.count_for_kind(document.kind()) == 1,
         }
@@ -613,16 +612,9 @@ impl SearchIndex {
         searcher: &Searcher,
         address: DocAddress,
     ) -> Result<SearchDocument> {
-        let retrieved: TantivyDocument = searcher
-            .doc(address)
-            .context("failed to retrieve entry document")?;
+        let retrieved = tantivy_document_at(searcher, address)?;
 
-        let stored_json = retrieved
-            .get_first(self.fields.stored_json)
-            .and_then(|value| value.as_str())
-            .context("entry document did not contain stored_json")?;
-
-        serde_json::from_str(stored_json).context("failed to deserialize entry document")
+        search_document_from_tantivy(&self.fields, &retrieved)
     }
 
     fn stored_document_at_with_searcher(
@@ -630,37 +622,52 @@ impl SearchIndex {
         searcher: &Searcher,
         address: DocAddress,
     ) -> Result<StoredSearchDocument> {
-        let retrieved: TantivyDocument = searcher
-            .doc(address)
-            .context("failed to retrieve entry document")?;
-
-        let stored_json = retrieved
-            .get_first(self.fields.stored_json)
-            .and_then(|value| value.as_str())
-            .context("entry document did not contain stored_json")?;
-
-        let document: SearchDocument =
-            serde_json::from_str(stored_json).context("failed to deserialize entry document")?;
-
-        let ambiguous_entry_url = retrieved
-            .get_first(self.fields.entry_ambiguous_entry_url)
-            .and_then(|value| value.as_bool())
-            .context("entry document did not contain entry_ambiguous_entry_url")?;
-
-        let unique_within_kind = retrieved
-            .get_first(self.fields.entry_unique_within_kind)
-            .and_then(|value| value.as_bool())
-            .context("entry document did not contain entry_unique_within_kind")?;
+        let retrieved = tantivy_document_at(searcher, address)?;
+        let document = search_document_from_tantivy(&self.fields, &retrieved)?;
+        let ambiguous_entry_url = stored_bool(
+            &retrieved,
+            self.fields.entry_ambiguous_entry_url,
+            "entry_ambiguous_entry_url",
+        )?;
+        let unique_within_kind = stored_bool(
+            &retrieved,
+            self.fields.entry_unique_within_kind,
+            "entry_unique_within_kind",
+        )?;
 
         Ok(StoredSearchDocument {
             annotation: SearchHitAnnotation {
-                current_hit_kind: document.kind().clone(),
                 ambiguous_entry_url,
                 unique_within_kind,
             },
             document,
         })
     }
+}
+
+fn tantivy_document_at(searcher: &Searcher, address: DocAddress) -> Result<TantivyDocument> {
+    searcher
+        .doc(address)
+        .context("failed to retrieve entry document")
+}
+
+fn search_document_from_tantivy(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+) -> Result<SearchDocument> {
+    let stored_json = retrieved
+        .get_first(fields.stored_json)
+        .and_then(|value| value.as_str())
+        .context("entry document did not contain stored_json")?;
+
+    serde_json::from_str(stored_json).context("failed to deserialize entry document")
+}
+
+fn stored_bool(retrieved: &TantivyDocument, field: Field, name: &'static str) -> Result<bool> {
+    retrieved
+        .get_first(field)
+        .and_then(|value| value.as_bool())
+        .with_context(|| format!("entry document did not contain {name}"))
 }
 
 fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query> {

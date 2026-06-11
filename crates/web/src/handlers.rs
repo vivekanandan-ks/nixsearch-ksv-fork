@@ -834,11 +834,10 @@ fn load_entry_data_from_snapshot(
                 .as_ref()
                 .ok_or(EntryLoadError::IndexUnavailable)?;
 
-            let annotation = facts.annotation_for_document(&representative.document);
-            Ok(EntryData::Found(AnnotatedEntryDocument {
-                document: Box::new(representative.document.clone()),
-                annotation,
-            }))
+            Ok(EntryData::Found(AnnotatedEntryDocument::from_facts(
+                representative.document.clone(),
+                &facts,
+            )))
         }
         EntryFactsStatus::Ambiguous => {
             match state
@@ -848,22 +847,12 @@ fn load_entry_data_from_snapshot(
                 Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(
                     documents
                         .into_iter()
-                        .map(|document| {
-                            let annotation = facts.annotation_for_document(&document);
-                            AnnotatedEntryDocument {
-                                document: Box::new(document),
-                                annotation,
-                            }
-                        })
+                        .map(|document| AnnotatedEntryDocument::from_facts(document, &facts))
                         .collect(),
                 )),
-                Ok(EntryLookupResult::Found(document)) => {
-                    let annotation = facts.annotation_for_document(&document);
-                    Ok(EntryData::Found(AnnotatedEntryDocument {
-                        document,
-                        annotation,
-                    }))
-                }
+                Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(
+                    AnnotatedEntryDocument::from_facts(*document, &facts),
+                )),
                 Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
                     entry: detail.entry.clone(),
                 }),

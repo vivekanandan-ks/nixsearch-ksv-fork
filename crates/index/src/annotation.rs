@@ -4,7 +4,6 @@ use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHitAnnotation {
-    pub current_hit_kind: DocumentKind,
     pub ambiguous_entry_url: bool,
     pub unique_within_kind: bool,
 }
@@ -45,7 +44,6 @@ impl EntryAnnotationIndex {
         });
 
         SearchHitAnnotation {
-            current_hit_kind: document.kind().clone(),
             ambiguous_entry_url: counts
                 .map(|counts| counts.package_count > 0 && counts.option_count > 0)
                 .unwrap_or(false),
