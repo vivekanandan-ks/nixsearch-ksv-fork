@@ -2156,6 +2156,7 @@ dependencies = [
  "nixsearch-ingest",
  "nixsearch-source",
  "nixsearch-store",
+ "serde_json",
  "tempfile",
  "time",
  "tokio",

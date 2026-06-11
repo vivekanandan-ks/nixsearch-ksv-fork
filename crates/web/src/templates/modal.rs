@@ -3,35 +3,18 @@ use maud::{Markup, html};
 use nixsearch_config::app::AppConfig;
 use nixsearch_core::document::SearchDocument;
 
+use crate::entry::{AnnotatedEntryDocument, EntryData};
 use crate::request::PageState;
-use crate::urls::{close_url_for_state, entry_url_for_document, source_url_from_state};
+use crate::urls::{close_url_for_state, entry_url_for_annotated_document, source_url_from_state};
 
 use super::{detail, source_tag};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EntryData {
-    Empty,
-    Found(Box<SearchDocument>),
-    NotFound { entry: String },
-    Ambiguous(Vec<SearchDocument>),
-    Error(String),
-}
-
-impl EntryData {
-    pub fn document(&self) -> Option<&SearchDocument> {
-        match self {
-            Self::Found(document) => Some(document),
-            Self::Empty | Self::NotFound { .. } | Self::Ambiguous(_) | Self::Error(_) => None,
-        }
-    }
-}
 
 pub fn render(config: &AppConfig, page_state: &PageState, entry: &EntryData) -> Markup {
     match entry {
         EntryData::Empty => render_empty(),
-        EntryData::Found(document) => render_entry(page_state, document, config),
+        EntryData::Found(entry) => render_entry(page_state, &entry.document, config),
         EntryData::NotFound { entry } => render_not_found(config, page_state, entry),
-        EntryData::Ambiguous(documents) => render_ambiguous(page_state, documents, config),
+        EntryData::Ambiguous(entries) => render_ambiguous(page_state, entries, config),
         EntryData::Error(error) => render_error(config, page_state, error),
     }
 }
@@ -128,7 +111,11 @@ fn render_not_found(config: &AppConfig, state: &PageState, entry: &str) -> Marku
     }
 }
 
-fn render_ambiguous(state: &PageState, documents: &[SearchDocument], config: &AppConfig) -> Markup {
+fn render_ambiguous(
+    state: &PageState,
+    entries: &[AnnotatedEntryDocument],
+    config: &AppConfig,
+) -> Markup {
     let close_href = close_url_for_state(config, state);
 
     html! {
@@ -142,9 +129,9 @@ fn render_ambiguous(state: &PageState, documents: &[SearchDocument], config: &Ap
                     }
                     p { "This name exists in multiple forms. Choose one:" }
                     ul {
-                        @for document in documents {
-                            @let common = document.common();
-                            @let href = entry_url_for_document(config, state, document, Some(common.kind.as_str()), state.page);
+                        @for entry in entries {
+                            @let common = entry.document.common();
+                            @let href = entry_url_for_annotated_document(config, state, entry, state.page);
                             li {
                                 a href=(href) {
                                     (common.kind.as_str()) " · " (common.source) "/" (common.ref_id)

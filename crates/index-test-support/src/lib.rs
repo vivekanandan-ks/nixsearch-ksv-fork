@@ -6,6 +6,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::SearchDocument;
+use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
 use nixsearch_index::store::IndexStore;
@@ -132,9 +133,16 @@ pub fn publish_documents_with_manifest_targets(
 
     let index = SearchIndex::create_or_replace(&generation).unwrap();
     let mut writer = index.writer().unwrap();
+    let mut annotations = EntryAnnotationIndex::new();
 
     for doc in &documents {
-        writer.add_document(doc).unwrap();
+        annotations.observe(doc);
+    }
+
+    for doc in &documents {
+        writer
+            .add_document(doc, &annotations.annotation_for(doc))
+            .unwrap();
     }
 
     writer.commit().unwrap();

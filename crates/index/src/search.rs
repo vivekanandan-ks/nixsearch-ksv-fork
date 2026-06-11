@@ -10,6 +10,7 @@ use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
+use crate::annotation::SearchHitAnnotation;
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
 use crate::schema::{IndexFields, build_schema};
 use crate::writer::SearchIndexWriter;
@@ -24,6 +25,13 @@ pub struct SearchIndex {
 pub struct SearchHit {
     pub score: f32,
     pub document: SearchDocument,
+    pub annotation: SearchHitAnnotation,
+}
+
+#[derive(Debug, Clone)]
+struct StoredSearchDocument {
+    document: SearchDocument,
+    annotation: SearchHitAnnotation,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +132,14 @@ impl EntryFacts {
         self.representative
             .as_ref()
             .map(|representative| representative.seo_eligible)
+    }
+
+    pub fn annotation_for_document(&self, document: &SearchDocument) -> SearchHitAnnotation {
+        SearchHitAnnotation {
+            current_hit_kind: document.kind().clone(),
+            ambiguous_entry_url: self.package_count > 0 && self.option_count > 0,
+            unique_within_kind: self.count_for_kind(document.kind()) == 1,
+        }
     }
 }
 
@@ -264,9 +280,11 @@ impl SearchIndex {
         let mut candidates = Vec::with_capacity(top_docs.len());
 
         for (score, address) in top_docs {
+            let stored = self.stored_document_at_with_searcher(searcher, address)?;
             candidates.push(SearchCandidate {
                 score,
-                document: self.document_at_with_searcher(searcher, address)?,
+                document: stored.document,
+                annotation: stored.annotation,
             });
         }
 
@@ -298,9 +316,11 @@ impl SearchIndex {
         let mut hits = Vec::with_capacity(top_docs.len());
 
         for (score, address) in top_docs {
+            let stored = self.stored_document_at_with_searcher(searcher, address)?;
             hits.push(SearchHit {
                 score,
-                document: self.document_at_with_searcher(searcher, address)?,
+                document: stored.document,
+                annotation: stored.annotation,
             });
         }
 
@@ -353,7 +373,8 @@ impl SearchIndex {
             native_offset += top_docs.len();
 
             for (score, address) in top_docs {
-                let document = self.document_at_with_searcher(searcher, address)?;
+                let stored = self.stored_document_at_with_searcher(searcher, address)?;
+                let document = stored.document;
 
                 if excluded_ids.contains(document.id()) {
                     continue;
@@ -364,7 +385,11 @@ impl SearchIndex {
                     continue;
                 }
 
-                hits.push(SearchHit { score, document });
+                hits.push(SearchHit {
+                    score,
+                    document,
+                    annotation: stored.annotation,
+                });
 
                 if hits.len() == limit {
                     break;
@@ -598,6 +623,43 @@ impl SearchIndex {
             .context("entry document did not contain stored_json")?;
 
         serde_json::from_str(stored_json).context("failed to deserialize entry document")
+    }
+
+    fn stored_document_at_with_searcher(
+        &self,
+        searcher: &Searcher,
+        address: DocAddress,
+    ) -> Result<StoredSearchDocument> {
+        let retrieved: TantivyDocument = searcher
+            .doc(address)
+            .context("failed to retrieve entry document")?;
+
+        let stored_json = retrieved
+            .get_first(self.fields.stored_json)
+            .and_then(|value| value.as_str())
+            .context("entry document did not contain stored_json")?;
+
+        let document: SearchDocument =
+            serde_json::from_str(stored_json).context("failed to deserialize entry document")?;
+
+        let ambiguous_entry_url = retrieved
+            .get_first(self.fields.entry_ambiguous_entry_url)
+            .and_then(|value| value.as_bool())
+            .context("entry document did not contain entry_ambiguous_entry_url")?;
+
+        let unique_within_kind = retrieved
+            .get_first(self.fields.entry_unique_within_kind)
+            .and_then(|value| value.as_bool())
+            .context("entry document did not contain entry_unique_within_kind")?;
+
+        Ok(StoredSearchDocument {
+            annotation: SearchHitAnnotation {
+                current_hit_kind: document.kind().clone(),
+                ambiguous_entry_url,
+                unique_within_kind,
+            },
+            document,
+        })
     }
 }
 

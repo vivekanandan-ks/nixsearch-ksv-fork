@@ -16,6 +16,7 @@ use nixsearch_service::{
 
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
+use crate::entry::{AnnotatedEntryDocument, EntryData};
 use crate::origin::{
     PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query, public_uri_for_request,
 };
@@ -24,10 +25,10 @@ use crate::request::{
     page_request_from_public_uri, page_state, parse_document_kind, public_uri,
 };
 use crate::scripts::datastar_script;
+use crate::templates;
 use crate::templates::layout::{
     InitialReturnMetadata, ResultsContent, head_metadata_script, modal_patch_script,
 };
-use crate::templates::{self, modal::EntryData};
 use crate::urls::close_url_for_state;
 
 pub async fn health() -> &'static str {
@@ -830,17 +831,39 @@ fn load_entry_data_from_snapshot(
         EntryFactsStatus::Unique => {
             let representative = facts
                 .representative
+                .as_ref()
                 .ok_or(EntryLoadError::IndexUnavailable)?;
 
-            Ok(EntryData::Found(Box::new(representative.document)))
+            let annotation = facts.annotation_for_document(&representative.document);
+            Ok(EntryData::Found(AnnotatedEntryDocument {
+                document: Box::new(representative.document.clone()),
+                annotation,
+            }))
         }
         EntryFactsStatus::Ambiguous => {
             match state
                 .search
                 .find_entry_with_facts_with_snapshot(snapshot, entry_request, &facts)
             {
-                Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
-                Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
+                Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(
+                    documents
+                        .into_iter()
+                        .map(|document| {
+                            let annotation = facts.annotation_for_document(&document);
+                            AnnotatedEntryDocument {
+                                document: Box::new(document),
+                                annotation,
+                            }
+                        })
+                        .collect(),
+                )),
+                Ok(EntryLookupResult::Found(document)) => {
+                    let annotation = facts.annotation_for_document(&document);
+                    Ok(EntryData::Found(AnnotatedEntryDocument {
+                        document,
+                        annotation,
+                    }))
+                }
                 Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
                     entry: detail.entry.clone(),
                 }),

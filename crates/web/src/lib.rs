@@ -12,6 +12,7 @@ use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::SearchService;
 
+mod entry;
 mod handlers;
 mod maintenance;
 mod origin;
@@ -312,17 +313,19 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use nixsearch_config::app::AppConfig;
+    use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::SearchDocument;
     use nixsearch_index::search::SearchIndex;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
-        assert_canonical_options_manifest_targets, options_target, publish_canonical_options_index,
-        publish_documents_with_manifest_targets, publish_fixture_options_index_for_refs,
+        assert_canonical_options_manifest_targets, index_target, options_target,
+        publish_canonical_options_index, publish_documents_with_manifest_targets,
+        publish_fixture_options_index_for_refs,
     };
     use nixsearch_service::SearchService;
     use nixsearch_test_support::{
         REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
-        ingest_context_for, multi_ref_app_config, option_doc_for, utf8_path_buf,
+        ingest_context_for, multi_ref_app_config, option_doc_for, package_doc_for, utf8_path_buf,
     };
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -1044,6 +1047,127 @@ mod tests {
             "https://search.example.com/fixtures/programs.git.enable",
         );
         assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn redundant_kind_on_unambiguous_entry_canonicalizes_cleanly() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/programs.git.enable?kind=option").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_package_option_entries_canonicalize_with_kind() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "git", "Git option."),
+                package_doc_for(&context, "git", "Git package."),
+            ],
+            vec![
+                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
+                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 1),
+            ],
+        );
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        let (status, body) = request_body(app.clone(), "/fixtures/git?kind=package").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/git?kind=package",
+        );
+        assert_no_robots(&body);
+
+        let (status, body) = request_body(app.clone(), "/fixtures/git?kind=option").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_has_canonical(&body, "https://search.example.com/fixtures/git?kind=option");
+        assert_no_robots(&body);
+
+        let (status, body) = request_body(app, "/fixtures/git").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn same_kind_duplicate_entry_emits_noindex() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "duplicate.entry", "First duplicate option."),
+                option_doc_for(&context, "duplicate.entry", "Second duplicate option."),
+            ],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
+        );
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/duplicate.entry?kind=option").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn result_links_use_kind_only_for_ambiguous_entry_urls() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                option_doc_for(&context, "git", "Git option."),
+                package_doc_for(&context, "git", "Git package."),
+                package_doc_for(&context, "ripgrep", "Ripgrep package."),
+            ],
+            vec![
+                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
+                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 2),
+            ],
+        );
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app.clone(), "/?q=git&kind=option").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;kind=package&amp;source=all""#));
+        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;kind=option&amp;source=all""#));
+        assert!(!body.contains(r#"/fixtures/ripgrep?q=git&amp;kind=option"#));
+
+        let (status, body) = request_body(
+            app,
+            "/-/results/slice?url=%2F%3Fq%3Dgit%26kind%3Doption&offset=0",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("/fixtures/git?q=git&amp;kind=package&amp;source=all"));
+        assert!(body.contains("/fixtures/git?q=git&amp;kind=option&amp;source=all"));
+        assert!(!body.contains("/fixtures/ripgrep?q=git&amp;kind=option"));
     }
 
     #[tokio::test]

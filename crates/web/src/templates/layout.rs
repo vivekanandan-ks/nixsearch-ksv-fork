@@ -12,15 +12,17 @@ use nixsearch_service::ServedGenerationSnapshot;
 use crate::AppState;
 use crate::DATASTAR_JS_URL;
 use crate::RECONCILE_EVENTS_URL;
+use crate::entry::EntryData;
 use crate::origin::PageUrls;
 use crate::request::{PageRequest, PageState, SourceFilter, non_empty, normalized_query};
 use crate::scripts::navigation_script;
-use crate::urls::{canonical_entry_path, canonical_home_path, canonical_source_path, source_path};
+use crate::urls::{
+    canonical_entry_path_for_annotation, canonical_home_path, canonical_source_path, source_path,
+};
 
 use super::footer;
 use super::home;
 use super::modal;
-use super::modal::EntryData;
 use super::results;
 use super::search;
 use super::source_tag;
@@ -330,8 +332,13 @@ fn page_index_metadata(
     }
 
     match entry {
-        EntryData::Found(document) => {
+        EntryData::Found(entry) => {
+            let document = &entry.document;
             let common = document.common();
+
+            if !entry.annotation.unique_within_kind {
+                return noindex_metadata();
+            }
 
             if !document.is_seo_eligible_entry() {
                 return noindex_metadata();
@@ -342,12 +349,15 @@ fn page_index_metadata(
                 &common.source,
                 &common.ref_id,
             ) {
-                return canonical_metadata(page_urls.absolute_url(&canonical_entry_path(
-                    &state.config,
-                    &common.source,
-                    &common.name,
-                    &common.ref_id,
-                )));
+                return canonical_metadata(page_urls.absolute_url(
+                    &canonical_entry_path_for_annotation(
+                        &state.config,
+                        &common.source,
+                        &common.name,
+                        &common.ref_id,
+                        &entry.annotation,
+                    ),
+                ));
             }
 
             return noindex_metadata();
@@ -616,6 +626,7 @@ mod tests {
     use nixsearch_config::server::ScriptAttributeValue;
     use nixsearch_core::document::{DocText, OptionDoc, PackageDoc, SearchDocument};
     use nixsearch_core::ingest::IngestContext;
+    use nixsearch_index::annotation::SearchHitAnnotation;
     use nixsearch_index::search::SearchResult;
     use nixsearch_test_support::{SOURCE_FIXTURES, app_config, utf8_path_buf};
     use tempfile::tempdir;
@@ -648,6 +659,17 @@ mod tests {
             revision: None,
             repo: None,
         }
+    }
+
+    fn found_entry(document: SearchDocument) -> EntryData {
+        EntryData::Found(crate::entry::AnnotatedEntryDocument {
+            annotation: SearchHitAnnotation {
+                current_hit_kind: document.kind().clone(),
+                ambiguous_entry_url: false,
+                unique_within_kind: true,
+            },
+            document: Box::new(document),
+        })
     }
 
     #[test]
@@ -887,7 +909,7 @@ mod tests {
                 &PageRequest::default(),
                 &SourceFilter::All,
                 Err("unused"),
-                &EntryData::Found(Box::new(document))
+                &found_entry(document)
             ),
             "git 2.54.0 · Distributed version control system"
         );
@@ -908,7 +930,7 @@ mod tests {
                 &PageRequest::default(),
                 &SourceFilter::All,
                 Err("unused"),
-                &EntryData::Found(Box::new(document))
+                &found_entry(document)
             ),
             "programs.git.enable · Enable Git support."
         );

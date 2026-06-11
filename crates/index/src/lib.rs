@@ -1,3 +1,4 @@
+pub mod annotation;
 pub mod manifest;
 mod query;
 mod ranking;

@@ -2,6 +2,7 @@ use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
 use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::search::{
     EntryFactsStatus, EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions,
     SearchScope,
@@ -20,9 +21,16 @@ fn build_index(docs: Vec<SearchDocument>) -> (tempfile::TempDir, SearchIndex) {
 
     let index = SearchIndex::create_or_replace(&index_path).unwrap();
     let mut writer = index.writer().unwrap();
+    let mut annotations = EntryAnnotationIndex::new();
 
     for doc in &docs {
-        writer.add_document(doc).unwrap();
+        annotations.observe(doc);
+    }
+
+    for doc in &docs {
+        writer
+            .add_document(doc, &annotations.annotation_for(doc))
+            .unwrap();
     }
 
     writer.commit().unwrap();
@@ -958,6 +966,55 @@ fn find_entry_returns_ambiguous_without_kind() {
     assert_eq!(documents.len(), 2);
     assert!(kinds.contains(&&DocumentKind::Option));
     assert!(kinds.contains(&&DocumentKind::Package));
+}
+
+#[test]
+fn search_hits_annotate_clean_and_ambiguous_entry_urls() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![
+        option_doc_for(&context, "git", "Git option."),
+        package_doc_for(&context, "git", "Git package."),
+        package_doc_for(&context, "ripgrep", "Ripgrep package."),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+    let hits = search(&index, "*");
+
+    let package_git = hits
+        .iter()
+        .find(|hit| hit.document.name() == "git" && hit.document.kind() == &DocumentKind::Package)
+        .expect("missing package git hit");
+    let option_git = hits
+        .iter()
+        .find(|hit| hit.document.name() == "git" && hit.document.kind() == &DocumentKind::Option)
+        .expect("missing option git hit");
+    let ripgrep = hits
+        .iter()
+        .find(|hit| hit.document.name() == "ripgrep")
+        .expect("missing ripgrep hit");
+
+    assert!(package_git.annotation.ambiguous_entry_url);
+    assert!(package_git.annotation.unique_within_kind);
+    assert!(option_git.annotation.ambiguous_entry_url);
+    assert!(option_git.annotation.unique_within_kind);
+    assert!(!ripgrep.annotation.ambiguous_entry_url);
+    assert!(ripgrep.annotation.unique_within_kind);
+}
+
+#[test]
+fn search_hits_annotate_same_kind_duplicates_as_not_unique_within_kind() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![
+        option_doc_for(&context, "duplicate.entry", "First duplicate option."),
+        option_doc_for(&context, "duplicate.entry", "Second duplicate option."),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+    let hits = search(&index, "*");
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| !hit.annotation.ambiguous_entry_url));
+    assert!(hits.iter().all(|hit| !hit.annotation.unique_within_kind));
 }
 
 #[test]

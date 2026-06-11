@@ -6,6 +6,7 @@ use tantivy::{Index, Score};
 
 use nixsearch_core::document::{PackageDoc, SearchDocument};
 
+use crate::annotation::SearchHitAnnotation;
 use crate::search::SearchHit;
 use crate::tokenize::{
     compact_identifier, dedup_preserving_order, identifier_terms, structured_query_terms,
@@ -18,6 +19,7 @@ const MAX_RERANK_CANDIDATES: usize = 1_000;
 pub(crate) struct SearchCandidate {
     pub(crate) score: Score,
     pub(crate) document: SearchDocument,
+    pub(crate) annotation: SearchHitAnnotation,
 }
 
 #[derive(Debug)]
@@ -28,6 +30,7 @@ struct RankedCandidate {
     cluster_key: Option<String>,
     cluster_explicit: bool,
     document: SearchDocument,
+    annotation: SearchHitAnnotation,
 }
 
 #[derive(Debug)]
@@ -100,6 +103,7 @@ pub(crate) fn rerank_candidates(
                 cluster_key,
                 cluster_explicit,
                 document: candidate.document,
+                annotation: candidate.annotation,
             }
         })
         .collect::<Vec<_>>();
@@ -149,6 +153,7 @@ pub(crate) fn rerank_candidates(
         .map(|candidate| SearchHit {
             score: candidate.final_score,
             document: candidate.document,
+            annotation: candidate.annotation,
         })
         .collect()
 }

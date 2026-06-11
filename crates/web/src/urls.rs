@@ -1,7 +1,9 @@
 use nixsearch_config::app::AppConfig;
-use nixsearch_core::document::SearchDocument;
+use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_index::annotation::SearchHitAnnotation;
 use nixsearch_index::search::SearchHit;
 
+use crate::entry::AnnotatedEntryDocument;
 #[cfg(test)]
 use crate::request::PageRequest;
 use crate::request::{LinkOrigin, PageQuery, PageState, SourceFilter, non_empty};
@@ -43,6 +45,7 @@ pub fn canonical_source_path(config: &AppConfig, source: &str, ref_id: &str) -> 
     )
 }
 
+#[cfg(test)]
 pub fn canonical_entry_path(config: &AppConfig, source: &str, entry: &str, ref_id: &str) -> String {
     entry_url_for(
         source,
@@ -71,7 +74,7 @@ pub fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &Page
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
         ("ref_set", query.ref_set.as_deref()),
-        ("kind", kind.or(query.kind.as_deref())),
+        ("kind", kind),
         ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
     ]);
@@ -189,10 +192,59 @@ pub fn entry_url_for_hit(
     config: &AppConfig,
     state: &PageState,
     hit: &SearchHit,
-    kind: Option<&str>,
     page: Option<usize>,
 ) -> String {
-    entry_url_for_document(config, state, &hit.document, kind, page)
+    entry_url_for_document(
+        config,
+        state,
+        &hit.document,
+        entry_url_kind(&hit.annotation),
+        page,
+    )
+}
+
+pub fn entry_url_for_annotated_document(
+    config: &AppConfig,
+    state: &PageState,
+    entry: &AnnotatedEntryDocument,
+    page: Option<usize>,
+) -> String {
+    entry_url_for_document(
+        config,
+        state,
+        &entry.document,
+        entry_url_kind(&entry.annotation),
+        page,
+    )
+}
+
+pub fn canonical_entry_path_for_annotation(
+    config: &AppConfig,
+    source: &str,
+    entry: &str,
+    ref_id: &str,
+    annotation: &SearchHitAnnotation,
+) -> String {
+    entry_url_for(
+        source,
+        entry,
+        entry_url_kind(annotation),
+        &PageQuery {
+            ref_id: ref_id_for_link(config, source, ref_id),
+            ..PageQuery::default()
+        },
+    )
+}
+
+fn entry_url_kind(annotation: &SearchHitAnnotation) -> Option<&'static str> {
+    if !annotation.ambiguous_entry_url {
+        return None;
+    }
+
+    match annotation.current_hit_kind {
+        DocumentKind::Package | DocumentKind::Option => Some(annotation.current_hit_kind.as_str()),
+        DocumentKind::App | DocumentKind::Service => None,
+    }
 }
 
 pub fn entry_url_for_document(
@@ -301,6 +353,11 @@ mod tests {
     use nixsearch_config::producer::ProducerConfig;
     use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
     use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::SearchDocument;
+    use nixsearch_index::annotation::SearchHitAnnotation;
+    use nixsearch_test_support::{
+        REF_SMALL, SOURCE_FIXTURES, app_config, ingest_context_for, package_doc_for,
+    };
 
     use crate::request::{LinkOrigin, PageQuery, PageRequest, page_state};
 
@@ -358,6 +415,18 @@ mod tests {
         }
     }
 
+    fn hit(document: SearchDocument, ambiguous_entry_url: bool) -> SearchHit {
+        SearchHit {
+            annotation: SearchHitAnnotation {
+                current_hit_kind: document.kind().clone(),
+                ambiguous_entry_url,
+                unique_within_kind: true,
+            },
+            score: 1.0,
+            document,
+        }
+    }
+
     #[test]
     fn search_url_for_root_with_query() {
         let url = search_url_for(
@@ -411,6 +480,97 @@ mod tests {
         assert_eq!(
             url,
             "/fixtures/programs.git.enable?q=git&ref=small&kind=option"
+        );
+    }
+
+    #[test]
+    fn entry_url_for_does_not_inherit_stale_query_kind() {
+        let url = entry_url_for(
+            "fixtures",
+            "ripgrep",
+            None,
+            &PageQuery {
+                q: Some("ripgrep".to_owned()),
+                kind: Some("option".to_owned()),
+                ..PageQuery::default()
+            },
+        );
+
+        assert_eq!(url, "/fixtures/ripgrep?q=ripgrep");
+    }
+
+    #[test]
+    fn entry_url_for_hit_is_clean_when_entry_url_is_unambiguous() {
+        let config = app_config("./data/indexes");
+        let request = PageRequest {
+            query: PageQuery {
+                q: Some("ripgrep".to_owned()),
+                kind: Some("option".to_owned()),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let state = page_state(&config, &request);
+        let document = package_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+            "ripgrep",
+            "Ripgrep package.",
+        );
+
+        assert_eq!(
+            entry_url_for_hit(&config, &state, &hit(document, false), Some(3)),
+            "/fixtures/ripgrep?q=ripgrep&source=all&page=3"
+        );
+    }
+
+    #[test]
+    fn entry_url_for_hit_includes_kind_when_entry_url_is_ambiguous() {
+        let config = app_config("./data/indexes");
+        let request = PageRequest {
+            query: PageQuery {
+                q: Some("git".to_owned()),
+                ref_set: Some("unused".to_owned()),
+                source: Some(LinkOrigin::All),
+                page: Some(2),
+                ..PageQuery::default()
+            },
+            ..PageRequest::default()
+        };
+        let mut state = page_state(&config, &request);
+        state.set_explicit_ref_set("unused".to_owned());
+        let document = package_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+            "git",
+            "Git package.",
+        );
+
+        assert_eq!(
+            entry_url_for_hit(&config, &state, &hit(document, true), Some(2)),
+            "/fixtures/git?q=git&kind=package&source=all&page=2"
+        );
+    }
+
+    #[test]
+    fn canonical_entry_path_for_annotation_includes_only_required_kind() {
+        let config = app_config("./data/indexes");
+        let clean = SearchHitAnnotation {
+            current_hit_kind: DocumentKind::Package,
+            ambiguous_entry_url: false,
+            unique_within_kind: true,
+        };
+        let ambiguous = SearchHitAnnotation {
+            current_hit_kind: DocumentKind::Package,
+            ambiguous_entry_url: true,
+            unique_within_kind: true,
+        };
+
+        assert_eq!(
+            canonical_entry_path_for_annotation(&config, "fixtures", "ripgrep", "small", &clean),
+            "/fixtures/ripgrep"
+        );
+        assert_eq!(
+            canonical_entry_path_for_annotation(&config, "fixtures", "git", "small", &ambiguous),
+            "/fixtures/git?kind=package"
         );
     }
 

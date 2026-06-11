@@ -129,7 +129,7 @@ fn render_hit_row(
     let common = hit.document.common();
     let summary = summary_for_document(&hit.document);
 
-    let entry_href = entry_url_for_hit(config, state, hit, None, Some(result_page));
+    let entry_href = entry_url_for_hit(config, state, hit, Some(result_page));
 
     let desc = summary.as_deref().unwrap_or("");
     let source_color = source_tag::color_for_source(config, &common.source);
