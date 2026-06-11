@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use nixsearch_index::store::IndexStore;
 use nixsearch_ops::cleanup;
@@ -25,9 +25,17 @@ pub(super) async fn update(args: SelectionArgs) -> Result<()> {
     }
 
     let index_store = IndexStore::new(&config.data.index_dir);
-
-    let mut included_targets = current_manifest_targets(&config, &index_store)?;
+    let full_update = args.source.is_none() && args.ref_id.is_none();
     let selected_keys: BTreeSet<TargetKey> = selected_targets.iter().map(TargetKey::from).collect();
+
+    let mut included_targets = if full_update {
+        BTreeMap::new()
+    } else {
+        current_manifest_targets(&config, &index_store).with_context(|| {
+            "partial update requires a readable current index manifest; \
+             run unfiltered `nixsearch update` to refresh all configured refs"
+        })?
+    };
 
     for target in selected_targets {
         included_targets.insert(TargetKey::from(&target), target);
