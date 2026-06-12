@@ -15,7 +15,6 @@
 
   --header-height: 88px;
   --footer-content-height: 2.25rem;
-  --footer-edge-bleed: 3px;
   --footer-padding-top: 0.5rem;
   --footer-padding-bottom: 0.5rem;
   --footer-safe-bottom: 0px;
@@ -56,25 +55,25 @@ body {
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
-  overscroll-behavior: none;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
-html.modal-open,
-html.modal-open body {
+html.modal-open {
   overflow: hidden;
 }
 
 /* ─── Sticky header ─── */
 
 .header {
-  position: fixed;
+  position: sticky;
   top: 0;
-  left: 0;
-  right: 0;
+  flex-shrink: 0;
   z-index: 100;
   background: var(--header-bg);
   border-bottom: 1px solid var(--border);
-  height: var(--header-height);
+  min-height: var(--header-height);
   display: flex;
   align-items: center;
   padding: 0 1rem;
@@ -410,26 +409,23 @@ html.modal-open body {
 .main {
   max-width: 1200px;
   margin: 0 auto;
+  width: 100%;
+  flex: 1 1 auto;
   padding: 0;
-  margin-top: var(--header-height);
-  padding-bottom: calc(var(--footer-reserved-height) + 0.25rem);
+  padding-bottom: 0.25rem;
 }
 
 /* ─── Sticky footer ─── */
 
 .footer {
-  position: fixed;
-  bottom: calc(-1 * var(--footer-edge-bleed));
-  left: 0;
-  right: 0;
+  position: sticky;
+  bottom: 0;
+  flex-shrink: 0;
   z-index: 100;
   background: var(--header-bg);
   border-top: 1px solid var(--border);
   padding: var(--footer-padding-top) 1rem
-    calc(
-      var(--footer-padding-bottom) + var(--footer-safe-bottom) +
-        var(--footer-edge-bleed)
-    );
+    calc(var(--footer-padding-bottom) + var(--footer-safe-bottom));
 }
 
 @supports (padding: max(0px)) {
@@ -504,6 +500,8 @@ html.footer-keyboard-open .footer {
 /* Lock scrolling only on the home hero; reactively unlocks once a real
    search patches #results into a results table. */
 body:has(.home-hero) {
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -512,7 +510,7 @@ body:has(.home-hero) {
 }
 
 .home-hero {
-  height: calc(100dvh - var(--header-height));
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -826,7 +824,7 @@ dialog::backdrop {
 .entry-page {
   width: calc(100% - 1.5rem);
   max-width: 800px;
-  margin: 6.5rem auto 0;
+  margin: 1rem auto;
   background: var(--header-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1098,7 +1096,7 @@ a:hover {
   }
 
   .header {
-    height: auto;
+    min-height: 0;
     padding: 0.5rem 0.75rem;
   }
 
@@ -1151,7 +1149,6 @@ a:hover {
 
   .entry-page {
     width: calc(100% - 1rem);
-    margin-top: 10.5rem;
   }
 
   .entry {

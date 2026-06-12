@@ -2004,8 +2004,15 @@
 
   const initialPage = currentPageFromUrl();
   initializeVirtualResults();
-  scrollToResultPage(initialPage);
-  scheduleVisiblePageSync();
+  if (initialPage > 1) {
+    requestAnimationFrame(() => {
+      scrollToResultPage(initialPage);
+      scheduleVisiblePageSync();
+      scheduleVirtualLoad();
+    });
+  } else {
+    scheduleVisiblePageSync();
+  }
   window.addEventListener(
     "scroll",
     () => {
