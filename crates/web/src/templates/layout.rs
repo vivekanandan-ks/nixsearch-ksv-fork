@@ -35,6 +35,7 @@ const ROBOTS_NOINDEX_FOLLOW: &str = "noindex,follow";
 pub enum ResultsContent<'a> {
     Home,
     SearchResults(&'a SearchResult),
+    Entry(&'a EntryData),
     Error { title: &'a str, message: &'a str },
 }
 
@@ -79,10 +80,17 @@ pub fn render_full_page(
         ResultsContent::SearchResults(result) => {
             results::render(page_state, &result.hits, result.total, &state.config)
         }
+        ResultsContent::Entry(entry) => results::render_entry(&state.config, page_state, entry),
         ResultsContent::Error { title, message } => results::render_error(title, message),
     };
 
-    let modal_markup = modal::render(&state.config, page_state, entry);
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if matches!(results_content, ResultsContent::Entry(_)) {
+        &empty_entry
+    } else {
+        entry
+    };
+    let modal_markup = modal::render(&state.config, page_state, modal_entry);
     let source_metadata = source_metadata_json(&state.config);
     let initial_history_metadata = initial_return_metadata.map(initial_history_metadata_json);
 
@@ -224,7 +232,7 @@ pub(crate) fn page_head_metadata(
     let search_result_for_metadata = match results_content {
         ResultsContent::SearchResults(result) => Ok(result),
         ResultsContent::Error { message, .. } => Err(message),
-        ResultsContent::Home => Err(""),
+        ResultsContent::Home | ResultsContent::Entry(_) => Err(""),
     };
 
     let index_metadata = page_index_metadata(

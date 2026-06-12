@@ -42,6 +42,18 @@ pub struct PageRequest {
     pub query: PageQuery,
 }
 
+impl PageRequest {
+    pub fn has_search_return_context(&self) -> bool {
+        normalized_query(&self.query).is_some()
+            || self.query.page.is_some()
+            || self.query.source == Some(LinkOrigin::All)
+    }
+
+    pub fn is_direct_entry(&self) -> bool {
+        self.entry.is_some() && !self.has_search_return_context()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PageQuery {
     pub q: Option<String>,

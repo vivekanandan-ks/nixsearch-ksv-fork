@@ -479,6 +479,38 @@ mod tests {
         assert!(body.contains(&tag), "missing og:url tag {tag:?}");
     }
 
+    fn assert_h1_count(body: &str, expected: usize) {
+        let count = body.matches("<h1").count();
+        assert_eq!(count, expected, "unexpected h1 count in body");
+    }
+
+    fn assert_empty_modal_container(body: &str) {
+        let marker = r#"<div id="entry-modal-container">"#;
+        let start = body.find(marker).expect("missing modal container");
+        let after = &body[start + marker.len()..];
+        let end = after.find("</div>").expect("missing modal container close");
+
+        assert!(
+            after[..end].trim().is_empty(),
+            "expected empty modal container"
+        );
+        assert!(
+            !body.contains(r#"<dialog id="entry-modal""#),
+            "expected no populated entry modal"
+        );
+    }
+
+    fn assert_populated_modal(body: &str) {
+        assert!(
+            body.contains(r#"<div id="entry-modal-container">"#),
+            "expected modal container"
+        );
+        assert!(
+            body.contains(r#"<dialog id="entry-modal""#),
+            "expected populated entry modal"
+        );
+    }
+
     #[tokio::test]
     async fn full_page_unknown_source_returns_404() {
         let tempdir = tempdir().unwrap();
@@ -1009,7 +1041,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_entry_page_seeds_return_head_metadata_for_modal_close() {
+    async fn contextual_entry_page_seeds_return_head_metadata_for_modal_close() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
@@ -1062,6 +1094,129 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_has_canonical(&body, "https://search.example.com/fixtures");
         assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_entry_page_renders_entry_in_results_with_empty_modal() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/programs.git.enable").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("entry-page"));
+        assert!(body.contains("programs.git.enable"));
+        assert!(body.contains("Description"));
+        assert_h1_count(&body, 1);
+        assert_empty_modal_container(&body);
+        assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_entry_identifying_params_still_render_in_results() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        for url in [
+            "/fixtures/programs.git.enable?ref=small",
+            "/fixtures/programs.git.enable?kind=option",
+        ] {
+            let (status, body) = request_body(app.clone(), url).await;
+
+            assert_eq!(status, StatusCode::OK, "{url}");
+            assert!(
+                body.contains("entry-page"),
+                "{url}"
+            );
+            assert!(body.contains("programs.git.enable"), "{url}");
+            assert_h1_count(&body, 1);
+            assert_empty_modal_container(&body);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_ambiguous_entry_page_renders_in_results_with_empty_modal() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_ambiguous_package_option_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/git").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("entry-page"));
+        assert!(body.contains("Multiple entries found"));
+        assert_h1_count(&body, 1);
+        assert_empty_modal_container(&body);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_missing_entry_page_renders_in_results_with_empty_modal() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/programs.missing.enable").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("entry-page"));
+        assert!(body.contains("Entry not found"));
+        assert!(body.contains("programs.missing.enable"));
+        assert_h1_count(&body, 1);
+        assert_empty_modal_container(&body);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn contextual_entry_page_keeps_results_context_and_populated_modal() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) =
+            request_body(app, "/fixtures/programs.git.enable?q=git&source=all").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("result"));
+        assert!(body.contains("for "));
+        assert_populated_modal(&body);
+        assert_h1_count(&body, 1);
+        assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn contextual_missing_entry_page_keeps_modal_error() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) =
+            request_body(app, "/fixtures/programs.missing.enable?q=git&source=all").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("result"));
+        assert_populated_modal(&body);
+        assert!(body.contains("Entry not found"));
+        assert_h1_count(&body, 1);
     }
 
     #[tokio::test]
@@ -1216,7 +1371,9 @@ mod tests {
             let (status, body) = request_body(app.clone(), &format!("/fixtures/{entry}")).await;
 
             assert_eq!(status, StatusCode::OK);
-            assert!(body.contains("entry-modal"));
+            assert!(body.contains("entry-page"));
+            assert_empty_modal_container(&body);
+            assert_h1_count(&body, 1);
             assert!(body.contains(entry));
             assert_no_canonical(&body);
             assert_has_robots(&body);
@@ -1645,6 +1802,30 @@ mod tests {
             r#""canonicalUrl":"https://search.example.com/fixtures/programs.git.enable""#
         ));
         assert!(body.contains(r#""robots":null"#));
+    }
+
+    #[tokio::test]
+    async fn state_events_direct_entry_navigation_patches_results_and_clears_modal() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(
+            app,
+            "/-/state/events?url=%2Ffixtures%2Fprograms.git.enable&previous_url=%2F%3Fq%3Dgit",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("entry-page"));
+        assert!(body.contains("programs.git.enable"));
+        assert!(body.contains(r#"<div id=\"entry-modal-container\"></div>"#));
+        assert!(body.contains("nixsearchApplyModalPatch"));
+        assert!(body.contains("nixsearchApplyHeadMetadata"));
+        assert!(body.contains(
+            r#""canonicalUrl":"https://search.example.com/fixtures/programs.git.enable""#
+        ));
     }
 
     #[tokio::test]

@@ -823,6 +823,15 @@ dialog::backdrop {
   background: rgb(0 0 0 / 0.6);
 }
 
+.entry-page {
+  width: calc(100% - 1rem);
+  max-width: 800px;
+  margin: 6rem auto 0;
+  background: var(--header-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
 .entry {
   padding: 1.5rem;
 }
@@ -837,6 +846,7 @@ dialog::backdrop {
   border-bottom: 1px solid var(--border);
 }
 
+.entry header h1,
 .entry header h2 {
   margin: 0;
   font-size: 1.1rem;
@@ -850,6 +860,7 @@ dialog::backdrop {
   display: block;
 }
 
+.entry-title-row h1,
 .entry-title-row h2 {
   display: inline;
 }
@@ -1131,6 +1142,11 @@ a:hover {
   .results-table td,
   .results-table th {
     padding: 0.5rem 0.75rem;
+  }
+
+  .entry-page {
+    width: calc(100% - 0.5rem);
+    margin-top: 10rem;
   }
 
   .entry {

@@ -154,6 +154,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let navigation =
         state_events_navigation(&state, &snapshot, previous_request.as_ref(), &page_state);
     let has_entry_detail = page_state.detail.is_some();
+    let direct_entry = request.is_direct_entry();
 
     let search_result = if navigation.needs_search_result(&page_state) {
         let offset = match search_offset(&request) {
@@ -181,7 +182,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let search_error = search_error_message(&search_result);
     let results_content = results_content_for_search(&search_result, search_error.as_deref());
 
-    let results_html = if navigation.patch_results {
+    let results_html = if navigation.patch_results || direct_entry {
         Some(match &search_result {
             Some(Ok(result)) => {
                 templates::results::render(&page_state, &result.hits, result.total, &state.config)
@@ -191,7 +192,13 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
                 templates::results::render_error("Search failed", &format!("{error:#}"))
                     .into_string()
             }
-            None => templates::home::render(&state, &request, &page_state, &snapshot).into_string(),
+            None => {
+                if direct_entry {
+                    String::new()
+                } else {
+                    templates::home::render(&state, &request, &page_state, &snapshot).into_string()
+                }
+            }
         })
     } else {
         None
@@ -219,7 +226,18 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
             );
         }
     };
-    let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
+    let results_html = if direct_entry {
+        Some(templates::results::render_entry(&state.config, &page_state, &entry).into_string())
+    } else {
+        results_html
+    };
+    let modal_entry = if direct_entry {
+        EntryData::Empty
+    } else {
+        entry.clone()
+    };
+    let modal_html =
+        templates::modal::render(&state.config, &page_state, &modal_entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 
@@ -436,7 +454,8 @@ fn render_full_page_response(
     };
 
     let search_error = search_error_message(&search_result);
-    let results_content = results_content_for_search(&search_result, search_error.as_deref());
+    let search_results_content =
+        results_content_for_search(&search_result, search_error.as_deref());
 
     let entry =
         match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(&snapshot)) {
@@ -454,8 +473,17 @@ fn render_full_page_response(
             }
         };
 
-    let initial_return_metadata =
-        initial_return_metadata(state, &page_urls, &snapshot, &page_state, results_content);
+    let results_content = if request.is_direct_entry() {
+        ResultsContent::Entry(&entry)
+    } else {
+        search_results_content
+    };
+
+    let initial_return_metadata = if request.is_direct_entry() {
+        None
+    } else {
+        initial_return_metadata(state, &page_urls, &snapshot, &page_state, results_content)
+    };
 
     let markup = templates::layout::render_full_page(
         state,
@@ -562,11 +590,20 @@ fn render_full_page_with_entry_error_response(
     error: &EntryLoadError,
 ) -> Response {
     let search_error = search_error_message(search_result);
-    let results_content = results_content_for_search(search_result, search_error.as_deref());
+    let search_results_content = results_content_for_search(search_result, search_error.as_deref());
     let entry = entry_data_for_load_error(error);
 
-    let initial_return_metadata =
-        initial_return_metadata(state, &page_urls, snapshot, page_state, results_content);
+    let results_content = if request.is_direct_entry() {
+        ResultsContent::Entry(&entry)
+    } else {
+        search_results_content
+    };
+
+    let initial_return_metadata = if request.is_direct_entry() {
+        None
+    } else {
+        initial_return_metadata(state, &page_urls, snapshot, page_state, results_content)
+    };
 
     let markup = templates::layout::render_full_page(
         state,
@@ -743,8 +780,15 @@ struct SseEntryErrorContext<'a> {
 
 fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoadError) -> Response {
     let entry = entry_data_for_load_error(error);
+    let direct_entry = context.request.is_direct_entry();
+    let modal_entry = if direct_entry {
+        EntryData::Empty
+    } else {
+        entry.clone()
+    };
     let modal_html =
-        templates::modal::render(&context.state.config, context.page_state, &entry).into_string();
+        templates::modal::render(&context.state.config, context.page_state, &modal_entry)
+            .into_string();
     let metadata = templates::layout::page_head_metadata(
         context.state,
         context.request,
@@ -757,7 +801,13 @@ fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoad
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 
-    if let Some(results_html) = context.results_html {
+    if direct_entry {
+        events.push(Ok(PatchElements::new(
+            templates::results::render_entry(&context.state.config, context.page_state, &entry)
+                .into_string(),
+        )
+        .write_as_axum_sse_event()));
+    } else if let Some(results_html) = context.results_html {
         events.push(Ok(
             PatchElements::new(results_html).write_as_axum_sse_event()
         ));

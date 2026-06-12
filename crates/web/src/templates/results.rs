@@ -7,10 +7,11 @@ use nixsearch_core::source_link::SourceLinkConfig;
 use nixsearch_index::search::SearchHit;
 
 use crate::DEFAULT_LIMIT;
+use crate::entry::EntryData;
 use crate::request::{PageRequest, PageState, SourceFilter, page_state};
 use crate::urls::{entry_url_for_hit, search_url_for_state};
 
-use super::source_tag;
+use super::{entry_article, source_tag};
 
 pub fn render(state: &PageState, hits: &[SearchHit], total: usize, config: &AppConfig) -> Markup {
     let Some(q) = state.q.as_deref() else {
@@ -110,10 +111,19 @@ pub fn render_empty() -> Markup {
     }
 }
 
+pub fn render_entry(config: &AppConfig, state: &PageState, entry: &EntryData) -> Markup {
+    html! {
+        div #results.entry-page {
+            (entry_article::render(config, state, entry, None))
+        }
+    }
+}
+
 pub fn render_error(title: &str, error: &str) -> Markup {
     html! {
         div #results.results-error {
-            strong { (title) ":" } " " (error)
+            h1 { (title) }
+            p { (error) }
         }
     }
 }
