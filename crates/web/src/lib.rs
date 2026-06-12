@@ -387,6 +387,31 @@ mod tests {
         }
     }
 
+    fn current_generation_id(index_dir: impl AsRef<camino::Utf8Path>) -> String {
+        let store = IndexStore::new(index_dir.as_ref());
+        let path = store.current_path().unwrap();
+        store.read_manifest(&path).unwrap().generation_id
+    }
+
+    fn with_generation(uri: &str, generation_id: &str) -> String {
+        let separator = if uri.contains('?') { '&' } else { '?' };
+        format!(
+            "{uri}{separator}generation_id={}",
+            urlencoding::encode(generation_id)
+        )
+    }
+
+    fn assert_occurs_in_order(body: &str, needles: &[&str]) {
+        let mut offset = 0;
+
+        for needle in needles {
+            let index = body[offset..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} after offset {offset}"));
+            offset += index + needle.len();
+        }
+    }
+
     fn app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
         let mut config = app_config(index_dir);
         config.server.public_url = Some("https://search.example.com/".to_owned());
@@ -573,6 +598,21 @@ mod tests {
         let app = test_app(multi_ref_app_config(&index_dir));
 
         assert_eq!(request_status(app, "/fixtures").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn full_page_exposes_generation_state() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app, "/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#"id="generation-state""#));
+        assert!(body.contains(&format!(r#""generationId":"{generation_id}""#)));
     }
 
     #[tokio::test]
@@ -769,6 +809,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config(&index_dir));
 
@@ -778,16 +819,16 @@ mod tests {
         assert!(body.contains("Request failed"));
         assert!(body.contains("kind app"));
 
-        let (status, body) =
-            request_body(app.clone(), "/-/results/slice?url=%2Ffixtures&offset=0").await;
+        let uri = with_generation("/-/results/slice?url=%2Ffixtures&offset=0", &generation_id);
+        let (status, body) = request_body(app.clone(), &uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("requires q"));
 
-        let (status, body) = request_body(
-            app,
+        let uri = with_generation(
             "/-/results/slice?url=%2F%3Fq%3Dgit%26kind%3Dservice&offset=0",
-        )
-        .await;
+            &generation_id,
+        );
+        let (status, body) = request_body(app, &uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("kind app and service"));
     }
@@ -827,17 +868,15 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config(&index_dir));
-
-        assert_eq!(
-            request_status(
-                app,
-                "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref%3Dmissing&offset=0",
-            )
-            .await,
-            StatusCode::NOT_FOUND
+        let uri = with_generation(
+            "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref%3Dmissing&offset=0",
+            &generation_id,
         );
+
+        assert_eq!(request_status(app, &uri).await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -845,17 +884,67 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(multi_ref_app_config(&index_dir));
-
-        assert_eq!(
-            request_status(
-                app,
-                "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref_set%3Dmulti&offset=0",
-            )
-            .await,
-            StatusCode::BAD_REQUEST
+        let uri = with_generation(
+            "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref_set%3Dmulti&offset=0",
+            &generation_id,
         );
+
+        assert_eq!(request_status(app, &uri).await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn results_slice_missing_generation_returns_stale_generation_409() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app, "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0").await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains(r#""error":"stale_generation""#));
+        assert!(body.contains(r#""reload":true"#));
+        assert!(body.contains(&format!(r#""generationId":"{generation_id}""#)));
+    }
+
+    #[tokio::test]
+    async fn results_slice_mismatched_generation_returns_stale_generation_409() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(
+            app,
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0&generation_id=sha256%3Astale",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains(r#""error":"stale_generation""#));
+    }
+
+    #[tokio::test]
+    async fn results_slice_matching_generation_returns_rows() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let uri = with_generation(
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0",
+            &generation_id,
+        );
+        let (status, body) = request_body(app, &uri).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""rows":"#));
+        assert!(!body.contains("stale_generation"));
     }
 
     #[tokio::test]
@@ -863,6 +952,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_fixture_options_index_for_refs(&index_dir, &[REF_SMALL, REF_STABLE]);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(multi_ref_app_config(&index_dir));
 
@@ -878,14 +968,11 @@ mod tests {
             .await,
             StatusCode::OK
         );
-        assert_eq!(
-            request_status(
-                app,
-                "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref%3Dstable&offset=0",
-            )
-            .await,
-            StatusCode::OK
+        let uri = with_generation(
+            "/-/results/slice?url=%2Ffixtures%3Fq%3Dgit%26ref%3Dstable&offset=0",
+            &generation_id,
         );
+        assert_eq!(request_status(app, &uri).await, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1011,13 +1098,14 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config(&index_dir));
-        let (status, body) = request_body(
-            app,
+        let uri = with_generation(
             "/-/state/events?url=%2Ffixtures%2Fprograms.missing.enable",
-        )
-        .await;
+            &generation_id,
+        );
+        let (status, body) = request_body(app, &uri).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("Entry not found"));
@@ -1313,6 +1401,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_ambiguous_package_option_search_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config(&index_dir));
         let (status, body) = request_body(app.clone(), "/?q=git&kind=option").await;
@@ -1322,11 +1411,11 @@ mod tests {
         assert!(body.contains(r#"href="/fixtures/git?q=git&amp;kind=option&amp;source=all""#));
         assert!(!body.contains(r#"/fixtures/ripgrep?q=git&amp;kind=option"#));
 
-        let (status, body) = request_body(
-            app,
+        let uri = with_generation(
             "/-/results/slice?url=%2F%3Fq%3Dgit%26kind%3Doption&offset=0",
-        )
-        .await;
+            &generation_id,
+        );
+        let (status, body) = request_body(app, &uri).await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("/fixtures/git?q=git&amp;kind=package&amp;source=all"));
@@ -1713,14 +1802,58 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
-        let (status, body) = request_body(app, "/-/state/events?url=%2Ffixtures").await;
+        let uri = with_generation("/-/state/events?url=%2Ffixtures", &generation_id);
+        let (status, body) = request_body(app, &uri).await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("nixsearchApplyHeadMetadata"));
         assert!(body.contains(r#""canonicalUrl":"https://search.example.com/fixtures""#));
         assert!(body.contains(r#""robots":null"#));
+    }
+
+    #[tokio::test]
+    async fn state_events_missing_generation_returns_ordered_generation_change_sse() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/-/state/events?url=%2F%3Fq%3Dgit").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&generation_id));
+        assert_occurs_in_order(
+            &body,
+            &[
+                "nixsearchBeginGenerationChange",
+                "generation-state",
+                "results",
+                "nixsearchApplyModalPatch",
+                "nixsearchApplyHeadMetadata",
+                "nixsearchFinishGenerationChange",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn state_events_matching_generation_uses_normal_protocol() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let uri = with_generation("/-/state/events?url=%2F%3Fq%3Dgit", &generation_id);
+        let (status, body) = request_body(app, &uri).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("nixsearchBeginGenerationChange"));
+        assert!(!body.contains("nixsearchFinishGenerationChange"));
+        assert!(body.contains("nixsearchApplyHeadMetadata"));
     }
 
     #[tokio::test]
@@ -1765,17 +1898,15 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
-
-        assert_eq!(
-            request_status(
-                app,
-                "/-/results/slice?url=https%3A%2F%2Fevil.example%2F%3Fq%3Dgit&offset=0",
-            )
-            .await,
-            StatusCode::BAD_REQUEST
+        let uri = with_generation(
+            "/-/results/slice?url=https%3A%2F%2Fevil.example%2F%3Fq%3Dgit&offset=0",
+            &generation_id,
         );
+
+        assert_eq!(request_status(app, &uri).await, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

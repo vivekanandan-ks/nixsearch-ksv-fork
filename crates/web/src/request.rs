@@ -414,6 +414,7 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
 pub(crate) fn state_events_query_from_uri(uri: &Uri) -> ParseResult<StateQuery> {
     let mut url = None;
     let mut previous_url = None;
+    let mut generation_id = None;
     let mut seen = HashSet::new();
 
     for (key, value) in strict_query_pairs(uri.query().unwrap_or(""))? {
@@ -422,6 +423,7 @@ pub(crate) fn state_events_query_from_uri(uri: &Uri) -> ParseResult<StateQuery> 
         match key.as_str() {
             "url" => url = Some(required_value(&key, value)?),
             "previous_url" => previous_url = non_empty_string(value),
+            "generation_id" => generation_id = non_empty_string(value),
             "datastar" => {}
             _ => {
                 return Err(RequestParseError::new(format!(
@@ -434,6 +436,7 @@ pub(crate) fn state_events_query_from_uri(uri: &Uri) -> ParseResult<StateQuery> 
     Ok(StateQuery {
         url: url.ok_or_else(|| RequestParseError::new("url is required"))?,
         previous_url,
+        generation_id,
     })
 }
 
@@ -441,6 +444,7 @@ pub(crate) fn slice_query_from_uri(uri: &Uri) -> ParseResult<SliceQuery> {
     let mut url = None;
     let mut offset = None;
     let mut limit = None;
+    let mut generation_id = None;
     let mut seen = HashSet::new();
 
     for (key, value) in strict_query_pairs(uri.query().unwrap_or(""))? {
@@ -457,6 +461,7 @@ pub(crate) fn slice_query_from_uri(uri: &Uri) -> ParseResult<SliceQuery> {
                     .ok_or_else(|| RequestParseError::new("limit bound overflow"))?;
                 limit = Some(parse_bounded_usize(&value, "limit", 1, max_limit)?);
             }
+            "generation_id" => generation_id = non_empty_string(value),
             "datastar" => {}
             _ => {
                 return Err(RequestParseError::new(format!(
@@ -470,6 +475,7 @@ pub(crate) fn slice_query_from_uri(uri: &Uri) -> ParseResult<SliceQuery> {
         url: url.ok_or_else(|| RequestParseError::new("url is required"))?,
         offset: offset.ok_or_else(|| RequestParseError::new("offset is required"))?,
         limit,
+        generation_id,
     })
 }
 
@@ -477,6 +483,7 @@ pub(crate) fn slice_query_from_uri(uri: &Uri) -> ParseResult<SliceQuery> {
 pub(crate) struct StateQuery {
     pub url: String,
     pub previous_url: Option<String>,
+    pub generation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,6 +491,7 @@ pub(crate) struct SliceQuery {
     pub url: String,
     pub offset: usize,
     pub limit: Option<usize>,
+    pub generation_id: Option<String>,
 }
 
 pub(crate) fn validate_public_kind(value: Option<&str>) -> ParseResult<()> {
@@ -888,17 +896,19 @@ mod tests {
 
         assert_eq!(query.url, "/fixtures");
         assert_eq!(query.previous_url, None);
+        assert_eq!(query.generation_id, None);
     }
 
     #[test]
     fn parses_state_events_outer_query_with_datastar_metadata() {
         let uri = Uri::from_static(
-            "/-/state/events?url=%2F%3Fq%3Dhello&previous_url=%2F&datastar=%7B%7D",
+            "/-/state/events?url=%2F%3Fq%3Dhello&previous_url=%2F&generation_id=sha256%3Aabc&datastar=%7B%7D",
         );
         let query = state_events_query_from_uri(&uri).unwrap();
 
         assert_eq!(query.url, "/?q=hello");
         assert_eq!(query.previous_url.as_deref(), Some("/"));
+        assert_eq!(query.generation_id.as_deref(), Some("sha256:abc"));
     }
 
     #[test]
@@ -909,6 +919,7 @@ mod tests {
             "/-/state/events?url=%2F&url=%2Ffixtures",
             "/-/state/events?url=%zz",
             "/-/state/events?url=%2F&extra=1",
+            "/-/state/events?url=%2F&generation_id=one&generation_id=two",
         ] {
             let uri: Uri = uri.parse().unwrap();
 
@@ -918,12 +929,15 @@ mod tests {
 
     #[test]
     fn parses_slice_outer_query_strictly() {
-        let uri = Uri::from_static("/-/results/slice?url=%2F%3Fq%3Dgit&offset=50&limit=25");
+        let uri = Uri::from_static(
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=50&limit=25&generation_id=sha256%3Aabc",
+        );
         let query = slice_query_from_uri(&uri).unwrap();
 
         assert_eq!(query.url, "/?q=git");
         assert_eq!(query.offset, 50);
         assert_eq!(query.limit, Some(25));
+        assert_eq!(query.generation_id.as_deref(), Some("sha256:abc"));
     }
 
     #[test]
@@ -934,6 +948,7 @@ mod tests {
         assert_eq!(query.url, "/?q=git");
         assert_eq!(query.offset, 0);
         assert_eq!(query.limit, None);
+        assert_eq!(query.generation_id, None);
     }
 
     #[test]
@@ -946,6 +961,7 @@ mod tests {
             "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0&limit=0",
             "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0&limit=201",
             "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0&extra=1",
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0&generation_id=one&generation_id=two",
         ] {
             let uri: Uri = uri.parse().unwrap();
 

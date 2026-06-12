@@ -27,9 +27,15 @@ use crate::request::{
 use crate::scripts::datastar_script;
 use crate::templates;
 use crate::templates::layout::{
-    InitialReturnMetadata, ResultsContent, head_metadata_script, modal_patch_script,
+    InitialReturnMetadata, ResultsContent, generation_state_script_html, head_metadata_script,
+    modal_patch_script,
 };
 use crate::urls::close_url_for_state;
+
+const BEGIN_GENERATION_CHANGE_SCRIPT: &str =
+    "if (window.nixsearchBeginGenerationChange) window.nixsearchBeginGenerationChange();";
+const FINISH_GENERATION_CHANGE_SCRIPT: &str =
+    "if (window.nixsearchFinishGenerationChange) window.nixsearchFinishGenerationChange();";
 
 pub async fn health() -> &'static str {
     "ok"
@@ -129,6 +135,17 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     };
     let target_public_url = public_path_and_query(&target_uri);
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
+    let snapshot = state.search.snapshot();
+
+    if !generation_matches(query.generation_id.as_deref(), &snapshot) {
+        return generation_change_response(
+            &state,
+            &target_uri,
+            &target_public_url,
+            &page_urls,
+            &snapshot,
+        );
+    }
 
     let request = match page_request_from_public_uri(&target_uri) {
         Ok(request) => request,
@@ -137,7 +154,6 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
         }
     };
 
-    let snapshot = state.search.snapshot();
     let page_state = match resolve_page_state(&state, &snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
@@ -265,6 +281,198 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     Sse::new(stream::iter(events)).into_response()
 }
 
+fn generation_matches(
+    client_generation_id: Option<&str>,
+    snapshot: &ServedGenerationSnapshot,
+) -> bool {
+    client_generation_id == Some(snapshot.manifest.generation_id.as_str())
+}
+
+fn generation_change_response(
+    state: &AppState,
+    target_uri: &Uri,
+    target_public_url: &str,
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+) -> Response {
+    let request = match page_request_from_public_uri(target_uri) {
+        Ok(request) => request,
+        Err(error) => {
+            return generation_change_error_response(
+                page_urls,
+                snapshot,
+                &error.to_string(),
+                target_public_url,
+            );
+        }
+    };
+
+    let page_state = match resolve_page_state(state, snapshot, &request) {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            return generation_change_error_response(
+                page_urls,
+                snapshot,
+                &error.to_string(),
+                target_public_url,
+            );
+        }
+    };
+
+    let search_result = if normalized_query(&request.query).is_some() {
+        let offset = match search_offset(&request) {
+            Ok(offset) => offset,
+            Err(error) => {
+                return generation_change_error_response(
+                    page_urls,
+                    snapshot,
+                    &error,
+                    target_public_url,
+                );
+            }
+        };
+
+        Some(run_search_with_snapshot(
+            state,
+            snapshot,
+            &page_state,
+            offset,
+            DEFAULT_LIMIT,
+        ))
+    } else {
+        None
+    };
+
+    if let Some(Err(ServiceError::Resolution(error))) = &search_result {
+        return generation_change_error_response(
+            page_urls,
+            snapshot,
+            &error.to_string(),
+            target_public_url,
+        );
+    }
+
+    let search_error = search_error_message(&search_result);
+    let search_results_content =
+        results_content_for_search(&search_result, search_error.as_deref());
+    let entry_snapshot = page_state.detail.is_some().then_some(snapshot);
+    let entry = match load_entry_data_from_snapshot(state, &page_state, entry_snapshot) {
+        Ok(entry) => entry,
+        Err(error) => entry_data_for_load_error(&error),
+    };
+
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
+    } else {
+        search_results_content
+    };
+    let results_html = if direct_entry {
+        templates::results::render_entry(&state.config, &page_state, &entry).into_string()
+    } else {
+        results_html_for_generation_change(state, &request, &page_state, snapshot, &search_result)
+    };
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
+    let modal_html =
+        templates::modal::render(&state.config, &page_state, modal_entry).into_string();
+    let metadata = templates::layout::page_head_metadata(
+        state,
+        &request,
+        &page_state,
+        page_urls,
+        snapshot,
+        results_content,
+        &entry,
+    );
+
+    generation_change_events_response(
+        snapshot,
+        results_html,
+        modal_html,
+        Some(head_metadata_script(&metadata, Some(target_public_url))),
+        target_public_url,
+    )
+}
+
+fn results_html_for_generation_change(
+    state: &AppState,
+    request: &PageRequest,
+    page_state: &PageState,
+    snapshot: &ServedGenerationSnapshot,
+    search_result: &Option<ServiceResult<SearchResult>>,
+) -> String {
+    match search_result {
+        Some(Ok(result)) => {
+            templates::results::render(page_state, &result.hits, result.total, &state.config)
+                .into_string()
+        }
+        Some(Err(error)) => {
+            templates::results::render_status_error("Search failed", &format!("{error:#}"))
+                .into_string()
+        }
+        None => templates::home::render(state, request, page_state, snapshot).into_string(),
+    }
+}
+
+fn generation_change_error_response(
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+    error: &str,
+    target_public_url: &str,
+) -> Response {
+    let results_html =
+        templates::results::render_status_error("Request failed", error).into_string();
+    let modal_html = templates::modal::render_empty_container().into_string();
+    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", error);
+
+    generation_change_events_response(
+        snapshot,
+        results_html,
+        modal_html,
+        Some(head_metadata_script(&metadata, Some(target_public_url))),
+        target_public_url,
+    )
+}
+
+fn generation_change_events_response(
+    snapshot: &ServedGenerationSnapshot,
+    results_html: String,
+    modal_html: String,
+    metadata_script: Option<String>,
+    target_public_url: &str,
+) -> Response {
+    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+
+    events.push(Ok(
+        ExecuteScript::new(BEGIN_GENERATION_CHANGE_SCRIPT).write_as_axum_sse_event()
+    ));
+    events.push(Ok(PatchElements::new(generation_state_script_html(
+        &snapshot.manifest.generation_id,
+    ))
+    .write_as_axum_sse_event()));
+    events.push(Ok(
+        PatchElements::new(results_html).write_as_axum_sse_event()
+    ));
+    events.push(Ok(ExecuteScript::new(modal_patch_script(
+        &modal_html,
+        target_public_url,
+    ))
+    .write_as_axum_sse_event()));
+
+    if let Some(metadata_script) = metadata_script {
+        events.push(Ok(
+            ExecuteScript::new(metadata_script).write_as_axum_sse_event()
+        ));
+    }
+
+    events.push(Ok(
+        ExecuteScript::new(FINISH_GENERATION_CHANGE_SCRIPT).write_as_axum_sse_event()
+    ));
+
+    Sse::new(stream::iter(events)).into_response()
+}
+
 struct StateEventsNavigation {
     patch_results: bool,
 }
@@ -359,6 +567,12 @@ pub async fn results_slice(
         }
     };
 
+    let snapshot = state.search.snapshot();
+
+    if !generation_matches(query.generation_id.as_deref(), &snapshot) {
+        return stale_generation_response(&snapshot);
+    }
+
     let uri = match public_uri_for_request(&state.config, &headers, &query.url) {
         Ok(uri) => uri,
         Err(error) => {
@@ -376,7 +590,15 @@ pub async fn results_slice(
     if normalized_query(&request.query).is_none() {
         return json_error_response(StatusCode::BAD_REQUEST, "result slice requires q");
     }
-    let search_result = run_search(&state, &request, query.offset, limit);
+
+    let page_state = match resolve_page_state(&state, &snapshot, &request) {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            return json_error_response(status_for_resolution_error(&error), &error.to_string());
+        }
+    };
+    let search_result =
+        run_search_with_snapshot(&state, &snapshot, &page_state, query.offset, limit);
 
     match search_result {
         Ok(result) => {
@@ -408,6 +630,18 @@ pub async fn results_slice(
         }
         Err(error) => json_error_response(status_for_service_error(&error), &format!("{error:#}")),
     }
+}
+
+fn stale_generation_response(snapshot: &ServedGenerationSnapshot) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "stale_generation",
+            "reload": true,
+            "generationId": snapshot.manifest.generation_id.as_str(),
+        })),
+    )
+        .into_response()
 }
 
 fn render_full_page_response(
@@ -900,22 +1134,6 @@ fn load_entry_data_from_snapshot(
             }
         }
     }
-}
-
-fn run_search(
-    state: &AppState,
-    request: &PageRequest,
-    offset: usize,
-    limit: usize,
-) -> ServiceResult<SearchResult> {
-    let snapshot = state.search.snapshot();
-    let page_state = resolve_page_state(state, &snapshot, request)?;
-
-    if page_state.q.is_none() {
-        return Ok(empty_search_result());
-    };
-
-    run_search_with_snapshot(state, &snapshot, &page_state, offset, limit)
 }
 
 fn empty_search_result() -> SearchResult {

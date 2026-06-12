@@ -6,6 +6,8 @@
   const VIRTUAL_REPLACE_LIMIT = PAGE_SIZE * 3;
   const VIRTUAL_JUMP_GAP = PAGE_SIZE * 4;
   const VIRTUAL_JUMP_DELTA = PAGE_SIZE * 3;
+  let generationId = readGenerationId();
+  let generationChanging = false;
   let currentUrl = currentPublicUrl();
   let lastFocusedResultHref = "";
 
@@ -28,6 +30,17 @@
       return {};
     }
   }
+
+  function readGenerationId() {
+    const state = parseJsonScript("generation-state");
+    return typeof state.generationId === "string" ? state.generationId : "";
+  }
+
+  function currentGenerationId() {
+    return generationId;
+  }
+
+  window.nixsearchGenerationId = currentGenerationId;
 
   function publicUrlKey(url = currentPublicUrl()) {
     const parsed = new URL(url || currentPublicUrl(), window.location.href);
@@ -272,6 +285,7 @@
   let virtualResults = null;
   let virtualLoadScheduled = false;
   let virtualRequestSeq = 0;
+  let virtualRequestEpoch = 0;
   let virtualActiveRequest = null;
   let virtualLastTargetOffset = null;
   const virtualSliceCache = new Map();
@@ -344,7 +358,7 @@
     if (!main) return;
     const observer = new MutationObserver(() => {
       const results = document.getElementById("results");
-      if (results && !results.classList.contains("results-loading")) {
+      if (!generationChanging && results && !results.classList.contains("results-loading")) {
         setLoading(false);
         initializeVirtualResults();
         scheduleVisiblePageSync();
@@ -1494,15 +1508,23 @@
     offset,
     limit = PAGE_SIZE,
     pageUrl = currentPublicUrl(),
+    requestGenerationId = currentGenerationId(),
     signal = undefined,
   ) {
-    const url = `${RESULTS_SLICE_URL}?url=${encodeURIComponent(pageUrl)}&offset=${offset}&limit=${limit}`;
-    const res = await fetch(url, { signal });
+    const params = new URLSearchParams();
+    params.set("url", pageUrl);
+    params.set("offset", String(offset));
+    params.set("limit", String(limit));
+    params.set("generation_id", requestGenerationId);
+
+    const res = await fetch(`${RESULTS_SLICE_URL}?${params.toString()}`, {
+      signal,
+    });
     return await res.json();
   }
 
-  function virtualSliceCacheKey(requestUrl, offset, limit) {
-    return `${requestUrl}\n${offset}\n${limit}`;
+  function virtualSliceCacheKey(requestGenerationId, requestUrl, offset, limit) {
+    return JSON.stringify([requestGenerationId, requestUrl, offset, limit]);
   }
 
   function rememberVirtualSlice(key, data) {
@@ -1554,6 +1576,7 @@
       startOffset,
       endOffset: Math.min(total, startOffset + rows.length),
       requestUrl: currentPublicUrl(),
+      generationId: currentGenerationId(),
       topSpacer: createVirtualSpacer("top"),
       bottomSpacer: createVirtualSpacer("bottom"),
       topSpacerHeight: startOffset * rowHeight,
@@ -1706,16 +1729,16 @@
   }
 
   function scheduleVirtualLoad() {
-    if (!virtualResults || virtualLoadScheduled) return;
+    if (generationChanging || !virtualResults || virtualLoadScheduled) return;
     virtualLoadScheduled = true;
     requestAnimationFrame(() => {
       virtualLoadScheduled = false;
-      loadVirtualRowsNearViewport();
+      if (!generationChanging) loadVirtualRowsNearViewport();
     });
   }
 
   async function loadVirtualRowsNearViewport() {
-    if (!virtualResults) return;
+    if (generationChanging || !virtualResults) return;
 
     const targetOffset = virtualOffsetAtViewport();
     const previousTargetOffset = virtualLastTargetOffset;
@@ -1816,24 +1839,56 @@
     virtualActiveRequest = null;
   }
 
+  function beginGenerationChange() {
+    generationChanging = true;
+    cancelVirtualRequest();
+    virtualRequestEpoch += 1;
+    virtualSliceCache.clear();
+    virtualLoadScheduled = false;
+    virtualLastTargetOffset = null;
+    virtualResults = null;
+  }
+
+  function finishGenerationChange() {
+    generationId = readGenerationId();
+    generationChanging = false;
+    initializeVirtualResults();
+    scheduleVisiblePageSync();
+    scheduleVirtualLoad();
+    setLoading(false);
+  }
+
+  window.nixsearchBeginGenerationChange = beginGenerationChange;
+  window.nixsearchFinishGenerationChange = finishGenerationChange;
+
   async function loadVirtualSlice(offset, mode, options = {}) {
-    if (!virtualResults) return;
+    if (generationChanging || !virtualResults) return;
 
     const state = virtualResults;
     const requestUrl = state.requestUrl;
+    const requestGenerationId = state.generationId;
+    const requestEpoch = virtualRequestEpoch;
     const limit = options.limit || PAGE_SIZE;
     const normalizedOffset = Math.max(
       0,
       Math.min(offset, Math.max(0, state.total - 1)),
     );
-    const cacheKey = virtualSliceCacheKey(requestUrl, normalizedOffset, limit);
+    const cacheKey = virtualSliceCacheKey(
+      requestGenerationId,
+      requestUrl,
+      normalizedOffset,
+      limit,
+    );
     const cached = virtualSliceCache.get(cacheKey);
 
     if (virtualActiveRequest && virtualActiveRequest.key === cacheKey) return;
 
     if (cached) {
       if (options.abortExisting || mode === "replace") cancelVirtualRequest();
-      if (applyVirtualSlice(cached, mode, normalizedOffset)) {
+      if (
+        virtualSliceStillCurrent(requestUrl, requestGenerationId, requestEpoch) &&
+        applyVirtualSlice(cached, mode, normalizedOffset)
+      ) {
         scheduleVisiblePageSync();
         scheduleVirtualLoad();
       }
@@ -1858,12 +1913,17 @@
         normalizedOffset,
         limit,
         requestUrl,
+        requestGenerationId,
         controller.signal,
       );
 
+      if (data && data.error === "stale_generation") {
+        handleStaleGenerationSlice();
+        return;
+      }
+
       if (
-        !virtualResults ||
-        virtualResults.requestUrl !== requestUrl ||
+        !virtualSliceStillCurrent(requestUrl, requestGenerationId, requestEpoch) ||
         !virtualActiveRequest ||
         virtualActiveRequest.id !== requestId
       ) {
@@ -1890,12 +1950,31 @@
       if (ownsActiveRequest) {
         virtualActiveRequest = null;
       }
-      scheduleVirtualLoad();
+      if (!generationChanging) scheduleVirtualLoad();
     }
   }
 
+  function virtualSliceStillCurrent(
+    requestUrl,
+    requestGenerationId,
+    requestEpoch,
+  ) {
+    return (
+      !generationChanging &&
+      virtualRequestEpoch === requestEpoch &&
+      virtualResults &&
+      virtualResults.requestUrl === requestUrl &&
+      virtualResults.generationId === requestGenerationId
+    );
+  }
+
+  function handleStaleGenerationSlice() {
+    beginGenerationChange();
+    reconcile(currentPublicUrl());
+  }
+
   function applyVirtualSlice(data, mode, requestedOffset) {
-    if (!virtualResults || typeof data.rows !== "string") return false;
+    if (generationChanging || !virtualResults || typeof data.rows !== "string") return false;
 
     const state = virtualResults;
     const previousTotal = state.total;
@@ -2030,6 +2109,7 @@
   });
   window.addEventListener(RECONCILE_EVENT, () => {
     setTimeout(() => {
+      if (generationChanging) return;
       initializeVirtualResults();
       scheduleVisiblePageSync();
     }, 50);

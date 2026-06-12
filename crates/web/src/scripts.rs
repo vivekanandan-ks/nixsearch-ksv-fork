@@ -180,6 +180,67 @@ mod tests {
     }
 
     #[test]
+    fn navigation_script_reads_generation_state() {
+        let script = navigation_script();
+
+        assert!(script.contains("generation-state"));
+        assert!(script.contains("function readGenerationId()"));
+        assert!(script.contains("window.nixsearchGenerationId = currentGenerationId;"));
+    }
+
+    #[test]
+    fn navigation_script_sends_generation_with_slice_requests() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"params.set("generation_id", requestGenerationId);"#));
+        assert!(script.contains("fetchResultSlice("));
+    }
+
+    #[test]
+    fn navigation_script_uses_generation_in_virtual_cache_keys() {
+        let script = navigation_script();
+
+        assert!(script.contains(
+            "function virtualSliceCacheKey(requestGenerationId, requestUrl, offset, limit)"
+        ));
+        assert!(
+            script.contains("JSON.stringify([requestGenerationId, requestUrl, offset, limit])")
+        );
+    }
+
+    #[test]
+    fn navigation_script_handles_stale_generation_before_applying_slice() {
+        let script = navigation_script();
+
+        let stale = script.find(r#"data.error === "stale_generation""#).unwrap();
+        let remember = script
+            .find("rememberVirtualSlice(cacheKey, data);")
+            .unwrap();
+        let apply = script
+            .find("applyVirtualSlice(data, mode, normalizedOffset)")
+            .unwrap();
+
+        assert!(stale < remember);
+        assert!(stale < apply);
+        assert!(script.contains("function handleStaleGenerationSlice()"));
+        assert!(script.contains("beginGenerationChange();"));
+    }
+
+    #[test]
+    fn navigation_script_gates_virtual_loading_during_generation_change() {
+        let script = navigation_script();
+
+        assert!(script.contains("let generationChanging = false;"));
+        assert!(script.contains("function beginGenerationChange()"));
+        assert!(script.contains("function finishGenerationChange()"));
+        assert!(script.contains("virtualSliceCache.clear();"));
+        assert!(script.contains("virtualRequestEpoch += 1;"));
+        assert!(script.contains(
+            "if (generationChanging || !virtualResults || virtualLoadScheduled) return;"
+        ));
+    }
+
+    #[test]
     fn dialog_reconcile_script_loads_asset() {
         assert!(dialog_reconcile_script().contains("entry-modal"));
         assert!(dialog_reconcile_script().contains("showModal"));

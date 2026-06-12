@@ -21,6 +21,10 @@ fn render_empty() -> Markup {
     }
 }
 
+pub(crate) fn render_empty_container() -> Markup {
+    render_empty()
+}
+
 fn render_modal(config: &AppConfig, page_state: &PageState, entry: &EntryData) -> Markup {
     let close_href = close_url_for_state(config, page_state);
 

@@ -94,6 +94,7 @@ pub fn render_full_page(
     };
     let modal_markup = modal::render(&state.config, page_state, modal_entry);
     let source_metadata = source_metadata_json(&state.config);
+    let generation_state = generation_state_json(&served_generation.manifest.generation_id);
     let initial_history_metadata = initial_return_metadata.map(initial_history_metadata_json);
 
     let metadata = page_head_metadata(
@@ -121,7 +122,7 @@ pub fn render_full_page(
     };
 
     let reconcile_attr = format!(
-        "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search) + '&previous_url=' + encodeURIComponent(window.nixsearchPreviousUrl || ''))"
+        "@get('{RECONCILE_EVENTS_URL}?url=' + encodeURIComponent(location.pathname + location.search) + '&previous_url=' + encodeURIComponent(window.nixsearchPreviousUrl || '') + '&generation_id=' + encodeURIComponent(window.nixsearchGenerationId ? window.nixsearchGenerationId() : ''))"
     );
 
     html! {
@@ -174,6 +175,9 @@ pub fn render_full_page(
                 }
                 (footer::render_footer(state, &served_generation.manifest))
 
+                script #generation-state type="application/json" {
+                    (PreEscaped(&generation_state))
+                }
                 script #source-metadata type="application/json" {
                     (PreEscaped(&source_metadata))
                 }
@@ -608,6 +612,25 @@ struct InitialHistoryMetadata<'a> {
     return_head_metadata_url: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationState<'a> {
+    generation_id: &'a str,
+}
+
+pub(crate) fn generation_state_script_html(generation_id: &str) -> String {
+    html! {
+        script #generation-state type="application/json" {
+            (PreEscaped(generation_state_json(generation_id)))
+        }
+    }
+    .into_string()
+}
+
+fn generation_state_json(generation_id: &str) -> String {
+    json_script_content(&GenerationState { generation_id })
+}
+
 fn initial_history_metadata_json(return_metadata: &InitialReturnMetadata) -> String {
     json_script_content(&InitialHistoryMetadata {
         return_head_metadata: Some(&return_metadata.metadata),
@@ -639,8 +662,8 @@ mod tests {
     use crate::request::{PageQuery, PageRequest, SourceFilter};
 
     use super::{
-        EntryData, IndexMetadata, analytics_script, description_for, json_script_content,
-        page_metadata, title_for, title_for_entry,
+        EntryData, IndexMetadata, analytics_script, description_for, generation_state_json,
+        json_script_content, page_metadata, title_for, title_for_entry,
     };
 
     fn config() -> nixsearch_config::app::AppConfig {
@@ -735,6 +758,16 @@ mod tests {
 
         assert!(!json.contains("</script>"));
         assert!(json.contains(r#"\u003c/script\u003e\u003cb\u003e\u0026"#));
+    }
+
+    #[test]
+    fn generation_state_json_uses_script_safe_camel_case_payload() {
+        assert_eq!(
+            generation_state_json("sha256:abc"),
+            r#"{"generationId":"sha256:abc"}"#
+        );
+
+        assert!(!generation_state_json("</script>").contains("</script>"));
     }
 
     #[test]
