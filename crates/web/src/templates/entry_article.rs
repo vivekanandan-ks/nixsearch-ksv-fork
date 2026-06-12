@@ -62,9 +62,7 @@ fn render_found(
                         }
                     }
                 }
-                @if let Some(close_href) = close_href {
-                    a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
-                }
+                (render_close_link(close_href))
             }
             (detail::render(document, config))
         }
@@ -76,9 +74,7 @@ fn render_error(message: &str, close_href: Option<&str>) -> Markup {
         article.entry {
             header {
                 h1 { "Error" }
-                @if let Some(close_href) = close_href {
-                    a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
-                }
+                (render_close_link(close_href))
             }
             div.results-error { (message) }
         }
@@ -90,9 +86,7 @@ fn render_not_found(entry: &str, close_href: Option<&str>) -> Markup {
         article.entry {
             header {
                 h1 { "Entry not found" }
-                @if let Some(close_href) = close_href {
-                    a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
-                }
+                (render_close_link(close_href))
             }
             div.results-error {
                 "Entry " code { (entry) } " was not found."
@@ -111,9 +105,7 @@ fn render_ambiguous(
         article.entry {
             header {
                 h1 { "Multiple entries found" }
-                @if let Some(close_href) = close_href {
-                    a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
-                }
+                (render_close_link(close_href))
             }
             p { "This name exists in multiple forms. Choose one:" }
             ul {
@@ -127,6 +119,14 @@ fn render_ambiguous(
                     }
                 }
             }
+        }
+    }
+}
+
+fn render_close_link(close_href: Option<&str>) -> Markup {
+    html! {
+        @if let Some(close_href) = close_href {
+            a.entry-close href=(close_href) data-role="entry-close" autofocus { "✕ Close" }
         }
     }
 }

@@ -824,9 +824,9 @@ dialog::backdrop {
 }
 
 .entry-page {
-  width: calc(100% - 1rem);
+  width: calc(100% - 1.5rem);
   max-width: 800px;
-  margin: 6rem auto 0;
+  margin: 6.5rem auto 0;
   background: var(--header-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -943,6 +943,11 @@ dialog::backdrop {
 .entry-section p {
   margin: 0;
   line-height: 1.5;
+}
+
+.entry-section a,
+.entry-section code {
+  overflow-wrap: anywhere;
 }
 
 .entry-section ul {
@@ -1145,8 +1150,8 @@ a:hover {
   }
 
   .entry-page {
-    width: calc(100% - 0.5rem);
-    margin-top: 10rem;
+    width: calc(100% - 1rem);
+    margin-top: 10.5rem;
   }
 
   .entry {

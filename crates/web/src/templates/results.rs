@@ -119,11 +119,19 @@ pub fn render_entry(config: &AppConfig, state: &PageState, entry: &EntryData) ->
     }
 }
 
-pub fn render_error(title: &str, error: &str) -> Markup {
+pub fn render_page_error(title: &str, error: &str) -> Markup {
     html! {
         div #results.results-error {
             h1 { (title) }
             p { (error) }
+        }
+    }
+}
+
+pub fn render_status_error(title: &str, error: &str) -> Markup {
+    html! {
+        div #results.results-error {
+            strong { (title) ":" } " " (error)
         }
     }
 }

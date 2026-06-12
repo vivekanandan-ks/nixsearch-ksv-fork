@@ -1133,10 +1133,7 @@ mod tests {
             let (status, body) = request_body(app.clone(), url).await;
 
             assert_eq!(status, StatusCode::OK, "{url}");
-            assert!(
-                body.contains("entry-page"),
-                "{url}"
-            );
+            assert!(body.contains("entry-page"), "{url}");
             assert!(body.contains("programs.git.enable"), "{url}");
             assert_h1_count(&body, 1);
             assert_empty_modal_container(&body);

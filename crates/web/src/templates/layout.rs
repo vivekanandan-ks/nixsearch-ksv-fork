@@ -35,7 +35,7 @@ const ROBOTS_NOINDEX_FOLLOW: &str = "noindex,follow";
 pub enum ResultsContent<'a> {
     Home,
     SearchResults(&'a SearchResult),
-    Entry(&'a EntryData),
+    DirectEntry(&'a EntryData),
     Error { title: &'a str, message: &'a str },
 }
 
@@ -80,12 +80,14 @@ pub fn render_full_page(
         ResultsContent::SearchResults(result) => {
             results::render(page_state, &result.hits, result.total, &state.config)
         }
-        ResultsContent::Entry(entry) => results::render_entry(&state.config, page_state, entry),
-        ResultsContent::Error { title, message } => results::render_error(title, message),
+        ResultsContent::DirectEntry(entry) => {
+            results::render_entry(&state.config, page_state, entry)
+        }
+        ResultsContent::Error { title, message } => results::render_page_error(title, message),
     };
 
     let empty_entry = EntryData::Empty;
-    let modal_entry = if matches!(results_content, ResultsContent::Entry(_)) {
+    let modal_entry = if matches!(results_content, ResultsContent::DirectEntry(_)) {
         &empty_entry
     } else {
         entry
@@ -232,7 +234,7 @@ pub(crate) fn page_head_metadata(
     let search_result_for_metadata = match results_content {
         ResultsContent::SearchResults(result) => Ok(result),
         ResultsContent::Error { message, .. } => Err(message),
-        ResultsContent::Home | ResultsContent::Entry(_) => Err(""),
+        ResultsContent::Home | ResultsContent::DirectEntry(_) => Err(""),
     };
 
     let index_metadata = page_index_metadata(

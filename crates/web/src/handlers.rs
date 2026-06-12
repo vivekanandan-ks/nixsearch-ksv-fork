@@ -182,23 +182,17 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let search_error = search_error_message(&search_result);
     let results_content = results_content_for_search(&search_result, search_error.as_deref());
 
-    let results_html = if navigation.patch_results || direct_entry {
+    let context_results_html = if !direct_entry && navigation.patch_results {
         Some(match &search_result {
             Some(Ok(result)) => {
                 templates::results::render(&page_state, &result.hits, result.total, &state.config)
                     .into_string()
             }
             Some(Err(error)) => {
-                templates::results::render_error("Search failed", &format!("{error:#}"))
+                templates::results::render_status_error("Search failed", &format!("{error:#}"))
                     .into_string()
             }
-            None => {
-                if direct_entry {
-                    String::new()
-                } else {
-                    templates::home::render(&state, &request, &page_state, &snapshot).into_string()
-                }
-            }
+            None => templates::home::render(&state, &request, &page_state, &snapshot).into_string(),
         })
     } else {
         None
@@ -218,7 +212,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
                     page_state: &page_state,
                     page_urls: &page_urls,
                     snapshot: &snapshot,
-                    results_html,
+                    results_html: context_results_html,
                     results_content,
                     target_public_url: &target_public_url,
                 },
@@ -229,13 +223,10 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let results_html = if direct_entry {
         Some(templates::results::render_entry(&state.config, &page_state, &entry).into_string())
     } else {
-        results_html
+        context_results_html
     };
-    let modal_entry = if direct_entry {
-        EntryData::Empty
-    } else {
-        entry.clone()
-    };
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
     let modal_html =
         templates::modal::render(&state.config, &page_state, &modal_entry).into_string();
 
@@ -473,13 +464,14 @@ fn render_full_page_response(
             }
         };
 
-    let results_content = if request.is_direct_entry() {
-        ResultsContent::Entry(&entry)
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
     } else {
         search_results_content
     };
 
-    let initial_return_metadata = if request.is_direct_entry() {
+    let initial_return_metadata = if direct_entry {
         None
     } else {
         initial_return_metadata(state, &page_urls, &snapshot, &page_state, results_content)
@@ -593,13 +585,14 @@ fn render_full_page_with_entry_error_response(
     let search_results_content = results_content_for_search(search_result, search_error.as_deref());
     let entry = entry_data_for_load_error(error);
 
-    let results_content = if request.is_direct_entry() {
-        ResultsContent::Entry(&entry)
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
     } else {
         search_results_content
     };
 
-    let initial_return_metadata = if request.is_direct_entry() {
+    let initial_return_metadata = if direct_entry {
         None
     } else {
         initial_return_metadata(state, &page_urls, snapshot, page_state, results_content)
@@ -750,7 +743,7 @@ fn sse_error_response(
     error: &str,
     target_public_url: Option<&str>,
 ) -> Response {
-    let html = templates::results::render_error("Request failed", error).into_string();
+    let html = templates::results::render_status_error("Request failed", error).into_string();
     let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", error);
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -781,11 +774,8 @@ struct SseEntryErrorContext<'a> {
 fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoadError) -> Response {
     let entry = entry_data_for_load_error(error);
     let direct_entry = context.request.is_direct_entry();
-    let modal_entry = if direct_entry {
-        EntryData::Empty
-    } else {
-        entry.clone()
-    };
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
     let modal_html =
         templates::modal::render(&context.state.config, context.page_state, &modal_entry)
             .into_string();
