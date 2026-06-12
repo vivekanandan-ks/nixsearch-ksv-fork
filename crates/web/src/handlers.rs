@@ -137,7 +137,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
     let snapshot = state.search.snapshot();
 
-    if !generation_matches(query.generation_id.as_deref(), &snapshot) {
+    if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return generation_change_response(
             &state,
             &target_uri,
@@ -281,11 +281,29 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     Sse::new(stream::iter(events)).into_response()
 }
 
-fn generation_matches(
+fn client_generation_matches(
     client_generation_id: Option<&str>,
     snapshot: &ServedGenerationSnapshot,
 ) -> bool {
     client_generation_id == Some(snapshot.manifest.generation_id.as_str())
+}
+
+struct GenerationChangeContent {
+    results_html: String,
+    modal_html: String,
+    metadata_script: String,
+}
+
+struct GenerationChangeError {
+    message: String,
+}
+
+impl GenerationChangeError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 fn generation_change_response(
@@ -295,42 +313,35 @@ fn generation_change_response(
     page_urls: &PageUrls,
     snapshot: &ServedGenerationSnapshot,
 ) -> Response {
-    let request = match page_request_from_public_uri(target_uri) {
-        Ok(request) => request,
-        Err(error) => {
-            return generation_change_error_response(
-                page_urls,
-                snapshot,
-                &error.to_string(),
-                target_public_url,
-            );
-        }
+    let content = match generation_change_content(
+        state,
+        target_uri,
+        target_public_url,
+        page_urls,
+        snapshot,
+    ) {
+        Ok(content) => content,
+        Err(error) => generation_change_error_content(page_urls, target_public_url, error),
     };
 
-    let page_state = match resolve_page_state(state, snapshot, &request) {
-        Ok(page_state) => page_state,
-        Err(error) => {
-            return generation_change_error_response(
-                page_urls,
-                snapshot,
-                &error.to_string(),
-                target_public_url,
-            );
-        }
-    };
+    generation_change_events_response(snapshot, content, target_public_url)
+}
+
+fn generation_change_content(
+    state: &AppState,
+    target_uri: &Uri,
+    target_public_url: &str,
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+) -> Result<GenerationChangeContent, GenerationChangeError> {
+    let request = page_request_from_public_uri(target_uri)
+        .map_err(|error| GenerationChangeError::new(error.to_string()))?;
+
+    let page_state = resolve_page_state(state, snapshot, &request)
+        .map_err(|error| GenerationChangeError::new(error.to_string()))?;
 
     let search_result = if normalized_query(&request.query).is_some() {
-        let offset = match search_offset(&request) {
-            Ok(offset) => offset,
-            Err(error) => {
-                return generation_change_error_response(
-                    page_urls,
-                    snapshot,
-                    &error,
-                    target_public_url,
-                );
-            }
-        };
+        let offset = search_offset(&request).map_err(GenerationChangeError::new)?;
 
         Some(run_search_with_snapshot(
             state,
@@ -344,12 +355,7 @@ fn generation_change_response(
     };
 
     if let Some(Err(ServiceError::Resolution(error))) = &search_result {
-        return generation_change_error_response(
-            page_urls,
-            snapshot,
-            &error.to_string(),
-            target_public_url,
-        );
+        return Err(GenerationChangeError::new(error.to_string()));
     }
 
     let search_error = search_error_message(&search_result);
@@ -370,7 +376,7 @@ fn generation_change_response(
     let results_html = if direct_entry {
         templates::results::render_entry(&state.config, &page_state, &entry).into_string()
     } else {
-        results_html_for_generation_change(state, &request, &page_state, snapshot, &search_result)
+        render_navigation_results_html(state, &request, &page_state, snapshot, &search_result)
     };
     let empty_entry = EntryData::Empty;
     let modal_entry = if direct_entry { &empty_entry } else { &entry };
@@ -386,16 +392,14 @@ fn generation_change_response(
         &entry,
     );
 
-    generation_change_events_response(
-        snapshot,
+    Ok(GenerationChangeContent {
         results_html,
         modal_html,
-        Some(head_metadata_script(&metadata, Some(target_public_url))),
-        target_public_url,
-    )
+        metadata_script: head_metadata_script(&metadata, Some(target_public_url)),
+    })
 }
 
-fn results_html_for_generation_change(
+fn render_navigation_results_html(
     state: &AppState,
     request: &PageRequest,
     page_state: &PageState,
@@ -415,31 +419,27 @@ fn results_html_for_generation_change(
     }
 }
 
-fn generation_change_error_response(
+fn generation_change_error_content(
     page_urls: &PageUrls,
-    snapshot: &ServedGenerationSnapshot,
-    error: &str,
     target_public_url: &str,
-) -> Response {
+    error: GenerationChangeError,
+) -> GenerationChangeContent {
+    let message = error.message;
     let results_html =
-        templates::results::render_status_error("Request failed", error).into_string();
+        templates::results::render_status_error("Request failed", &message).into_string();
     let modal_html = templates::modal::render_empty_container().into_string();
-    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", error);
+    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", &message);
 
-    generation_change_events_response(
-        snapshot,
+    GenerationChangeContent {
         results_html,
         modal_html,
-        Some(head_metadata_script(&metadata, Some(target_public_url))),
-        target_public_url,
-    )
+        metadata_script: head_metadata_script(&metadata, Some(target_public_url)),
+    }
 }
 
 fn generation_change_events_response(
     snapshot: &ServedGenerationSnapshot,
-    results_html: String,
-    modal_html: String,
-    metadata_script: Option<String>,
+    content: GenerationChangeContent,
     target_public_url: &str,
 ) -> Response {
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
@@ -452,19 +452,16 @@ fn generation_change_events_response(
     ))
     .write_as_axum_sse_event()));
     events.push(Ok(
-        PatchElements::new(results_html).write_as_axum_sse_event()
+        PatchElements::new(content.results_html).write_as_axum_sse_event()
     ));
     events.push(Ok(ExecuteScript::new(modal_patch_script(
-        &modal_html,
+        &content.modal_html,
         target_public_url,
     ))
     .write_as_axum_sse_event()));
-
-    if let Some(metadata_script) = metadata_script {
-        events.push(Ok(
-            ExecuteScript::new(metadata_script).write_as_axum_sse_event()
-        ));
-    }
+    events.push(Ok(
+        ExecuteScript::new(content.metadata_script).write_as_axum_sse_event()
+    ));
 
     events.push(Ok(
         ExecuteScript::new(FINISH_GENERATION_CHANGE_SCRIPT).write_as_axum_sse_event()
@@ -569,7 +566,7 @@ pub async fn results_slice(
 
     let snapshot = state.search.snapshot();
 
-    if !generation_matches(query.generation_id.as_deref(), &snapshot) {
+    if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return stale_generation_response(&snapshot);
     }
 

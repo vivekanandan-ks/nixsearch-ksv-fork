@@ -1842,6 +1842,7 @@
   function beginGenerationChange() {
     generationChanging = true;
     cancelVirtualRequest();
+    setVirtualSpacerLoading("replace", false);
     virtualRequestEpoch += 1;
     virtualSliceCache.clear();
     virtualLoadScheduled = false;
@@ -1974,7 +1975,13 @@
   }
 
   function applyVirtualSlice(data, mode, requestedOffset) {
-    if (generationChanging || !virtualResults || typeof data.rows !== "string") return false;
+    if (
+      generationChanging ||
+      !virtualResults ||
+      typeof data.rows !== "string"
+    ) {
+      return false;
+    }
 
     const state = virtualResults;
     const previousTotal = state.total;

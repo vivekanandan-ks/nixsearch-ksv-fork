@@ -15,14 +15,14 @@ pub fn render(config: &AppConfig, page_state: &PageState, entry: &EntryData) -> 
     }
 }
 
+pub(crate) fn render_empty_container() -> Markup {
+    render_empty()
+}
+
 fn render_empty() -> Markup {
     html! {
         div #entry-modal-container {}
     }
-}
-
-pub(crate) fn render_empty_container() -> Markup {
-    render_empty()
 }
 
 fn render_modal(config: &AppConfig, page_state: &PageState, entry: &EntryData) -> Markup {
