@@ -67,7 +67,7 @@ impl SeoSidecarAccumulator {
             .observe(document.kind(), document.is_seo_eligible_entry());
     }
 
-    pub fn into_sidecar(self, generation_id: impl Into<String>) -> SeoSidecar {
+    pub fn into_sidecar_for_manifest(self, manifest: &IndexGenerationManifest) -> SeoSidecar {
         let mut refs = BTreeMap::<SeoRefKey, SeoCounts>::new();
         let mut entries = Vec::with_capacity(self.entries.len());
 
@@ -91,6 +91,12 @@ impl SeoSidecarAccumulator {
             });
         }
 
+        for (key, expected) in manifest_supported_counts(manifest) {
+            if expected.has_supported_target() {
+                refs.entry(key).or_default();
+            }
+        }
+
         let refs = refs
             .into_iter()
             .map(|(key, counts)| SeoRefFacts {
@@ -106,7 +112,7 @@ impl SeoSidecarAccumulator {
 
         SeoSidecar {
             schema_version: SEO_SIDECAR_SCHEMA_VERSION,
-            generation_id: generation_id.into(),
+            generation_id: manifest.generation_id.clone(),
             refs,
             entries,
         }
@@ -141,6 +147,15 @@ impl SeoSidecar {
                     entry.source, entry.ref_id, entry.name
                 )
             })?;
+
+            if entry.total_supported_indexed_count == 0 {
+                bail!(
+                    "SEO sidecar entry {}/{}/{} has no indexed documents",
+                    entry.source,
+                    entry.ref_id,
+                    entry.name
+                );
+            }
 
             let key = SeoEntryKey {
                 source: entry.source.clone(),
@@ -259,7 +274,7 @@ impl SeoSidecar {
         }
 
         for (key, expected) in &manifest_expected {
-            if expected.total_supported_count() > 0 && !seen_refs.contains(key) {
+            if expected.has_supported_target() && !seen_refs.contains(key) {
                 bail!(
                     "SEO sidecar missing ref totals for {}/{} expected package={} option={}",
                     key.source,
@@ -339,6 +354,10 @@ struct SeoManifestExpectedCounts {
 impl SeoManifestExpectedCounts {
     fn total_supported_count(&self) -> usize {
         self.package_supported_count + self.option_supported_count
+    }
+
+    fn has_supported_target(&self) -> bool {
+        self.has_package_target || self.has_option_target
     }
 
     fn expects_zero_supported_entries(&self) -> bool {
@@ -533,7 +552,7 @@ mod tests {
             accumulator.observe(doc);
         }
 
-        accumulator.into_sidecar(manifest.generation_id.clone())
+        accumulator.into_sidecar_for_manifest(manifest)
     }
 
     fn empty_sidecar(manifest: &IndexGenerationManifest) -> SeoSidecar {
@@ -683,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_zero_document_supported_targets_without_sidecar_refs() {
+    fn validation_rejects_missing_zero_document_supported_refs() {
         let manifest = IndexGenerationManifest::with_generated_at(
             0,
             vec![
@@ -696,7 +715,63 @@ mod tests {
 
         let sidecar = empty_sidecar(&manifest);
 
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("missing ref totals"));
+    }
+
+    #[test]
+    fn accumulator_emits_zero_count_ref_for_zero_document_supported_targets() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![
+                target(ArtifactKind::PackagesJson, 0),
+                target(ArtifactKind::OptionsJson, 0),
+            ],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&manifest);
+
         sidecar.validate_for_manifest(&manifest).unwrap();
+        assert_eq!(sidecar.refs.len(), 1);
+        assert_eq!(sidecar.refs[0].source, SOURCE);
+        assert_eq!(sidecar.refs[0].ref_id, REF);
+        assert_eq!(sidecar.refs[0].total_supported_indexed_count, 0);
+        assert!(sidecar.entries.is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_zero_count_entry() {
+        let manifest = manifest(0, 0);
+        let sidecar = SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: vec![crate::seo::SeoRefFacts {
+                source: SOURCE.to_owned(),
+                ref_id: REF.to_owned(),
+                total_supported_indexed_count: 0,
+                package_supported_count: 0,
+                option_supported_count: 0,
+                package_eligible_count: 0,
+                option_eligible_count: 0,
+            }],
+            entries: vec![crate::seo::SeoEntryFacts {
+                source: SOURCE.to_owned(),
+                ref_id: REF.to_owned(),
+                name: "fake".to_owned(),
+                total_supported_indexed_count: 0,
+                package_supported_count: 0,
+                option_supported_count: 0,
+                package_eligible_count: 0,
+                option_eligible_count: 0,
+            }],
+        };
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("has no indexed documents"));
     }
 
     #[test]

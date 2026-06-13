@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use time::OffsetDateTime;
 
-use crate::manifest::{IndexGenerationManifest, refresh_generation_id, validate_generation_id};
+use crate::manifest::{IndexGenerationManifest, validate_generation_id};
 use crate::seo::SeoSidecar;
 
 #[derive(Debug, Clone)]
@@ -246,10 +246,10 @@ impl IndexStore {
         let generation_path = self.validate_generation_path(generation_path)?;
         let path = self.manifest_path(&generation_path);
 
-        let mut manifest = manifest.clone();
-        refresh_generation_id(&mut manifest).context("failed to compute index generation id")?;
+        validate_generation_id(manifest)
+            .context("failed to validate supplied index generation manifest")?;
 
-        let bytes = serde_json::to_vec_pretty(&manifest)
+        let bytes = serde_json::to_vec_pretty(manifest)
             .context("failed to serialize index generation manifest")?;
 
         let temp_path =
@@ -289,6 +289,9 @@ impl IndexStore {
     ) -> Result<()> {
         let generation_path = self.validate_generation_path(generation_path)?;
         let path = self.seo_sidecar_path(&generation_path);
+
+        validate_generation_id(manifest)
+            .context("failed to validate supplied index generation manifest")?;
 
         sidecar
             .validate_for_manifest(manifest)
@@ -817,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn index_store_write_manifest_overwrites_stale_generation_id() {
+    fn index_store_write_manifest_rejects_mismatched_generation_id() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
@@ -836,14 +839,54 @@ mod tests {
         )
         .unwrap();
         manifest.generation_id = "sha256:wrong".to_owned();
-        let expected = canonical_generation_id(&manifest).unwrap();
 
-        store.write_manifest(&generation, &manifest).unwrap();
+        let error = store.write_manifest(&generation, &manifest).unwrap_err();
 
-        let raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(store.manifest_path(&generation)).unwrap()).unwrap();
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
 
-        assert_eq!(raw["generation_id"].as_str(), Some(expected.as_str()));
+    #[test]
+    fn index_store_write_seo_sidecar_rejects_mismatched_manifest_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let mut manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 0,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = crate::seo::SeoSidecar {
+            schema_version: crate::seo::SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: vec![crate::seo::SeoRefFacts {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                total_supported_indexed_count: 0,
+                package_supported_count: 0,
+                option_supported_count: 0,
+                package_eligible_count: 0,
+                option_eligible_count: 0,
+            }],
+            entries: Vec::new(),
+        };
+
+        manifest.generation_id = "sha256:wrong".to_owned();
+
+        let error = store
+            .write_seo_sidecar(&generation, &manifest, &sidecar)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
 
     #[test]

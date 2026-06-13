@@ -153,7 +153,7 @@ pub fn publish_documents_with_manifest_targets(
     let manifest =
         IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at).unwrap();
 
-    let sidecar = seo_facts.into_sidecar(manifest.generation_id.clone());
+    let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
 
     store
         .write_seo_sidecar(&generation, &manifest, &sidecar)

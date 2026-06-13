@@ -101,9 +101,35 @@ pub enum ReconcileOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReconcileReport {
-    pub outcome: ReconcileOutcome,
-    pub generation: PublishedGeneration,
+pub enum ReconcileReport {
+    Unchanged { generation: PublishedGeneration },
+    Reloaded { generation: PublishedGeneration },
+    Superseded,
+}
+
+impl ReconcileReport {
+    pub fn outcome(&self) -> ReconcileOutcome {
+        match self {
+            Self::Unchanged { .. } => ReconcileOutcome::Unchanged,
+            Self::Reloaded { .. } => ReconcileOutcome::Reloaded,
+            Self::Superseded => ReconcileOutcome::Superseded,
+        }
+    }
+
+    pub fn generation(&self) -> Option<&PublishedGeneration> {
+        match self {
+            Self::Unchanged { generation } | Self::Reloaded { generation } => Some(generation),
+            Self::Superseded => None,
+        }
+    }
+
+    fn from_outcome(outcome: ReconcileOutcome, generation: PublishedGeneration) -> Self {
+        match outcome {
+            ReconcileOutcome::Unchanged => Self::Unchanged { generation },
+            ReconcileOutcome::Reloaded => Self::Reloaded { generation },
+            ReconcileOutcome::Superseded => Self::Superseded,
+        }
+    }
 }
 
 pub type ServiceResult<T> = std::result::Result<T, ServiceError>;
@@ -251,10 +277,7 @@ impl SearchService {
         })?;
         let outcome = self.reconcile_published_generation(&index_store, generation.clone())?;
 
-        Ok(ReconcileReport {
-            outcome,
-            generation,
-        })
+        Ok(ReconcileReport::from_outcome(outcome, generation))
     }
 
     fn reconcile_published_generation(
@@ -274,6 +297,10 @@ impl SearchService {
 
             if current.matches(&generation) {
                 if current.seo_facts.is_loaded() {
+                    if !published_generation_is_current(index_store, &generation)? {
+                        return Ok(ReconcileOutcome::Superseded);
+                    }
+
                     return Ok(ReconcileOutcome::Unchanged);
                 }
 
@@ -1338,8 +1365,8 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
-        assert_eq!(report.generation.path, path);
+        assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
+        assert_eq!(report.generation().unwrap().path, path);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
     }
 
@@ -1369,7 +1396,7 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
         assert_eq!(service.snapshot().path, path);
         assert_eq!(
@@ -1409,7 +1436,7 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
 
         match service.snapshot().seo_facts {
@@ -1537,6 +1564,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_loaded_generation_candidate_is_superseded() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let store = IndexStore::new(&index_dir);
+        let old_manifest = store.read_manifest(&old_path).unwrap();
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        assert!(matches!(
+            service.snapshot().seo_facts,
+            SeoFactsState::Loaded(_)
+        ));
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+
+        service.reconcile_current_generation().unwrap();
+
+        let outcome = service
+            .reconcile_published_generation(
+                &store,
+                PublishedGeneration {
+                    path: old_path,
+                    manifest: old_manifest,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
+        assert_eq!(service.snapshot().path, next_path);
+        assert_eq!(service.snapshot().manifest, next_manifest);
+    }
+
+    #[test]
     fn reconcile_published_generation_rejects_mismatched_generation_id() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
@@ -1569,8 +1634,8 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.outcome, ReconcileOutcome::Reloaded);
-        assert_eq!(report.generation.path, next_path);
+        assert_eq!(report.outcome(), ReconcileOutcome::Reloaded);
+        assert_eq!(report.generation().unwrap().path, next_path);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest.generated_at, next_time);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
@@ -1590,7 +1655,7 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.generation.path, next_path);
+        assert_eq!(report.generation().unwrap().path, next_path);
 
         let result = service
             .search_with_snapshot(

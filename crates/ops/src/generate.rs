@@ -196,7 +196,7 @@ async fn build_and_publish_generation_with_policy(
         writer.commit()?;
 
         let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
-        let sidecar = seo_facts.into_sidecar(manifest.generation_id.clone());
+        let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
 
         index_store.write_seo_sidecar(&generation_path, &manifest, &sidecar)?;
         index_store.write_manifest(&generation_path, &manifest)?;

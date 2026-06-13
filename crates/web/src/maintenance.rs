@@ -10,7 +10,7 @@ use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
-use nixsearch_service::{ReconcileOutcome, SearchService};
+use nixsearch_service::{ReconcileOutcome, ReconcileReport, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -49,25 +49,21 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
 
     loop {
         let reconcile_report = match search.reconcile_current_generation() {
-            Ok(report) if report.outcome == ReconcileOutcome::Superseded => {
-                tracing::debug!(
-                    generation = %report.generation.path,
-                    "published index generation changed during reconciliation"
-                );
+            Ok(ReconcileReport::Superseded) => {
+                tracing::debug!("published index generation changed during reconciliation");
 
                 tokio::time::sleep(Duration::ZERO).await;
                 continue;
             }
-            Ok(report) => {
-                if report.outcome == ReconcileOutcome::Reloaded {
-                    tracing::info!(
-                        generation = %report.generation.path,
-                        "detected published index generation change"
-                    );
-                }
+            Ok(ReconcileReport::Reloaded { generation }) => {
+                tracing::info!(
+                    generation = %generation.path,
+                    "detected published index generation change"
+                );
 
-                report
+                ReconcileReport::Reloaded { generation }
             }
+            Ok(report) => report,
             Err(error) => {
                 tracing::error!(
                     "failed to switch to published index generation; continuing to serve previous generation: {error:#}"
@@ -86,8 +82,12 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
                 continue;
             }
         };
-        let generation = reconcile_report.generation;
-        let reconcile_outcome = reconcile_report.outcome;
+        let reconcile_outcome = reconcile_report.outcome();
+        let generation = match reconcile_report {
+            ReconcileReport::Unchanged { generation }
+            | ReconcileReport::Reloaded { generation } => generation,
+            ReconcileReport::Superseded => unreachable!("superseded reports are handled above"),
+        };
 
         if should_validate_reconciled_generation(reconcile_outcome)
             && let Err(error) = SearchService::validate_generation(&generation.path)
