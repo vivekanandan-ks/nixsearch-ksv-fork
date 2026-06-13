@@ -116,13 +116,6 @@ impl ReconcileReport {
         }
     }
 
-    pub fn generation(&self) -> Option<&PublishedGeneration> {
-        match self {
-            Self::Unchanged { generation } | Self::Reloaded { generation } => Some(generation),
-            Self::Superseded => None,
-        }
-    }
-
     fn from_outcome(outcome: ReconcileOutcome, generation: PublishedGeneration) -> Self {
         match outcome {
             ReconcileOutcome::Unchanged => Self::Unchanged { generation },
@@ -873,8 +866,8 @@ mod tests {
     use time::Duration as TimeDuration;
 
     use super::{
-        EntryRequest, ReconcileOutcome, RequestResolutionError, SearchRequest, SearchService,
-        SeoFactsState, ServiceError,
+        EntryRequest, ReconcileOutcome, ReconcileReport, RequestResolutionError, SearchRequest,
+        SearchService, SeoFactsState, ServiceError,
     };
 
     #[test]
@@ -1366,7 +1359,10 @@ mod tests {
         let report = service.reconcile_current_generation().unwrap();
 
         assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
-        assert_eq!(report.generation().unwrap().path, path);
+        let ReconcileReport::Unchanged { generation } = report else {
+            panic!("expected unchanged reconcile report");
+        };
+        assert_eq!(generation.path, path);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
     }
 
@@ -1635,7 +1631,10 @@ mod tests {
         let report = service.reconcile_current_generation().unwrap();
 
         assert_eq!(report.outcome(), ReconcileOutcome::Reloaded);
-        assert_eq!(report.generation().unwrap().path, next_path);
+        let ReconcileReport::Reloaded { generation } = report else {
+            panic!("expected reloaded reconcile report");
+        };
+        assert_eq!(generation.path, next_path);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest.generated_at, next_time);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
@@ -1655,7 +1654,10 @@ mod tests {
 
         let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(report.generation().unwrap().path, next_path);
+        let ReconcileReport::Reloaded { generation } = report else {
+            panic!("expected reloaded reconcile report");
+        };
+        assert_eq!(generation.path, next_path);
 
         let result = service
             .search_with_snapshot(

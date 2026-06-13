@@ -48,7 +48,7 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
     let modes = regeneration_modes(&config);
 
     loop {
-        let reconcile_report = match search.reconcile_current_generation() {
+        let (generation, reconcile_outcome) = match search.reconcile_current_generation() {
             Ok(ReconcileReport::Superseded) => {
                 tracing::debug!("published index generation changed during reconciliation");
 
@@ -61,9 +61,11 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
                     "detected published index generation change"
                 );
 
-                ReconcileReport::Reloaded { generation }
+                (generation, ReconcileOutcome::Reloaded)
             }
-            Ok(report) => report,
+            Ok(ReconcileReport::Unchanged { generation }) => {
+                (generation, ReconcileOutcome::Unchanged)
+            }
             Err(error) => {
                 tracing::error!(
                     "failed to switch to published index generation; continuing to serve previous generation: {error:#}"
@@ -81,12 +83,6 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
                 tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
                 continue;
             }
-        };
-        let reconcile_outcome = reconcile_report.outcome();
-        let generation = match reconcile_report {
-            ReconcileReport::Unchanged { generation }
-            | ReconcileReport::Reloaded { generation } => generation,
-            ReconcileReport::Superseded => unreachable!("superseded reports are handled above"),
         };
 
         if should_validate_reconciled_generation(reconcile_outcome)

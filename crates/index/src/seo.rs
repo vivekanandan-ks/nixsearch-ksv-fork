@@ -141,21 +141,12 @@ impl SeoSidecar {
         let mut seen_entries = BTreeSet::<SeoEntryKey>::new();
 
         for entry in &self.entries {
-            entry.validate_counts().with_context(|| {
+            entry.validate_entry_counts().with_context(|| {
                 format!(
                     "invalid SEO sidecar entry {}/{}/{}",
                     entry.source, entry.ref_id, entry.name
                 )
             })?;
-
-            if entry.total_supported_indexed_count == 0 {
-                bail!(
-                    "SEO sidecar entry {}/{}/{} has no indexed documents",
-                    entry.source,
-                    entry.ref_id,
-                    entry.name
-                );
-            }
 
             let key = SeoEntryKey {
                 source: entry.source.clone(),
@@ -233,7 +224,7 @@ impl SeoSidecar {
                     );
                 }
                 Some(_) => {}
-                None if expected.expects_zero_supported_entries()
+                None if expected.has_zero_supported_documents()
                     && actual.total_supported_indexed_count == 0 => {}
                 None => {
                     bail!(
@@ -300,8 +291,15 @@ impl SeoEntryFacts {
         }
     }
 
-    fn validate_counts(&self) -> Result<()> {
-        self.counts().validate()
+    fn validate_entry_counts(&self) -> Result<()> {
+        let counts = self.counts();
+        counts.validate()?;
+
+        if counts.total_supported_indexed_count == 0 {
+            bail!("entry has no indexed documents");
+        }
+
+        Ok(())
     }
 }
 
@@ -360,7 +358,7 @@ impl SeoManifestExpectedCounts {
         self.has_package_target || self.has_option_target
     }
 
-    fn expects_zero_supported_entries(&self) -> bool {
+    fn has_zero_supported_documents(&self) -> bool {
         self.total_supported_count() == 0
     }
 }
