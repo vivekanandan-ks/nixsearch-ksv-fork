@@ -13,6 +13,18 @@ pub struct IndexStore {
     root: Utf8PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedGeneration {
+    pub path: Utf8PathBuf,
+    pub manifest: IndexGenerationManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentGeneration {
+    Missing,
+    Found(PublishedGeneration),
+}
+
 impl IndexStore {
     pub fn new(root: impl AsRef<Utf8Path>) -> Self {
         let root = root.as_ref().to_owned();
@@ -330,6 +342,29 @@ impl IndexStore {
 
         self.read_manifest(&current).map(Some)
     }
+
+    pub fn current_generation(&self) -> Result<PublishedGeneration> {
+        match self.try_current_generation()? {
+            CurrentGeneration::Found(generation) => Ok(generation),
+            CurrentGeneration::Missing => anyhow::bail!(
+                "failed to read current index file {}; run `nixsearch update` first",
+                self.current_file().as_str()
+            ),
+        }
+    }
+
+    pub fn try_current_generation(&self) -> Result<CurrentGeneration> {
+        let Some(path) = self.try_current_path()? else {
+            return Ok(CurrentGeneration::Missing);
+        };
+
+        let manifest = self.read_manifest(&path)?;
+
+        Ok(CurrentGeneration::Found(PublishedGeneration {
+            path,
+            manifest,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -342,7 +377,7 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
 
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, canonical_generation_id};
-    use crate::store::IndexStore;
+    use crate::store::{CurrentGeneration, IndexStore};
 
     const SOURCE_FIXTURES: &str = "fixtures";
     const REF_SMALL: &str = "small";
@@ -674,6 +709,48 @@ mod tests {
         let manifest = store.try_current_manifest().unwrap();
 
         assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn index_store_loads_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = IndexGenerationManifest::new(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+
+        store.write_manifest(&generation, &manifest).unwrap();
+        store.publish(&generation).unwrap();
+
+        let loaded = store.current_generation().unwrap();
+
+        assert_eq!(loaded.path, generation.canonicalize_utf8().unwrap());
+        assert_eq!(loaded.manifest.document_count, 1);
+    }
+
+    #[test]
+    fn index_store_reports_missing_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+
+        assert_eq!(
+            store.try_current_generation().unwrap(),
+            CurrentGeneration::Missing
+        );
+        assert!(
+            format!("{:#}", store.current_generation().unwrap_err())
+                .contains("run `nixsearch update` first")
+        );
     }
 
     #[test]

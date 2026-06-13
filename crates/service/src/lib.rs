@@ -13,7 +13,7 @@ use nixsearch_index::search::{
     SearchScope,
 };
 use nixsearch_index::seo::SeoSidecar;
-use nixsearch_index::store::IndexStore;
+use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
 
 #[derive(Debug)]
 pub struct SearchService {
@@ -38,24 +38,16 @@ struct ServedGeneration {
     seo_facts: SeoFactsState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GenerationIdentity {
-    path: Utf8PathBuf,
-    manifest: IndexGenerationManifest,
-}
-
 impl ServedGeneration {
-    fn identity(&self) -> GenerationIdentity {
-        GenerationIdentity {
+    fn identity(&self) -> PublishedGeneration {
+        PublishedGeneration {
             path: self.path.clone(),
             manifest: self.manifest.clone(),
         }
     }
-}
 
-impl GenerationIdentity {
-    fn matches(&self, path: &Utf8Path, manifest: &IndexGenerationManifest) -> bool {
-        self.path == path && self.manifest == *manifest
+    fn matches(&self, generation: &PublishedGeneration) -> bool {
+        self.path == generation.path && self.manifest == generation.manifest
     }
 }
 
@@ -105,6 +97,13 @@ impl SeoFactsState {
 pub enum ReconcileOutcome {
     Unchanged,
     Reloaded,
+    Superseded,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileReport {
+    pub outcome: ReconcileOutcome,
+    pub generation: PublishedGeneration,
 }
 
 pub type ServiceResult<T> = std::result::Result<T, ServiceError>;
@@ -178,17 +177,14 @@ pub struct EntryRequest {
 impl SearchService {
     pub fn open_current(config: Arc<AppConfig>) -> Result<Self> {
         let index_store = IndexStore::new(&config.data.index_dir);
-        let path = index_store.current_path().with_context(|| {
+        let generation = index_store.current_generation().with_context(|| {
             format!(
                 "failed to locate current index in {}",
                 config.data.index_dir
             )
         })?;
-        let manifest = index_store
-            .read_manifest(&path)
-            .with_context(|| format!("failed to read current index manifest {}", path.as_str()))?;
 
-        Self::from_generation(config, path, manifest)
+        Self::from_generation(config, generation.path, generation.manifest)
     }
 
     pub fn from_generation(
@@ -245,12 +241,28 @@ impl SearchService {
         }
     }
 
-    pub fn reconcile_generation(
+    pub fn reconcile_current_generation(&self) -> Result<ReconcileReport> {
+        let index_store = IndexStore::new(&self.config.data.index_dir);
+        let generation = index_store.current_generation().with_context(|| {
+            format!(
+                "failed to locate current index in {}",
+                self.config.data.index_dir
+            )
+        })?;
+        let outcome = self.reconcile_published_generation(&index_store, generation.clone())?;
+
+        Ok(ReconcileReport {
+            outcome,
+            generation,
+        })
+    }
+
+    fn reconcile_published_generation(
         &self,
-        path: Utf8PathBuf,
-        manifest: IndexGenerationManifest,
+        index_store: &IndexStore,
+        generation: PublishedGeneration,
     ) -> Result<ReconcileOutcome> {
-        validate_generation_id(&manifest)
+        validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
         let (observed_current, should_retry_seo_facts) = {
@@ -260,7 +272,7 @@ impl SearchService {
                 .expect("served generation lock poisoned");
             let observed_current = current.identity();
 
-            if observed_current.matches(&path, &manifest) {
+            if current.matches(&generation) {
                 if current.seo_facts.is_loaded() {
                     return Ok(ReconcileOutcome::Unchanged);
                 }
@@ -272,50 +284,62 @@ impl SearchService {
         };
 
         if should_retry_seo_facts {
-            let seo_facts = load_seo_facts_state(&self.config, &path, &manifest);
-            return Ok(self.apply_seo_facts_if_current(path, manifest, seo_facts));
+            let seo_facts =
+                load_seo_facts_state(&self.config, &generation.path, &generation.manifest);
+            return self.try_update_current_seo_facts(index_store, generation, seo_facts);
         }
 
-        self.reload_generation(path, manifest, observed_current)
+        self.reload_generation(index_store, generation, observed_current)
     }
 
-    fn apply_seo_facts_if_current(
+    fn try_update_current_seo_facts(
         &self,
-        path: Utf8PathBuf,
-        manifest: IndexGenerationManifest,
+        index_store: &IndexStore,
+        generation: PublishedGeneration,
         seo_facts: SeoFactsState,
-    ) -> ReconcileOutcome {
+    ) -> Result<ReconcileOutcome> {
         let mut current = self
             .current
             .write()
             .expect("served generation lock poisoned");
 
-        if current.path == path
-            && current.manifest == manifest
-            && current.seo_facts.should_replace_with(&seo_facts)
+        if !current.matches(&generation)
+            || !published_generation_is_current(index_store, &generation)?
         {
+            return Ok(ReconcileOutcome::Superseded);
+        }
+
+        if current.seo_facts.should_replace_with(&seo_facts) {
             current.seo_facts = seo_facts;
         }
 
-        ReconcileOutcome::Unchanged
+        Ok(ReconcileOutcome::Unchanged)
     }
 
     fn reload_generation(
         &self,
-        path: Utf8PathBuf,
-        manifest: IndexGenerationManifest,
-        observed_current: GenerationIdentity,
+        index_store: &IndexStore,
+        generation: PublishedGeneration,
+        observed_current: PublishedGeneration,
     ) -> Result<ReconcileOutcome> {
-        let index = open_index(&path)
-            .with_context(|| format!("failed to open published index generation {path}"))?;
-        let seo_facts = load_seo_facts_state(&self.config, &path, &manifest);
+        let index = open_index(&generation.path).with_context(|| {
+            format!(
+                "failed to open published index generation {}",
+                generation.path
+            )
+        })?;
+        let seo_facts = load_seo_facts_state(&self.config, &generation.path, &generation.manifest);
 
         let mut current = self
             .current
             .write()
             .expect("served generation lock poisoned");
 
-        if current.path == path && current.manifest == manifest {
+        if !published_generation_is_current(index_store, &generation)? {
+            return Ok(ReconcileOutcome::Superseded);
+        }
+
+        if current.matches(&generation) {
             if current.seo_facts.should_replace_with(&seo_facts) {
                 current.seo_facts = seo_facts;
             }
@@ -324,12 +348,12 @@ impl SearchService {
         }
 
         if current.identity() != observed_current {
-            return Ok(ReconcileOutcome::Unchanged);
+            return Ok(ReconcileOutcome::Superseded);
         }
 
         *current = ServedGeneration {
-            path,
-            manifest,
+            path: generation.path,
+            manifest: generation.manifest,
             index: Arc::new(index),
             seo_facts,
         };
@@ -786,6 +810,16 @@ fn load_seo_facts_state(
     }
 }
 
+fn published_generation_is_current(
+    index_store: &IndexStore,
+    generation: &PublishedGeneration,
+) -> Result<bool> {
+    match index_store.try_current_generation()? {
+        CurrentGeneration::Found(current) => Ok(current == *generation),
+        CurrentGeneration::Missing => Ok(false),
+    }
+}
+
 fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     if value.is_empty() { None } else { Some(value) }
@@ -798,9 +832,9 @@ mod tests {
     use tempfile::tempdir;
 
     use nixsearch_core::document::DocumentKind;
-    use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
+    use nixsearch_index::manifest::canonical_generation_id;
     use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult};
-    use nixsearch_index::store::IndexStore;
+    use nixsearch_index::store::{IndexStore, PublishedGeneration};
     use nixsearch_index_test_support::{
         options_target, publish_canonical_index, publish_canonical_index_with_generated_at,
         publish_documents_with_manifest_targets, publish_fixture_options_index_for_refs,
@@ -1301,11 +1335,11 @@ mod tests {
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         let before = service.current_index();
-        let manifest = service.snapshot().manifest;
 
-        let outcome = service.reconcile_generation(path, manifest).unwrap();
+        let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.generation.path, path);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
     }
 
@@ -1333,11 +1367,9 @@ mod tests {
 
         store.write_seo_sidecar(&path, &manifest, &sidecar).unwrap();
 
-        let outcome = service
-            .reconcile_generation(path.clone(), manifest.clone())
-            .unwrap();
+        let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
         assert_eq!(service.snapshot().path, path);
         assert_eq!(
@@ -1375,11 +1407,9 @@ mod tests {
         let before = service.current_index();
         fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
 
-        let outcome = service
-            .reconcile_generation(path.clone(), manifest.clone())
-            .unwrap();
+        let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(report.outcome, ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
 
         match service.snapshot().seo_facts {
@@ -1417,17 +1447,20 @@ mod tests {
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
         let next_manifest = store.read_manifest(&next_path).unwrap();
 
-        service
-            .reconcile_generation(next_path.clone(), next_manifest.clone())
+        service.reconcile_current_generation().unwrap();
+
+        let outcome = service
+            .try_update_current_seo_facts(
+                &store,
+                PublishedGeneration {
+                    path: old_path,
+                    manifest: old_manifest,
+                },
+                SeoFactsState::Loaded(Arc::new(old_sidecar)),
+            )
             .unwrap();
 
-        let outcome = service.apply_seo_facts_if_current(
-            old_path,
-            old_manifest,
-            SeoFactsState::Loaded(Arc::new(old_sidecar)),
-        );
-
-        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest, next_manifest);
     }
@@ -1442,7 +1475,7 @@ mod tests {
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         let old_snapshot = service.snapshot();
-        let observed_old = super::GenerationIdentity {
+        let observed_old = PublishedGeneration {
             path: old_snapshot.path.clone(),
             manifest: old_snapshot.manifest.clone(),
         };
@@ -1452,53 +1485,72 @@ mod tests {
         let store = IndexStore::new(&index_dir);
         let next_manifest = store.read_manifest(&next_path).unwrap();
 
-        service
-            .reconcile_generation(next_path.clone(), next_manifest.clone())
-            .unwrap();
+        service.reconcile_current_generation().unwrap();
 
         let outcome = service
-            .reload_generation(old_path, old_snapshot.manifest, observed_old)
+            .reload_generation(
+                &store,
+                PublishedGeneration {
+                    path: old_path,
+                    manifest: old_snapshot.manifest,
+                },
+                observed_old,
+            )
             .unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest, next_manifest);
     }
 
     #[test]
-    fn reconcile_generation_reloads_current_path_when_manifest_changes() {
+    fn stale_published_generation_candidate_is_superseded() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let path = publish_canonical_index(&index_dir);
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let store = IndexStore::new(&index_dir);
+        let old_manifest = store.read_manifest(&old_path).unwrap();
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
-        let before = service.current_index();
-        let mut manifest = service.snapshot().manifest;
-        manifest.document_count += 1;
-        refresh_generation_id(&mut manifest).unwrap();
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+
+        service.reconcile_current_generation().unwrap();
 
         let outcome = service
-            .reconcile_generation(path, manifest.clone())
+            .reconcile_published_generation(
+                &store,
+                PublishedGeneration {
+                    path: old_path,
+                    manifest: old_manifest,
+                },
+            )
             .unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Reloaded);
-        assert_eq!(service.snapshot().manifest, manifest);
-        assert!(!Arc::ptr_eq(&before, &service.current_index()));
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
+        assert_eq!(service.snapshot().path, next_path);
+        assert_eq!(service.snapshot().manifest, next_manifest);
     }
 
     #[test]
-    fn reconcile_generation_rejects_mismatched_generation_id() {
+    fn reconcile_published_generation_rejects_mismatched_generation_id() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let mut manifest = store.read_manifest(&path).unwrap();
+        manifest.generation_id = "sha256:wrong".to_owned();
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
-        let mut manifest = service.snapshot().manifest;
-        manifest.generation_id = "sha256:wrong".to_owned();
 
-        let error = service.reconcile_generation(path, manifest).unwrap_err();
+        let error = service
+            .reconcile_published_generation(&store, PublishedGeneration { path, manifest })
+            .unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
@@ -1514,15 +1566,11 @@ mod tests {
         let before = service.current_index();
         let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
-        let manifest = IndexStore::new(&index_dir)
-            .read_manifest(&next_path)
-            .unwrap();
 
-        let outcome = service
-            .reconcile_generation(next_path.clone(), manifest)
-            .unwrap();
+        let report = service.reconcile_current_generation().unwrap();
 
-        assert_eq!(outcome, ReconcileOutcome::Reloaded);
+        assert_eq!(report.outcome, ReconcileOutcome::Reloaded);
+        assert_eq!(report.generation.path, next_path);
         assert_eq!(service.snapshot().path, next_path);
         assert_eq!(service.snapshot().manifest.generated_at, next_time);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
@@ -1539,11 +1587,10 @@ mod tests {
         let held = service.snapshot();
         let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
-        let manifest = IndexStore::new(&index_dir)
-            .read_manifest(&next_path)
-            .unwrap();
 
-        service.reconcile_generation(next_path, manifest).unwrap();
+        let report = service.reconcile_current_generation().unwrap();
+
+        assert_eq!(report.generation.path, next_path);
 
         let result = service
             .search_with_snapshot(
@@ -1573,7 +1620,10 @@ mod tests {
         let broken = store.create_generation_path().unwrap();
         let manifest = service.snapshot().manifest;
 
-        let error = service.reconcile_generation(broken, manifest).unwrap_err();
+        store.write_manifest(&broken, &manifest).unwrap();
+        store.publish(&broken).unwrap();
+
+        let error = service.reconcile_current_generation().unwrap_err();
 
         assert!(format!("{error:#}").contains("failed to open published index generation"));
         assert_eq!(service.snapshot().path, path);

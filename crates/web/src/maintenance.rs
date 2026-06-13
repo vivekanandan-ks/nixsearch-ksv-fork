@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use camino::Utf8PathBuf;
 use time::OffsetDateTime;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::IndexStore;
+pub(crate) use nixsearch_index::store::{CurrentGeneration, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::{ReconcileOutcome, SearchService};
@@ -19,18 +19,6 @@ const MIN_LOCK_BUSY_RETRY: Duration = Duration::from_secs(60);
 const MAX_LOCK_BUSY_RETRY: Duration = Duration::from_secs(10 * 60);
 const MIN_FAILURE_RETRY: Duration = Duration::from_secs(60);
 const MAX_FAILURE_RETRY: Duration = Duration::from_secs(60 * 60);
-
-#[derive(Debug, Clone)]
-pub(crate) struct PublishedGeneration {
-    pub path: Utf8PathBuf,
-    pub manifest: IndexGenerationManifest,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CurrentGeneration {
-    Missing,
-    Found(PublishedGeneration),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaintenanceOutcome {
@@ -58,49 +46,28 @@ pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
 }
 
 async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Duration) {
-    let index_store = IndexStore::new(&config.data.index_dir);
     let modes = regeneration_modes(&config);
 
     loop {
-        let generation = match read_current_generation(&index_store) {
-            Ok(CurrentGeneration::Found(generation)) => generation,
-            Ok(CurrentGeneration::Missing) => {
-                tracing::warn!("current index disappeared during maintenance loop");
-
-                if !modes.recovery_enabled {
-                    tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
-                    continue;
-                }
-
-                let outcome = run_recovery_regeneration(&config).await;
-                sleep_after_regeneration_outcome(outcome, interval).await;
-
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!("failed to read current index generation: {error:#}");
-
-                if modes.recovery_enabled {
-                    let outcome = run_recovery_regeneration(&config).await;
-                    sleep_after_regeneration_outcome(outcome, interval).await;
-                    continue;
-                }
-
-                tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
-                continue;
-            }
-        };
-
-        let reconcile_outcome = match search
-            .reconcile_generation(generation.path.clone(), generation.manifest.clone())
-        {
-            Ok(outcome @ ReconcileOutcome::Unchanged) => outcome,
-            Ok(ReconcileOutcome::Reloaded) => {
-                tracing::info!(
-                    generation = %generation.path,
-                    "detected published index generation change"
+        let reconcile_report = match search.reconcile_current_generation() {
+            Ok(report) if report.outcome == ReconcileOutcome::Superseded => {
+                tracing::debug!(
+                    generation = %report.generation.path,
+                    "published index generation changed during reconciliation"
                 );
-                ReconcileOutcome::Reloaded
+
+                tokio::time::sleep(Duration::ZERO).await;
+                continue;
+            }
+            Ok(report) => {
+                if report.outcome == ReconcileOutcome::Reloaded {
+                    tracing::info!(
+                        generation = %report.generation.path,
+                        "detected published index generation change"
+                    );
+                }
+
+                report
             }
             Err(error) => {
                 tracing::error!(
@@ -120,6 +87,8 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
                 continue;
             }
         };
+        let generation = reconcile_report.generation;
+        let reconcile_outcome = reconcile_report.outcome;
 
         if should_validate_reconciled_generation(reconcile_outcome)
             && let Err(error) = SearchService::validate_generation(&generation.path)
@@ -400,16 +369,7 @@ pub(crate) fn missing_configured_targets(
 }
 
 pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<CurrentGeneration> {
-    let Some(path) = index_store.try_current_path()? else {
-        return Ok(CurrentGeneration::Missing);
-    };
-
-    let manifest = index_store.read_manifest(&path)?;
-
-    Ok(CurrentGeneration::Found(PublishedGeneration {
-        path,
-        manifest,
-    }))
+    index_store.try_current_generation()
 }
 
 pub(crate) fn has_configured_targets(config: &AppConfig) -> bool {
