@@ -74,6 +74,10 @@ impl SeoFactsState {
     pub fn is_loaded(&self) -> bool {
         matches!(self, Self::Loaded(_))
     }
+
+    fn should_replace_with(&self, next: &Self) -> bool {
+        !self.is_loaded() || next.is_loaded()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +255,7 @@ impl SearchService {
                 .expect("served generation lock poisoned");
 
             if current.path == path && current.manifest == manifest {
-                if !current.seo_facts.is_loaded() || seo_facts.is_loaded() {
+                if current.seo_facts.should_replace_with(&seo_facts) {
                     current.seo_facts = seo_facts;
                 }
 
@@ -277,7 +281,7 @@ impl SearchService {
             .expect("served generation lock poisoned");
 
         if current.path == path && current.manifest == manifest {
-            if !current.seo_facts.is_loaded() || seo_facts.is_loaded() {
+            if current.seo_facts.should_replace_with(&seo_facts) {
                 current.seo_facts = seo_facts;
             }
 

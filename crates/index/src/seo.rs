@@ -157,11 +157,11 @@ impl SeoSidecar {
                 );
             }
 
-            validate_manifest_targets(
+            validate_entry_manifest_target(
                 &manifest_expected,
                 &entry.source,
                 &entry.ref_id,
-                Some(&entry.name),
+                &entry.name,
                 entry.package_supported_count,
                 entry.option_supported_count,
             )?;
@@ -199,22 +199,7 @@ impl SeoSidecar {
                 );
             }
 
-            let Some(sum) = ref_sums.remove(&key) else {
-                bail!(
-                    "SEO sidecar ref {}/{} has no entries",
-                    ref_facts.source,
-                    ref_facts.ref_id
-                );
-            };
-
             let actual = ref_facts.counts();
-            if actual != sum {
-                bail!(
-                    "SEO sidecar ref totals mismatch for {}/{}",
-                    ref_facts.source,
-                    ref_facts.ref_id
-                );
-            }
 
             let Some(expected) = manifest_expected.get(&key) else {
                 bail!(
@@ -223,6 +208,26 @@ impl SeoSidecar {
                     ref_facts.ref_id
                 );
             };
+
+            match ref_sums.remove(&key) {
+                Some(sum) if actual != sum => {
+                    bail!(
+                        "SEO sidecar ref totals mismatch for {}/{}",
+                        ref_facts.source,
+                        ref_facts.ref_id
+                    );
+                }
+                Some(_) => {}
+                None if expected.expects_zero_supported_entries()
+                    && actual.total_supported_indexed_count == 0 => {}
+                None => {
+                    bail!(
+                        "SEO sidecar ref {}/{} has no entries",
+                        ref_facts.source,
+                        ref_facts.ref_id
+                    );
+                }
+            }
 
             if actual.package_supported_count != expected.package_supported_count {
                 bail!(
@@ -243,15 +248,6 @@ impl SeoSidecar {
                     expected.option_supported_count
                 );
             }
-
-            validate_manifest_targets(
-                &manifest_expected,
-                &ref_facts.source,
-                &ref_facts.ref_id,
-                None,
-                ref_facts.package_supported_count,
-                ref_facts.option_supported_count,
-            )?;
         }
 
         if let Some((key, _)) = ref_sums.into_iter().next() {
@@ -263,7 +259,7 @@ impl SeoSidecar {
         }
 
         for (key, expected) in &manifest_expected {
-            if expected.supported_count() > 0 && !seen_refs.contains(key) {
+            if expected.total_supported_count() > 0 && !seen_refs.contains(key) {
                 bail!(
                     "SEO sidecar missing ref totals for {}/{} expected package={} option={}",
                     key.source,
@@ -341,8 +337,12 @@ struct SeoManifestExpectedCounts {
 }
 
 impl SeoManifestExpectedCounts {
-    fn supported_count(&self) -> usize {
+    fn total_supported_count(&self) -> usize {
         self.package_supported_count + self.option_supported_count
+    }
+
+    fn expects_zero_supported_entries(&self) -> bool {
+        self.total_supported_count() == 0
     }
 }
 
@@ -425,15 +425,15 @@ fn manifest_supported_counts(
     refs
 }
 
-fn validate_manifest_targets(
+fn validate_entry_manifest_target(
     manifest_expected: &BTreeMap<SeoRefKey, SeoManifestExpectedCounts>,
     source: &str,
     ref_id: &str,
-    name: Option<&str>,
+    name: &str,
     package_supported_count: usize,
     option_supported_count: usize,
 ) -> Result<()> {
-    let label = sidecar_record_label(source, ref_id, name);
+    let label = sidecar_record_label(source, ref_id, Some(name));
     let key = SeoRefKey {
         source: source.to_owned(),
         ref_id: ref_id.to_owned(),
@@ -536,6 +536,32 @@ mod tests {
         accumulator.into_sidecar(manifest.generation_id.clone())
     }
 
+    fn empty_sidecar(manifest: &IndexGenerationManifest) -> SeoSidecar {
+        SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn zero_ref_sidecar(manifest: &IndexGenerationManifest) -> SeoSidecar {
+        SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: vec![crate::seo::SeoRefFacts {
+                source: SOURCE.to_owned(),
+                ref_id: REF.to_owned(),
+                total_supported_indexed_count: 0,
+                package_supported_count: 0,
+                option_supported_count: 0,
+                package_eligible_count: 0,
+                option_eligible_count: 0,
+            }],
+            entries: Vec::new(),
+        }
+    }
+
     #[test]
     fn accumulator_counts_supported_and_eligible_documents() {
         let manifest = manifest(1, 2);
@@ -635,12 +661,7 @@ mod tests {
     #[test]
     fn validation_rejects_missing_ref_totals_for_manifest_documents() {
         let manifest = manifest(1, 0);
-        let sidecar = SeoSidecar {
-            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
-            generation_id: manifest.generation_id.clone(),
-            refs: Vec::new(),
-            entries: Vec::new(),
-        };
+        let sidecar = empty_sidecar(&manifest);
 
         let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
 
@@ -656,12 +677,7 @@ mod tests {
         )
         .unwrap();
 
-        let sidecar = SeoSidecar {
-            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
-            generation_id: manifest.generation_id.clone(),
-            refs: Vec::new(),
-            entries: Vec::new(),
-        };
+        let sidecar = empty_sidecar(&manifest);
 
         sidecar.validate_for_manifest(&manifest).unwrap();
     }
@@ -678,13 +694,51 @@ mod tests {
         )
         .unwrap();
 
-        let sidecar = SeoSidecar {
-            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
-            generation_id: manifest.generation_id.clone(),
-            refs: Vec::new(),
-            entries: Vec::new(),
-        };
+        let sidecar = empty_sidecar(&manifest);
 
         sidecar.validate_for_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn validation_accepts_explicit_zero_count_ref_for_zero_document_targets() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![
+                target(ArtifactKind::PackagesJson, 0),
+                target(ArtifactKind::OptionsJson, 0),
+            ],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = zero_ref_sidecar(&manifest);
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_zero_count_ref_when_manifest_expects_documents() {
+        let manifest = manifest(1, 0);
+        let sidecar = zero_ref_sidecar(&manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("has no entries"));
+    }
+
+    #[test]
+    fn validation_rejects_zero_count_ref_missing_from_manifest() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            Vec::new(),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = zero_ref_sidecar(&manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("references ref missing from manifest"));
     }
 }
