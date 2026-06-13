@@ -7,8 +7,7 @@ use time::OffsetDateTime;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
-use nixsearch_index::store::IndexStore;
-pub(crate) use nixsearch_index::store::{CurrentGeneration, PublishedGeneration};
+use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::{ReconcileOutcome, SearchService};
@@ -226,7 +225,7 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     };
 
     let index_store = IndexStore::new(&config.data.index_dir);
-    match read_current_generation(&index_store) {
+    match index_store.try_current_generation() {
         Ok(CurrentGeneration::Found(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 tracing::warn!(
@@ -314,7 +313,7 @@ pub(crate) fn current_generation_needs_regeneration(
     interval: Duration,
     now: OffsetDateTime,
 ) -> Result<bool> {
-    match read_current_generation(index_store) {
+    match index_store.try_current_generation() {
         Ok(CurrentGeneration::Found(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 return Ok(true);
@@ -368,10 +367,6 @@ pub(crate) fn missing_configured_targets(
         .collect()
 }
 
-pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<CurrentGeneration> {
-    index_store.try_current_generation()
-}
-
 pub(crate) fn has_configured_targets(config: &AppConfig) -> bool {
     !all_targets(config).is_empty()
 }
@@ -401,8 +396,7 @@ mod tests {
     use nixsearch_index::search::SearchIndex;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
-        assert_canonical_manifest_targets, publish_canonical_index,
-        publish_canonical_index_with_generated_at,
+        publish_canonical_index, publish_canonical_index_with_generated_at,
     };
     use nixsearch_service::ReconcileOutcome;
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES, app_config, utf8_path_buf};
@@ -410,9 +404,9 @@ mod tests {
     use time::Duration as TimeDuration;
 
     use super::{
-        CurrentGeneration, MaintenanceOutcome, clamp_duration,
-        current_generation_needs_regeneration, duration_until, next_due, read_current_generation,
-        regeneration_modes, run_recovery_regeneration, should_validate_reconciled_generation,
+        MaintenanceOutcome, clamp_duration, current_generation_needs_regeneration, duration_until,
+        next_due, regeneration_modes, run_recovery_regeneration,
+        should_validate_reconciled_generation,
     };
 
     #[test]
@@ -490,46 +484,6 @@ mod tests {
             ),
             std::time::Duration::from_secs(20)
         );
-    }
-
-    #[test]
-    fn read_current_generation_returns_missing_when_current_absent() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let store = IndexStore::new(&index_dir);
-
-        let generation = read_current_generation(&store).unwrap();
-
-        assert!(matches!(generation, CurrentGeneration::Missing));
-    }
-
-    #[test]
-    fn read_current_generation_loads_manifest() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let published_path = publish_canonical_index(&index_dir);
-        let store = IndexStore::new(&index_dir);
-
-        let generation = read_current_generation(&store).unwrap();
-
-        let CurrentGeneration::Found(generation) = generation else {
-            panic!("expected published generation");
-        };
-        assert_eq!(generation.path, published_path);
-        assert_canonical_manifest_targets(&generation.manifest);
-    }
-
-    #[test]
-    fn read_current_generation_errors_on_empty_current() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let store = IndexStore::new(&index_dir);
-        fs::create_dir_all(&index_dir).unwrap();
-        fs::write(store.current_file(), "").unwrap();
-
-        let error = read_current_generation(&store).unwrap_err();
-
-        assert!(format!("{error:#}").contains("current index file is empty"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_index::store::IndexStore;
+use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::SearchService;
@@ -86,11 +86,11 @@ fn app_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::PublishedGeneration> {
+async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    match maintenance::read_current_generation(&index_store) {
-        Ok(maintenance::CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_generation() {
+        Ok(CurrentGeneration::Found(generation)) => {
             if let Err(error) = SearchService::validate_generation(&generation.path) {
                 if !config.server.bootstrap {
                     return Err(error).with_context(|| {
@@ -131,7 +131,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
                 );
             }
         }
-        Ok(maintenance::CurrentGeneration::Missing) => {}
+        Ok(CurrentGeneration::Missing) => {}
         Err(error) => {
             if !config.server.bootstrap {
                 return Err(error).context(
@@ -166,8 +166,8 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
         .await
         .context("failed to join maintenance lock task")??;
 
-    match maintenance::read_current_generation(&index_store) {
-        Ok(maintenance::CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_generation() {
+        Ok(CurrentGeneration::Found(generation)) => {
             match SearchService::validate_generation(&generation.path) {
                 Ok(()) => {
                     let missing =
@@ -194,7 +194,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
                 }
             }
         }
-        Ok(maintenance::CurrentGeneration::Missing) => {}
+        Ok(CurrentGeneration::Missing) => {}
         Err(error) => {
             tracing::warn!(
                 "current index generation is still unreadable after acquiring lock; rebuilding it: {error:#}"
@@ -214,8 +214,8 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
         );
     }
 
-    match maintenance::read_current_generation(&index_store)? {
-        maintenance::CurrentGeneration::Found(generation) => {
+    match index_store.try_current_generation()? {
+        CurrentGeneration::Found(generation) => {
             SearchService::validate_generation(&generation.path).with_context(|| {
                 format!(
                     "bootstrap published index generation {} but it cannot be opened",
@@ -228,7 +228,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
 
             Ok(generation)
         }
-        maintenance::CurrentGeneration::Missing => {
+        CurrentGeneration::Missing => {
             bail!("bootstrap completed without publishing a current index")
         }
     }
@@ -236,7 +236,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<maintenance::Pu
 
 fn generation_serves_default_scope(
     config: &AppConfig,
-    generation: &maintenance::PublishedGeneration,
+    generation: &PublishedGeneration,
 ) -> Result<bool> {
     let default_targets = default_search_target_keys(config)?;
 
@@ -260,10 +260,7 @@ fn format_target_keys<'a>(targets: impl IntoIterator<Item = &'a TargetKey>) -> S
         .join(", ")
 }
 
-fn log_startup_maintenance_state(
-    config: &AppConfig,
-    generation: &maintenance::PublishedGeneration,
-) {
+fn log_startup_maintenance_state(config: &AppConfig, generation: &PublishedGeneration) {
     tracing::info!("background index reconciliation enabled");
     tracing::info!(
         enabled = config.server.bootstrap,

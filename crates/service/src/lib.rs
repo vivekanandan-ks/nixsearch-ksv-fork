@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_keeps_current_generation() {
+    fn reconcile_current_generation_keeps_loaded_generation() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -1344,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_retries_sidecar_without_reloading_same_generation() {
+    fn reconcile_current_generation_retries_missing_sidecar_without_reloading() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_does_not_downgrade_loaded_sidecar() {
+    fn reconcile_current_generation_preserves_loaded_sidecar() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -1556,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_swaps_valid_generation() {
+    fn reconcile_current_generation_loads_new_current() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_generation_keeps_old_generation_when_new_index_cannot_open() {
+    fn reconcile_current_generation_preserves_served_generation_when_current_is_unopenable() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
