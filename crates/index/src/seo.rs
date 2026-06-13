@@ -130,7 +130,7 @@ impl SeoSidecar {
             );
         }
 
-        let manifest_targets = manifest_target_kinds(manifest);
+        let manifest_expected = manifest_supported_counts(manifest);
         let mut ref_sums = BTreeMap::<SeoRefKey, SeoCounts>::new();
         let mut seen_entries = BTreeSet::<SeoEntryKey>::new();
 
@@ -158,7 +158,7 @@ impl SeoSidecar {
             }
 
             validate_manifest_targets(
-                &manifest_targets,
+                &manifest_expected,
                 &entry.source,
                 &entry.ref_id,
                 Some(&entry.name),
@@ -216,8 +216,36 @@ impl SeoSidecar {
                 );
             }
 
+            let Some(expected) = manifest_expected.get(&key) else {
+                bail!(
+                    "SEO sidecar ref {}/{} references ref missing from manifest",
+                    ref_facts.source,
+                    ref_facts.ref_id
+                );
+            };
+
+            if actual.package_supported_count != expected.package_supported_count {
+                bail!(
+                    "SEO sidecar ref {}/{} package count mismatch: sidecar {}, manifest {}",
+                    ref_facts.source,
+                    ref_facts.ref_id,
+                    actual.package_supported_count,
+                    expected.package_supported_count
+                );
+            }
+
+            if actual.option_supported_count != expected.option_supported_count {
+                bail!(
+                    "SEO sidecar ref {}/{} option count mismatch: sidecar {}, manifest {}",
+                    ref_facts.source,
+                    ref_facts.ref_id,
+                    actual.option_supported_count,
+                    expected.option_supported_count
+                );
+            }
+
             validate_manifest_targets(
-                &manifest_targets,
+                &manifest_expected,
                 &ref_facts.source,
                 &ref_facts.ref_id,
                 None,
@@ -232,6 +260,18 @@ impl SeoSidecar {
                 key.source,
                 key.ref_id
             );
+        }
+
+        for (key, expected) in &manifest_expected {
+            if expected.supported_count() > 0 && !seen_refs.contains(key) {
+                bail!(
+                    "SEO sidecar missing ref totals for {}/{} expected package={} option={}",
+                    key.source,
+                    key.ref_id,
+                    expected.package_supported_count,
+                    expected.option_supported_count
+                );
+            }
         }
 
         Ok(())
@@ -292,6 +332,20 @@ struct SeoCounts {
     option_eligible_count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SeoManifestExpectedCounts {
+    has_package_target: bool,
+    has_option_target: bool,
+    package_supported_count: usize,
+    option_supported_count: usize,
+}
+
+impl SeoManifestExpectedCounts {
+    fn supported_count(&self) -> usize {
+        self.package_supported_count + self.option_supported_count
+    }
+}
+
 impl SeoCounts {
     fn observe(&mut self, kind: &DocumentKind, eligible: bool) {
         match kind {
@@ -342,23 +396,37 @@ impl SeoCounts {
     }
 }
 
-fn manifest_target_kinds(
+fn manifest_supported_counts(
     manifest: &IndexGenerationManifest,
-) -> BTreeMap<(String, String), BTreeSet<ArtifactKind>> {
-    let mut targets = BTreeMap::<(String, String), BTreeSet<ArtifactKind>>::new();
+) -> BTreeMap<SeoRefKey, SeoManifestExpectedCounts> {
+    let mut refs = BTreeMap::<SeoRefKey, SeoManifestExpectedCounts>::new();
 
     for target in &manifest.targets {
-        targets
-            .entry((target.source.clone(), target.ref_id.clone()))
-            .or_default()
-            .insert(target.artifact_kind);
+        let expected = refs
+            .entry(SeoRefKey {
+                source: target.source.clone(),
+                ref_id: target.ref_id.clone(),
+            })
+            .or_default();
+
+        match target.artifact_kind {
+            ArtifactKind::PackagesJson => {
+                expected.has_package_target = true;
+                expected.package_supported_count += target.document_count;
+            }
+            ArtifactKind::OptionsJson => {
+                expected.has_option_target = true;
+                expected.option_supported_count += target.document_count;
+            }
+            ArtifactKind::FlakeInfoJson => {}
+        }
     }
 
-    targets
+    refs
 }
 
 fn validate_manifest_targets(
-    manifest_targets: &BTreeMap<(String, String), BTreeSet<ArtifactKind>>,
+    manifest_expected: &BTreeMap<SeoRefKey, SeoManifestExpectedCounts>,
     source: &str,
     ref_id: &str,
     name: Option<&str>,
@@ -366,16 +434,20 @@ fn validate_manifest_targets(
     option_supported_count: usize,
 ) -> Result<()> {
     let label = sidecar_record_label(source, ref_id, name);
+    let key = SeoRefKey {
+        source: source.to_owned(),
+        ref_id: ref_id.to_owned(),
+    };
 
-    let Some(kinds) = manifest_targets.get(&(source.to_owned(), ref_id.to_owned())) else {
+    let Some(expected) = manifest_expected.get(&key) else {
         bail!("{label} references ref missing from manifest");
     };
 
-    if package_supported_count > 0 && !kinds.contains(&ArtifactKind::PackagesJson) {
+    if package_supported_count > 0 && !expected.has_package_target {
         bail!("{label} has package facts without package target");
     }
 
-    if option_supported_count > 0 && !kinds.contains(&ArtifactKind::OptionsJson) {
+    if option_supported_count > 0 && !expected.has_option_target {
         bail!("{label} has option facts without option target");
     }
 
@@ -386,5 +458,233 @@ fn sidecar_record_label(source: &str, ref_id: &str, name: Option<&str>) -> Strin
     match name {
         Some(name) => format!("SEO sidecar entry {source}/{ref_id}/{name}"),
         None => format!("SEO sidecar ref {source}/{ref_id}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::{OptionDoc, PackageDoc, SearchDocument};
+    use nixsearch_core::ingest::IngestContext;
+
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::seo::{SEO_SIDECAR_SCHEMA_VERSION, SeoSidecar, SeoSidecarAccumulator};
+
+    const SOURCE: &str = "fixtures";
+    const REF: &str = "small";
+
+    fn context() -> IngestContext {
+        IngestContext {
+            source: SOURCE.to_owned(),
+            ref_id: REF.to_owned(),
+            revision: None,
+            repo: None,
+        }
+    }
+
+    fn manifest(package_count: usize, option_count: usize) -> IndexGenerationManifest {
+        let mut targets = Vec::new();
+
+        if package_count > 0 {
+            targets.push(target(ArtifactKind::PackagesJson, package_count));
+        }
+
+        if option_count > 0 {
+            targets.push(target(ArtifactKind::OptionsJson, option_count));
+        }
+
+        IndexGenerationManifest::with_generated_at(
+            package_count + option_count,
+            targets,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap()
+    }
+
+    fn target(artifact_kind: ArtifactKind, document_count: usize) -> IndexTargetManifest {
+        IndexTargetManifest {
+            source: SOURCE.to_owned(),
+            ref_id: REF.to_owned(),
+            artifact_kind,
+            document_count,
+            artifact_hash: None,
+            revision: None,
+        }
+    }
+
+    fn package(name: &str) -> SearchDocument {
+        SearchDocument::Package(PackageDoc::new(&context(), name))
+    }
+
+    fn option(name: &str) -> SearchDocument {
+        SearchDocument::Option(OptionDoc::new(&context(), name))
+    }
+
+    fn hidden_option(name: &str) -> SearchDocument {
+        let mut doc = OptionDoc::new(&context(), name);
+        doc.visible = Some(false);
+        SearchDocument::Option(doc)
+    }
+
+    fn sidecar_for(docs: &[SearchDocument], manifest: &IndexGenerationManifest) -> SeoSidecar {
+        let mut accumulator = SeoSidecarAccumulator::new();
+
+        for doc in docs {
+            accumulator.observe(doc);
+        }
+
+        accumulator.into_sidecar(manifest.generation_id.clone())
+    }
+
+    #[test]
+    fn accumulator_counts_supported_and_eligible_documents() {
+        let manifest = manifest(1, 2);
+        let docs = vec![
+            package("git"),
+            option("programs.git.enable"),
+            hidden_option("internal.hidden"),
+        ];
+
+        let sidecar = sidecar_for(&docs, &manifest);
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
+
+        assert_eq!(sidecar.refs.len(), 1);
+        assert_eq!(sidecar.refs[0].total_supported_indexed_count, 3);
+        assert_eq!(sidecar.refs[0].package_supported_count, 1);
+        assert_eq!(sidecar.refs[0].option_supported_count, 2);
+        assert_eq!(sidecar.refs[0].package_eligible_count, 1);
+        assert_eq!(sidecar.refs[0].option_eligible_count, 1);
+    }
+
+    #[test]
+    fn validation_rejects_generation_id_mismatch() {
+        let manifest = manifest(1, 0);
+        let mut sidecar = sidecar_for(&[package("git")], &manifest);
+        sidecar.generation_id = "sha256:wrong".to_owned();
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_entries() {
+        let manifest = manifest(1, 0);
+        let mut sidecar = sidecar_for(&[package("git")], &manifest);
+        sidecar.entries.push(sidecar.entries[0].clone());
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("duplicate SEO sidecar entry"));
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_refs() {
+        let manifest = manifest(1, 0);
+        let mut sidecar = sidecar_for(&[package("git")], &manifest);
+        sidecar.refs.push(sidecar.refs[0].clone());
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("duplicate SEO sidecar ref"));
+    }
+
+    #[test]
+    fn validation_rejects_ref_totals_mismatch() {
+        let manifest = manifest(1, 0);
+        let mut sidecar = sidecar_for(&[package("git")], &manifest);
+        sidecar.refs[0].package_supported_count += 1;
+        sidecar.refs[0].total_supported_indexed_count += 1;
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("ref totals mismatch"));
+    }
+
+    #[test]
+    fn validation_rejects_package_facts_without_package_target() {
+        let manifest = manifest(0, 1);
+        let sidecar = sidecar_for(&[package("git")], &manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("package facts without package target"));
+    }
+
+    #[test]
+    fn validation_rejects_option_facts_without_option_target() {
+        let manifest = manifest(1, 0);
+        let sidecar = sidecar_for(&[option("programs.git.enable")], &manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("option facts without option target"));
+    }
+
+    #[test]
+    fn validation_rejects_incomplete_sidecar_totals() {
+        let manifest = manifest(2, 0);
+        let sidecar = sidecar_for(&[package("git")], &manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("package count mismatch"));
+    }
+
+    #[test]
+    fn validation_rejects_missing_ref_totals_for_manifest_documents() {
+        let manifest = manifest(1, 0);
+        let sidecar = SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: Vec::new(),
+            entries: Vec::new(),
+        };
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("missing ref totals"));
+    }
+
+    #[test]
+    fn validation_accepts_flake_info_target_without_sidecar_refs() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![target(ArtifactKind::FlakeInfoJson, 1)],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: Vec::new(),
+            entries: Vec::new(),
+        };
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn validation_accepts_zero_document_supported_targets_without_sidecar_refs() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![
+                target(ArtifactKind::PackagesJson, 0),
+                target(ArtifactKind::OptionsJson, 0),
+            ],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: Vec::new(),
+            entries: Vec::new(),
+        };
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
     }
 }

@@ -251,7 +251,10 @@ impl SearchService {
                 .expect("served generation lock poisoned");
 
             if current.path == path && current.manifest == manifest {
-                current.seo_facts = seo_facts;
+                if !current.seo_facts.is_loaded() || seo_facts.is_loaded() {
+                    current.seo_facts = seo_facts;
+                }
+
                 return Ok(ReconcileOutcome::Unchanged);
             }
         }
@@ -274,7 +277,10 @@ impl SearchService {
             .expect("served generation lock poisoned");
 
         if current.path == path && current.manifest == manifest {
-            current.seo_facts = seo_facts;
+            if !current.seo_facts.is_loaded() || seo_facts.is_loaded() {
+                current.seo_facts = seo_facts;
+            }
+
             return Ok(ReconcileOutcome::Unchanged);
         }
 
@@ -1302,6 +1308,43 @@ mod tests {
             }
             SeoFactsState::Unavailable(reason) => {
                 panic!("expected loaded SEO sidecar, got unavailable: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn reconcile_generation_does_not_downgrade_loaded_sidecar() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let manifest = store.read_manifest(&path).unwrap();
+
+        let config = Arc::new(app_config(&index_dir));
+        let service =
+            SearchService::from_generation(config, path.clone(), manifest.clone()).unwrap();
+
+        assert!(matches!(
+            service.snapshot().seo_facts,
+            SeoFactsState::Loaded(_)
+        ));
+
+        let before = service.current_index();
+        fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
+
+        let outcome = service
+            .reconcile_generation(path.clone(), manifest.clone())
+            .unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert!(Arc::ptr_eq(&before, &service.current_index()));
+
+        match service.snapshot().seo_facts {
+            SeoFactsState::Loaded(loaded) => {
+                assert_eq!(loaded.generation_id, manifest.generation_id);
+            }
+            SeoFactsState::Unavailable(reason) => {
+                panic!("expected loaded SEO sidecar to be preserved, got unavailable: {reason}");
             }
         }
     }
