@@ -273,7 +273,8 @@ impl SearchService {
             .write()
             .expect("served generation lock poisoned");
 
-        if current.path == path && current.manifest == manifest && current.seo_facts.is_loaded() {
+        if current.path == path && current.manifest == manifest {
+            current.seo_facts = seo_facts;
             return Ok(ReconcileOutcome::Unchanged);
         }
 
@@ -743,7 +744,7 @@ fn non_empty(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fs, sync::Arc};
 
     use tempfile::tempdir;
 
@@ -763,7 +764,7 @@ mod tests {
 
     use super::{
         EntryRequest, ReconcileOutcome, RequestResolutionError, SearchRequest, SearchService,
-        ServiceError,
+        SeoFactsState, ServiceError,
     };
 
     #[test]
@@ -1257,6 +1258,52 @@ mod tests {
 
         assert_eq!(outcome, ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
+    }
+
+    #[test]
+    fn reconcile_generation_retries_sidecar_without_reloading_same_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let manifest = store.read_manifest(&path).unwrap();
+        let sidecar = store.read_seo_sidecar(&path, &manifest).unwrap();
+
+        fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
+
+        let config = Arc::new(app_config(&index_dir));
+        let service =
+            SearchService::from_generation(config, path.clone(), manifest.clone()).unwrap();
+
+        assert!(matches!(
+            service.snapshot().seo_facts,
+            SeoFactsState::Unavailable(_)
+        ));
+
+        let before = service.current_index();
+
+        store.write_seo_sidecar(&path, &manifest, &sidecar).unwrap();
+
+        let outcome = service
+            .reconcile_generation(path.clone(), manifest.clone())
+            .unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert!(Arc::ptr_eq(&before, &service.current_index()));
+        assert_eq!(service.snapshot().path, path);
+        assert_eq!(
+            service.snapshot().manifest.generation_id,
+            manifest.generation_id
+        );
+
+        match service.snapshot().seo_facts {
+            SeoFactsState::Loaded(loaded) => {
+                assert_eq!(loaded.generation_id, manifest.generation_id);
+            }
+            SeoFactsState::Unavailable(reason) => {
+                panic!("expected loaded SEO sidecar, got unavailable: {reason}");
+            }
+        }
     }
 
     #[test]

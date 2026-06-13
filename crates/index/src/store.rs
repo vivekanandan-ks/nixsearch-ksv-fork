@@ -222,6 +222,10 @@ impl IndexStore {
         generation_path.join("index-manifest.json")
     }
 
+    pub fn seo_sidecar_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
+        generation_path.join("seo-facts.json")
+    }
+
     pub fn write_manifest(
         &self,
         generation_path: &Utf8Path,
@@ -263,23 +267,6 @@ impl IndexStore {
             .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
 
         Ok(manifest)
-    }
-
-    pub fn current_manifest(&self) -> Result<IndexGenerationManifest> {
-        let current = self.current_path()?;
-        self.read_manifest(&current)
-    }
-
-    pub fn try_current_manifest(&self) -> Result<Option<IndexGenerationManifest>> {
-        let Some(current) = self.try_current_path()? else {
-            return Ok(None);
-        };
-
-        self.read_manifest(&current).map(Some)
-    }
-
-    pub fn seo_sidecar_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
-        generation_path.join("seo-facts.json")
     }
 
     pub fn write_seo_sidecar(
@@ -329,6 +316,19 @@ impl IndexStore {
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
         Ok(sidecar)
+    }
+
+    pub fn current_manifest(&self) -> Result<IndexGenerationManifest> {
+        let current = self.current_path()?;
+        self.read_manifest(&current)
+    }
+
+    pub fn try_current_manifest(&self) -> Result<Option<IndexGenerationManifest>> {
+        let Some(current) = self.try_current_path()? else {
+            return Ok(None);
+        };
+
+        self.read_manifest(&current).map(Some)
     }
 }
 

@@ -157,15 +157,23 @@ impl SeoSidecar {
                 );
             }
 
-            validate_entry_manifest_targets(entry, &manifest_targets)?;
+            validate_manifest_targets(
+                &manifest_targets,
+                &entry.source,
+                &entry.ref_id,
+                Some(&entry.name),
+                entry.package_supported_count,
+                entry.option_supported_count,
+            )?;
 
+            let counts = entry.counts();
             ref_sums
                 .entry(SeoRefKey {
                     source: entry.source.clone(),
                     ref_id: entry.ref_id.clone(),
                 })
                 .or_default()
-                .merge(&SeoCounts::from_entry(entry));
+                .merge(&counts);
         }
 
         let mut seen_refs = BTreeSet::<SeoRefKey>::new();
@@ -199,7 +207,7 @@ impl SeoSidecar {
                 );
             };
 
-            let actual = SeoCounts::from_ref(ref_facts);
+            let actual = ref_facts.counts();
             if actual != sum {
                 bail!(
                     "SEO sidecar ref totals mismatch for {}/{}",
@@ -208,7 +216,14 @@ impl SeoSidecar {
                 );
             }
 
-            validate_ref_manifest_targets(ref_facts, &manifest_targets)?;
+            validate_manifest_targets(
+                &manifest_targets,
+                &ref_facts.source,
+                &ref_facts.ref_id,
+                None,
+                ref_facts.package_supported_count,
+                ref_facts.option_supported_count,
+            )?;
         }
 
         if let Some((key, _)) = ref_sums.into_iter().next() {
@@ -224,26 +239,34 @@ impl SeoSidecar {
 }
 
 impl SeoEntryFacts {
+    fn counts(&self) -> SeoCounts {
+        SeoCounts {
+            total_supported_indexed_count: self.total_supported_indexed_count,
+            package_supported_count: self.package_supported_count,
+            option_supported_count: self.option_supported_count,
+            package_eligible_count: self.package_eligible_count,
+            option_eligible_count: self.option_eligible_count,
+        }
+    }
+
     fn validate_counts(&self) -> Result<()> {
-        validate_counts(
-            self.total_supported_indexed_count,
-            self.package_supported_count,
-            self.option_supported_count,
-            self.package_eligible_count,
-            self.option_eligible_count,
-        )
+        self.counts().validate()
     }
 }
 
 impl SeoRefFacts {
+    fn counts(&self) -> SeoCounts {
+        SeoCounts {
+            total_supported_indexed_count: self.total_supported_indexed_count,
+            package_supported_count: self.package_supported_count,
+            option_supported_count: self.option_supported_count,
+            package_eligible_count: self.package_eligible_count,
+            option_eligible_count: self.option_eligible_count,
+        }
+    }
+
     fn validate_counts(&self) -> Result<()> {
-        validate_counts(
-            self.total_supported_indexed_count,
-            self.package_supported_count,
-            self.option_supported_count,
-            self.package_eligible_count,
-            self.option_eligible_count,
-        )
+        self.counts().validate()
     }
 }
 
@@ -300,47 +323,23 @@ impl SeoCounts {
         self.option_eligible_count += other.option_eligible_count;
     }
 
-    fn from_entry(entry: &SeoEntryFacts) -> Self {
-        Self {
-            total_supported_indexed_count: entry.total_supported_indexed_count,
-            package_supported_count: entry.package_supported_count,
-            option_supported_count: entry.option_supported_count,
-            package_eligible_count: entry.package_eligible_count,
-            option_eligible_count: entry.option_eligible_count,
+    fn validate(&self) -> Result<()> {
+        if self.total_supported_indexed_count
+            != self.package_supported_count + self.option_supported_count
+        {
+            bail!("total_supported_indexed_count does not match package+option counts");
         }
-    }
 
-    fn from_ref(ref_facts: &SeoRefFacts) -> Self {
-        Self {
-            total_supported_indexed_count: ref_facts.total_supported_indexed_count,
-            package_supported_count: ref_facts.package_supported_count,
-            option_supported_count: ref_facts.option_supported_count,
-            package_eligible_count: ref_facts.package_eligible_count,
-            option_eligible_count: ref_facts.option_eligible_count,
+        if self.package_eligible_count > self.package_supported_count {
+            bail!("package_eligible_count exceeds package_supported_count");
         }
-    }
-}
 
-fn validate_counts(
-    total_supported_indexed_count: usize,
-    package_supported_count: usize,
-    option_supported_count: usize,
-    package_eligible_count: usize,
-    option_eligible_count: usize,
-) -> Result<()> {
-    if total_supported_indexed_count != package_supported_count + option_supported_count {
-        bail!("total_supported_indexed_count does not match package+option counts");
-    }
+        if self.option_eligible_count > self.option_supported_count {
+            bail!("option_eligible_count exceeds option_supported_count");
+        }
 
-    if package_eligible_count > package_supported_count {
-        bail!("package_eligible_count exceeds package_supported_count");
+        Ok(())
     }
-
-    if option_eligible_count > option_supported_count {
-        bail!("option_eligible_count exceeds option_supported_count");
-    }
-
-    Ok(())
 }
 
 fn manifest_target_kinds(
@@ -358,68 +357,34 @@ fn manifest_target_kinds(
     targets
 }
 
-fn validate_entry_manifest_targets(
-    entry: &SeoEntryFacts,
+fn validate_manifest_targets(
     manifest_targets: &BTreeMap<(String, String), BTreeSet<ArtifactKind>>,
+    source: &str,
+    ref_id: &str,
+    name: Option<&str>,
+    package_supported_count: usize,
+    option_supported_count: usize,
 ) -> Result<()> {
-    let Some(kinds) = manifest_targets.get(&(entry.source.clone(), entry.ref_id.clone())) else {
-        bail!(
-            "SEO sidecar entry {}/{}/{} references ref missing from manifest",
-            entry.source,
-            entry.ref_id,
-            entry.name
-        );
+    let label = sidecar_record_label(source, ref_id, name);
+
+    let Some(kinds) = manifest_targets.get(&(source.to_owned(), ref_id.to_owned())) else {
+        bail!("{label} references ref missing from manifest");
     };
 
-    if entry.package_supported_count > 0 && !kinds.contains(&ArtifactKind::PackagesJson) {
-        bail!(
-            "SEO sidecar entry {}/{}/{} has package facts without package target",
-            entry.source,
-            entry.ref_id,
-            entry.name
-        );
+    if package_supported_count > 0 && !kinds.contains(&ArtifactKind::PackagesJson) {
+        bail!("{label} has package facts without package target");
     }
 
-    if entry.option_supported_count > 0 && !kinds.contains(&ArtifactKind::OptionsJson) {
-        bail!(
-            "SEO sidecar entry {}/{}/{} has option facts without option target",
-            entry.source,
-            entry.ref_id,
-            entry.name
-        );
+    if option_supported_count > 0 && !kinds.contains(&ArtifactKind::OptionsJson) {
+        bail!("{label} has option facts without option target");
     }
 
     Ok(())
 }
 
-fn validate_ref_manifest_targets(
-    ref_facts: &SeoRefFacts,
-    manifest_targets: &BTreeMap<(String, String), BTreeSet<ArtifactKind>>,
-) -> Result<()> {
-    let Some(kinds) = manifest_targets.get(&(ref_facts.source.clone(), ref_facts.ref_id.clone()))
-    else {
-        bail!(
-            "SEO sidecar ref {}/{} references ref missing from manifest",
-            ref_facts.source,
-            ref_facts.ref_id
-        );
-    };
-
-    if ref_facts.package_supported_count > 0 && !kinds.contains(&ArtifactKind::PackagesJson) {
-        bail!(
-            "SEO sidecar ref {}/{} has package facts without package target",
-            ref_facts.source,
-            ref_facts.ref_id
-        );
+fn sidecar_record_label(source: &str, ref_id: &str, name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("SEO sidecar entry {source}/{ref_id}/{name}"),
+        None => format!("SEO sidecar ref {source}/{ref_id}"),
     }
-
-    if ref_facts.option_supported_count > 0 && !kinds.contains(&ArtifactKind::OptionsJson) {
-        bail!(
-            "SEO sidecar ref {}/{} has option facts without option target",
-            ref_facts.source,
-            ref_facts.ref_id
-        );
-    }
-
-    Ok(())
 }
