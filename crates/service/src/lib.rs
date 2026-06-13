@@ -38,6 +38,27 @@ struct ServedGeneration {
     seo_facts: SeoFactsState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationIdentity {
+    path: Utf8PathBuf,
+    manifest: IndexGenerationManifest,
+}
+
+impl ServedGeneration {
+    fn identity(&self) -> GenerationIdentity {
+        GenerationIdentity {
+            path: self.path.clone(),
+            manifest: self.manifest.clone(),
+        }
+    }
+}
+
+impl GenerationIdentity {
+    fn matches(&self, path: &Utf8Path, manifest: &IndexGenerationManifest) -> bool {
+        self.path == path && self.manifest == *manifest
+    }
+}
+
 impl fmt::Debug for ServedGeneration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServedGeneration")
@@ -232,44 +253,58 @@ impl SearchService {
         validate_generation_id(&manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let should_retry_seo_facts = {
+        let (observed_current, should_retry_seo_facts) = {
             let current = self
                 .current
                 .read()
                 .expect("served generation lock poisoned");
+            let observed_current = current.identity();
 
-            if current.path != path || current.manifest != manifest {
-                false
-            } else if current.seo_facts.is_loaded() {
-                return Ok(ReconcileOutcome::Unchanged);
+            if observed_current.matches(&path, &manifest) {
+                if current.seo_facts.is_loaded() {
+                    return Ok(ReconcileOutcome::Unchanged);
+                }
+
+                (observed_current, true)
             } else {
-                true
+                (observed_current, false)
             }
         };
 
         if should_retry_seo_facts {
             let seo_facts = load_seo_facts_state(&self.config, &path, &manifest);
-            let mut current = self
-                .current
-                .write()
-                .expect("served generation lock poisoned");
-
-            if current.path == path && current.manifest == manifest {
-                if current.seo_facts.should_replace_with(&seo_facts) {
-                    current.seo_facts = seo_facts;
-                }
-
-                return Ok(ReconcileOutcome::Unchanged);
-            }
+            return Ok(self.apply_seo_facts_if_current(path, manifest, seo_facts));
         }
 
-        self.reload_generation(path, manifest)
+        self.reload_generation(path, manifest, observed_current)
+    }
+
+    fn apply_seo_facts_if_current(
+        &self,
+        path: Utf8PathBuf,
+        manifest: IndexGenerationManifest,
+        seo_facts: SeoFactsState,
+    ) -> ReconcileOutcome {
+        let mut current = self
+            .current
+            .write()
+            .expect("served generation lock poisoned");
+
+        if current.path == path
+            && current.manifest == manifest
+            && current.seo_facts.should_replace_with(&seo_facts)
+        {
+            current.seo_facts = seo_facts;
+        }
+
+        ReconcileOutcome::Unchanged
     }
 
     fn reload_generation(
         &self,
         path: Utf8PathBuf,
         manifest: IndexGenerationManifest,
+        observed_current: GenerationIdentity,
     ) -> Result<ReconcileOutcome> {
         let index = open_index(&path)
             .with_context(|| format!("failed to open published index generation {path}"))?;
@@ -285,6 +320,10 @@ impl SearchService {
                 current.seo_facts = seo_facts;
             }
 
+            return Ok(ReconcileOutcome::Unchanged);
+        }
+
+        if current.identity() != observed_current {
             return Ok(ReconcileOutcome::Unchanged);
         }
 
@@ -1351,6 +1390,79 @@ mod tests {
                 panic!("expected loaded SEO sidecar to be preserved, got unavailable: {reason}");
             }
         }
+    }
+
+    #[test]
+    fn stale_sidecar_retry_does_not_restore_old_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let store = IndexStore::new(&index_dir);
+        let old_manifest = store.read_manifest(&old_path).unwrap();
+        let old_sidecar = store.read_seo_sidecar(&old_path, &old_manifest).unwrap();
+
+        fs::remove_file(store.seo_sidecar_path(&old_path)).unwrap();
+
+        let config = Arc::new(app_config(&index_dir));
+        let service =
+            SearchService::from_generation(config, old_path.clone(), old_manifest.clone()).unwrap();
+
+        assert!(matches!(
+            service.snapshot().seo_facts,
+            SeoFactsState::Unavailable(_)
+        ));
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+
+        service
+            .reconcile_generation(next_path.clone(), next_manifest.clone())
+            .unwrap();
+
+        let outcome = service.apply_seo_facts_if_current(
+            old_path,
+            old_manifest,
+            SeoFactsState::Loaded(Arc::new(old_sidecar)),
+        );
+
+        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(service.snapshot().path, next_path);
+        assert_eq!(service.snapshot().manifest, next_manifest);
+    }
+
+    #[test]
+    fn stale_reload_does_not_restore_old_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let old_snapshot = service.snapshot();
+        let observed_old = super::GenerationIdentity {
+            path: old_snapshot.path.clone(),
+            manifest: old_snapshot.manifest.clone(),
+        };
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let store = IndexStore::new(&index_dir);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+
+        service
+            .reconcile_generation(next_path.clone(), next_manifest.clone())
+            .unwrap();
+
+        let outcome = service
+            .reload_generation(old_path, old_snapshot.manifest, observed_old)
+            .unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(service.snapshot().path, next_path);
+        assert_eq!(service.snapshot().manifest, next_manifest);
     }
 
     #[test]
