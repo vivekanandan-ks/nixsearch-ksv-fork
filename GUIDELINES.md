@@ -9,6 +9,8 @@ Follow general code best practices:
 - Avoid repeating yourself, such as with hard-coded strings or magic numbers; use constants or functions instead.
 - Each function should do one 'job' and do it well.
 - Avoid reinventing the wheel when a well-known library or tool can accomplish the task effectively.
+- Compatibility is NOT important. The project is in pre-alpha, so this isn't yet a concern. Always architect for the optimal design, don't worry about keeping things compatible.
+- Always plan the most correct plan/fix, not necessarily the smallest or most convenient plan/fix.
 
 ## Python
 
