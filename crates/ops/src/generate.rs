@@ -10,7 +10,7 @@ use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
 use nixsearch_index::seo::SeoSidecarAccumulator;
-use nixsearch_index::store::IndexStore;
+use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_source::artifact::ProducedArtifact;
 use nixsearch_source::error::NixCommandFailure;
 use nixsearch_store::{ArtifactStore, StoreError};
@@ -197,8 +197,12 @@ async fn build_and_publish_generation_with_policy(
 
         let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
         let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
+        let published_generation = PublishedGeneration {
+            path: generation_path.clone(),
+            manifest: manifest.clone(),
+        };
 
-        index_store.write_seo_sidecar(&generation_path, &manifest, &sidecar)?;
+        index_store.write_seo_sidecar(&published_generation, &sidecar)?;
         index_store.write_manifest(&generation_path, &manifest)?;
 
         publish_started = true;

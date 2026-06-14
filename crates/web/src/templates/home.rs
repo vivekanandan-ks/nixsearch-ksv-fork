@@ -107,7 +107,7 @@ fn count_for(
         .iter()
         .map(|scope| {
             served_generation
-                .manifest
+                .manifest()
                 .targets
                 .iter()
                 .filter(|target| target.source == scope.source && target.ref_id == scope.ref_id)

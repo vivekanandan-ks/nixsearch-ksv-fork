@@ -18,6 +18,7 @@ use crate::lock::{self, UpdateLock};
 pub struct CleanupReport {
     pub deleted_generations: Vec<Utf8PathBuf>,
     pub deleted_incomplete_generations: Vec<Utf8PathBuf>,
+    pub preserved_active_generations: Vec<Utf8PathBuf>,
     pub warnings: Vec<String>,
     pub nix_gc: Option<NixCleanupOutcome>,
     pub nix_optimise: Option<NixCleanupOutcome>,
@@ -76,6 +77,10 @@ pub fn log_report(report: &CleanupReport) {
 
     for path in &report.deleted_incomplete_generations {
         tracing::info!(generation = %path, "deleted stale incomplete index generation");
+    }
+
+    for path in &report.preserved_active_generations {
+        tracing::info!(generation = %path, "preserved active index generation");
     }
 
     for warning in &report.warnings {
@@ -229,7 +234,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
     }
 
     if current_is_complete {
-        prune_complete_generations(config, complete, report);
+        prune_complete_generations(config, &index_store, complete, report);
     } else {
         report.warnings.push(
             "current index generation is missing, invalid, or incomplete; preserving complete generations"
@@ -274,6 +279,7 @@ fn complete_manifest(index_store: &IndexStore, path: &Utf8Path) -> Option<IndexG
 
 fn prune_complete_generations(
     config: &AppConfig,
+    index_store: &IndexStore,
     mut complete: Vec<CompleteGeneration>,
     report: &mut CleanupReport,
 ) {
@@ -286,6 +292,20 @@ fn prune_complete_generations(
     let keep_non_current = config.maintenance.index_generations.keep.saturating_sub(1);
 
     for generation in complete.into_iter().skip(keep_non_current) {
+        let Some(_lease) = (match index_store.try_acquire_generation_lease(&generation.path) {
+            Ok(lease) => lease,
+            Err(error) => {
+                report.warnings.push(format!(
+                    "failed to check active generation lease for {}: {error:#}",
+                    generation.path
+                ));
+                continue;
+            }
+        }) else {
+            report.preserved_active_generations.push(generation.path);
+            continue;
+        };
+
         match fs::remove_dir_all(&generation.path) {
             Ok(()) => report.deleted_generations.push(generation.path),
             Err(error) => report.warnings.push(format!(
@@ -656,9 +676,97 @@ pub(crate) fn should_try_legacy_nix_store(stderr: &str) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use camino::Utf8PathBuf;
+    use nixsearch_index::store::IndexStore;
+    use nixsearch_index_test_support::publish_canonical_index_with_generated_at;
+    use tempfile::tempdir;
+    use time::Duration as TimeDuration;
+
     use crate::cleanup::{
-        push_store_roots_for_path, should_try_legacy_nix_store, store_root_from_path,
+        cleanup_under_lock, push_store_roots_for_path, should_try_legacy_nix_store,
+        store_root_from_path,
     };
+
+    #[tokio::test]
+    async fn cleanup_preserves_active_non_current_generation() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = Utf8PathBuf::from_path_buf(tempdir.path().join("indexes")).unwrap();
+
+        let oldest = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH,
+        );
+        let leased = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
+        );
+        let retained = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2),
+        );
+        let current = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(3),
+        );
+
+        let store = IndexStore::new(&index_dir);
+        let _lease = store.acquire_generation_lease(&leased).unwrap();
+
+        let mut config = nixsearch_test_support::app_config(&index_dir);
+        config.maintenance.index_generations.keep = 2;
+
+        let update_lock = crate::lock::acquire_update_lock(&index_dir).unwrap();
+        let report = cleanup_under_lock(&config, &update_lock).await;
+
+        assert!(current.exists());
+        assert!(retained.exists());
+        assert!(leased.exists());
+        assert!(!oldest.exists());
+        assert_eq!(report.deleted_generations, vec![oldest]);
+        assert_eq!(report.preserved_active_generations, vec![leased]);
+    }
+
+    #[tokio::test]
+    async fn cleanup_deletes_preserved_generation_after_lease_drops() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = Utf8PathBuf::from_path_buf(tempdir.path().join("indexes")).unwrap();
+
+        let leased = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH,
+        );
+        let retained = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
+        );
+        let current = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2),
+        );
+
+        let store = IndexStore::new(&index_dir);
+        let lease = store.acquire_generation_lease(&leased).unwrap();
+
+        let mut config = nixsearch_test_support::app_config(&index_dir);
+        config.maintenance.index_generations.keep = 2;
+
+        let update_lock = crate::lock::acquire_update_lock(&index_dir).unwrap();
+        let report = cleanup_under_lock(&config, &update_lock).await;
+
+        assert!(current.exists());
+        assert!(retained.exists());
+        assert!(leased.exists());
+        assert_eq!(report.preserved_active_generations, vec![leased.clone()]);
+
+        drop(lease);
+
+        let report = cleanup_under_lock(&config, &update_lock).await;
+
+        assert!(current.exists());
+        assert!(retained.exists());
+        assert!(!leased.exists());
+        assert_eq!(report.deleted_generations, vec![leased]);
+    }
 
     #[test]
     fn legacy_fallback_detects_unsupported_new_nix_cli() {

@@ -1,5 +1,6 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write as _;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -19,10 +20,46 @@ pub struct PublishedGeneration {
     pub manifest: IndexGenerationManifest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CurrentGeneration {
-    Missing,
-    Found(PublishedGeneration),
+#[derive(Debug)]
+pub struct GenerationLease {
+    path: Utf8PathBuf,
+    lock_path: Utf8PathBuf,
+    _file: File,
+}
+
+impl GenerationLease {
+    pub fn path(&self) -> &Utf8Path {
+        &self.path
+    }
+
+    pub fn lock_path(&self) -> &Utf8Path {
+        &self.lock_path
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LeasedPublishedGeneration {
+    generation: PublishedGeneration,
+    _lease: Arc<GenerationLease>,
+}
+
+impl LeasedPublishedGeneration {
+    pub fn path(&self) -> &Utf8Path {
+        &self.generation.path
+    }
+
+    pub fn manifest(&self) -> &IndexGenerationManifest {
+        &self.generation.manifest
+    }
+
+    pub fn identity(&self) -> &PublishedGeneration {
+        &self.generation
+    }
+
+    pub fn clone_identity(&self) -> PublishedGeneration {
+        self.generation.clone()
+    }
+
 }
 
 impl IndexStore {
@@ -37,6 +74,10 @@ impl IndexStore {
 
     pub fn generations_dir(&self) -> Utf8PathBuf {
         self.root.join("generations")
+    }
+
+    pub fn generation_locks_dir(&self) -> Utf8PathBuf {
+        self.root.join("generation-locks")
     }
 
     pub fn current_file(&self) -> Utf8PathBuf {
@@ -142,6 +183,104 @@ impl IndexStore {
         }
 
         Ok(generation_path)
+    }
+
+    fn generation_lease_path(
+        &self,
+        generation_path: &Utf8Path,
+    ) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+        let generation_path = self.validate_generation_path(generation_path)?;
+        let name = generation_path
+            .file_name()
+            .with_context(|| {
+                format!(
+                    "failed to derive generation lease name for {}",
+                    generation_path.as_str()
+                )
+            })?
+            .to_owned();
+
+        let lock_path = self.generation_locks_dir().join(format!("{name}.lock"));
+
+        Ok((generation_path, lock_path))
+    }
+
+    pub fn acquire_generation_lease(&self, generation_path: &Utf8Path) -> Result<GenerationLease> {
+        let (generation_path, lock_path) = self.generation_lease_path(generation_path)?;
+
+        fs::create_dir_all(self.generation_locks_dir()).with_context(|| {
+            format!(
+                "failed to create generation locks dir {}",
+                self.generation_locks_dir()
+            )
+        })?;
+
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open generation lease {}", lock_path.as_str()))?;
+
+        file.lock_shared().with_context(|| {
+            format!("failed to acquire generation lease {}", lock_path.as_str())
+        })?;
+
+        Ok(GenerationLease {
+            path: generation_path,
+            lock_path,
+            _file: file,
+        })
+    }
+
+    pub fn try_acquire_generation_lease(
+        &self,
+        generation_path: &Utf8Path,
+    ) -> Result<Option<GenerationLease>> {
+        let (generation_path, lock_path) = self.generation_lease_path(generation_path)?;
+
+        fs::create_dir_all(self.generation_locks_dir()).with_context(|| {
+            format!(
+                "failed to create generation locks dir {}",
+                self.generation_locks_dir()
+            )
+        })?;
+
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open generation lease {}", lock_path.as_str()))?;
+
+        match file.try_lock() {
+            Ok(()) => Ok(Some(GenerationLease {
+                path: generation_path,
+                lock_path,
+                _file: file,
+            })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error).with_context(|| {
+                format!("failed to acquire generation lease {}", lock_path.as_str())
+            }),
+        }
+    }
+
+    pub fn lease_published_generation(
+        &self,
+        generation: PublishedGeneration,
+    ) -> Result<LeasedPublishedGeneration> {
+        validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
+        let lease = Arc::new(self.acquire_generation_lease(&generation.path)?);
+
+        Ok(LeasedPublishedGeneration {
+            generation,
+            _lease: lease,
+        })
     }
 
     fn create_temp_file(&self, dir: &Utf8Path, prefix: &str, bytes: &[u8]) -> Result<Utf8PathBuf> {
@@ -283,18 +422,17 @@ impl IndexStore {
 
     pub fn write_seo_sidecar(
         &self,
-        generation_path: &Utf8Path,
-        manifest: &IndexGenerationManifest,
+        generation: &PublishedGeneration,
         sidecar: &SeoSidecar,
     ) -> Result<()> {
-        let generation_path = self.validate_generation_path(generation_path)?;
+        let generation_path = self.validate_generation_path(&generation.path)?;
         let path = self.seo_sidecar_path(&generation_path);
 
-        validate_generation_id(manifest)
+        validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
         sidecar
-            .validate_for_manifest(manifest)
+            .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
         let bytes =
@@ -314,12 +452,8 @@ impl IndexStore {
         Ok(())
     }
 
-    pub fn read_seo_sidecar(
-        &self,
-        generation_path: &Utf8Path,
-        manifest: &IndexGenerationManifest,
-    ) -> Result<SeoSidecar> {
-        let path = self.seo_sidecar_path(generation_path);
+    pub fn read_seo_sidecar(&self, generation: &PublishedGeneration) -> Result<SeoSidecar> {
+        let path = self.seo_sidecar_path(&generation.path);
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read SEO sidecar {}", path.as_str()))?;
 
@@ -327,7 +461,7 @@ impl IndexStore {
             .with_context(|| format!("failed to parse SEO sidecar {}", path.as_str()))?;
 
         sidecar
-            .validate_for_manifest(manifest)
+            .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
         Ok(sidecar)
@@ -346,27 +480,47 @@ impl IndexStore {
         self.read_manifest(&current).map(Some)
     }
 
-    pub fn current_generation(&self) -> Result<PublishedGeneration> {
-        match self.try_current_generation()? {
-            CurrentGeneration::Found(generation) => Ok(generation),
-            CurrentGeneration::Missing => anyhow::bail!(
-                "failed to read current index file {}; run `nixsearch update` first",
-                self.current_file().as_str()
-            ),
-        }
-    }
-
-    pub fn try_current_generation(&self) -> Result<CurrentGeneration> {
+    pub fn try_current_published_generation_metadata(&self) -> Result<Option<PublishedGeneration>> {
         let Some(path) = self.try_current_path()? else {
-            return Ok(CurrentGeneration::Missing);
+            return Ok(None);
         };
 
         let manifest = self.read_manifest(&path)?;
 
-        Ok(CurrentGeneration::Found(PublishedGeneration {
-            path,
-            manifest,
-        }))
+        Ok(Some(PublishedGeneration { path, manifest }))
+    }
+
+    pub fn current_leased_generation(&self) -> Result<LeasedPublishedGeneration> {
+        self.try_current_leased_generation()?.with_context(|| {
+            format!(
+                "failed to read current index file {}; run `nixsearch update` first",
+                self.current_file().as_str()
+            )
+        })
+    }
+
+    pub fn try_current_leased_generation(&self) -> Result<Option<LeasedPublishedGeneration>> {
+        for _ in 0..100 {
+            let Some(path) = self.try_current_path()? else {
+                return Ok(None);
+            };
+
+            let lease = Arc::new(self.acquire_generation_lease(&path)?);
+
+            match self.try_current_path()? {
+                Some(current) if current == path => {
+                    let manifest = self.read_manifest(&path)?;
+                    return Ok(Some(LeasedPublishedGeneration {
+                        generation: PublishedGeneration { path, manifest },
+                        _lease: lease,
+                    }));
+                }
+                Some(_) => continue,
+                None => return Ok(None),
+            }
+        }
+
+        anyhow::bail!("failed to acquire a stable current generation lease")
     }
 }
 
@@ -380,7 +534,7 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
 
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, canonical_generation_id};
-    use crate::store::{CurrentGeneration, IndexStore};
+    use crate::store::{IndexStore, PublishedGeneration};
 
     const SOURCE_FIXTURES: &str = "fixtures";
     const REF_SMALL: &str = "small";
@@ -509,6 +663,60 @@ mod tests {
         let error = store.publish(&file).unwrap_err();
 
         assert!(format!("{error:#}").contains("is not a directory"));
+    }
+
+    #[test]
+    fn generation_lease_blocks_second_try_acquire() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let lease = store.acquire_generation_lease(&generation).unwrap();
+
+        assert!(
+            store
+                .try_acquire_generation_lease(&generation)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(lease);
+
+        assert!(
+            store
+                .try_acquire_generation_lease(&generation)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn generation_lease_rejects_paths_outside_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(utf8_path(tempdir.path().join("indexes")));
+        store.create_generation_path().unwrap();
+        let external_generation =
+            Utf8PathBuf::from_path_buf(tempdir.path().join("external-generation")).unwrap();
+        fs::create_dir(&external_generation).unwrap();
+
+        let error = store
+            .acquire_generation_lease(&external_generation)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("is outside generations dir"));
+    }
+
+    #[test]
+    fn generation_lease_rejects_nested_generation_path() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let nested = generation.join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let error = store.acquire_generation_lease(&nested).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a direct child"));
     }
 
     #[test]
@@ -715,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn index_store_loads_current_generation() {
+    fn index_store_loads_current_published_generation_metadata() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
@@ -735,23 +943,62 @@ mod tests {
         store.write_manifest(&generation, &manifest).unwrap();
         store.publish(&generation).unwrap();
 
-        let loaded = store.current_generation().unwrap();
+        let loaded = store
+            .try_current_published_generation_metadata()
+            .unwrap()
+            .unwrap();
 
         assert_eq!(loaded.path, generation.canonicalize_utf8().unwrap());
         assert_eq!(loaded.manifest.document_count, 1);
     }
 
     #[test]
-    fn index_store_reports_missing_current_generation() {
+    fn index_store_loads_current_leased_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = IndexGenerationManifest::new(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+
+        store.write_manifest(&generation, &manifest).unwrap();
+        store.publish(&generation).unwrap();
+
+        let leased = store.current_leased_generation().unwrap();
+
+        assert_eq!(leased.path(), generation.canonicalize_utf8().unwrap());
+        assert_eq!(leased.manifest().document_count, 1);
+        assert!(
+            store
+                .try_acquire_generation_lease(leased.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn index_store_reports_missing_current_leased_generation() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
 
-        assert_eq!(
-            store.try_current_generation().unwrap(),
-            CurrentGeneration::Missing
-        );
         assert!(
-            format!("{:#}", store.current_generation().unwrap_err())
+            store
+                .try_current_published_generation_metadata()
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.try_current_leased_generation().unwrap().is_none());
+        assert!(
+            format!("{:#}", store.current_leased_generation().unwrap_err())
                 .contains("run `nixsearch update` first")
         );
     }
@@ -883,7 +1130,7 @@ mod tests {
         manifest.generation_id = "sha256:wrong".to_owned();
 
         let error = store
-            .write_seo_sidecar(&generation, &manifest, &sidecar)
+            .write_seo_sidecar(&PublishedGeneration { path: generation, manifest }, &sidecar)
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));

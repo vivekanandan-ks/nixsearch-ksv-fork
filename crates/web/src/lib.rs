@@ -7,7 +7,7 @@ use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
+use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::SearchService;
@@ -37,18 +37,18 @@ struct AppState {
 }
 
 pub async fn serve(config: AppConfig) -> Result<()> {
-    let generation = ensure_current_generation(&config).await?;
+    ensure_current_generation(&config).await?;
 
     let addr: SocketAddr =
         config.server.listen.parse().with_context(|| {
             format!("failed to parse listen address {:?}", config.server.listen)
         })?;
 
-    log_startup_maintenance_state(&config, &generation);
-
     let config = Arc::new(config);
-    let search =
-        SearchService::from_generation(Arc::clone(&config), generation.path, generation.manifest)?;
+    let search = SearchService::open_current(Arc::clone(&config))?;
+    let generation = search.snapshot().generation.clone_identity();
+
+    log_startup_maintenance_state(&config, &generation);
 
     maintenance::spawn(Arc::clone(&config), search.clone());
 
@@ -89,8 +89,8 @@ fn app_router(state: AppState) -> Router {
 async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    match index_store.try_current_generation() {
-        Ok(CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_published_generation_metadata() {
+        Ok(Some(generation)) => {
             if let Err(error) = SearchService::validate_generation(&generation.path) {
                 if !config.server.bootstrap {
                     return Err(error).with_context(|| {
@@ -131,7 +131,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
                 );
             }
         }
-        Ok(CurrentGeneration::Missing) => {}
+        Ok(None) => {}
         Err(error) => {
             if !config.server.bootstrap {
                 return Err(error).context(
@@ -166,8 +166,8 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         .await
         .context("failed to join maintenance lock task")??;
 
-    match index_store.try_current_generation() {
-        Ok(CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_published_generation_metadata() {
+        Ok(Some(generation)) => {
             match SearchService::validate_generation(&generation.path) {
                 Ok(()) => {
                     let missing =
@@ -194,7 +194,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
                 }
             }
         }
-        Ok(CurrentGeneration::Missing) => {}
+        Ok(None) => {}
         Err(error) => {
             tracing::warn!(
                 "current index generation is still unreadable after acquiring lock; rebuilding it: {error:#}"
@@ -214,8 +214,8 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         );
     }
 
-    match index_store.try_current_generation()? {
-        CurrentGeneration::Found(generation) => {
+    match index_store.try_current_published_generation_metadata()? {
+        Some(generation) => {
             SearchService::validate_generation(&generation.path).with_context(|| {
                 format!(
                     "bootstrap published index generation {} but it cannot be opened",
@@ -228,7 +228,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
 
             Ok(generation)
         }
-        CurrentGeneration::Missing => {
+        None => {
             bail!("bootstrap completed without publishing a current index")
         }
     }

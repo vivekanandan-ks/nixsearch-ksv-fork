@@ -94,7 +94,7 @@ pub fn render_full_page(
     };
     let modal_markup = modal::render(&state.config, page_state, modal_entry);
     let source_metadata = source_metadata_json(&state.config);
-    let generation_state = generation_state_json(&served_generation.manifest.generation_id);
+    let generation_state = generation_state_json(&served_generation.manifest().generation_id);
     let initial_history_metadata = initial_return_metadata.map(initial_history_metadata_json);
 
     let metadata = page_head_metadata(
@@ -173,7 +173,7 @@ pub fn render_full_page(
                     (results_markup)
                     (modal_markup)
                 }
-                (footer::render_footer(state, &served_generation.manifest))
+                (footer::render_footer(state, served_generation.manifest()))
 
                 script #generation-state type="application/json" {
                     (PreEscaped(&generation_state))

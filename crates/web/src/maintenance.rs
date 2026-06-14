@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
-use nixsearch_index::store::{CurrentGeneration, IndexStore, PublishedGeneration};
+use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
 use nixsearch_service::{ReconcileOutcome, ReconcileReport, SearchService};
@@ -221,8 +221,8 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     };
 
     let index_store = IndexStore::new(&config.data.index_dir);
-    match index_store.try_current_generation() {
-        Ok(CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_published_generation_metadata() {
+        Ok(Some(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 tracing::warn!(
                     generation = %generation.path,
@@ -246,7 +246,7 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
                 }
             }
         }
-        Ok(CurrentGeneration::Missing) => {
+        Ok(None) => {
             tracing::warn!("current index remains missing after lock acquisition; rebuilding");
         }
         Err(error) => {
@@ -309,8 +309,8 @@ pub(crate) fn current_generation_needs_regeneration(
     interval: Duration,
     now: OffsetDateTime,
 ) -> Result<bool> {
-    match index_store.try_current_generation() {
-        Ok(CurrentGeneration::Found(generation)) => {
+    match index_store.try_current_published_generation_metadata() {
+        Ok(Some(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 return Ok(true);
             }
@@ -329,7 +329,7 @@ pub(crate) fn current_generation_needs_regeneration(
 
             Ok(now >= next_due)
         }
-        Ok(CurrentGeneration::Missing) => Ok(true),
+        Ok(None) => Ok(true),
         Err(error) => {
             tracing::warn!(
                 "treating unreadable current index generation as needing regeneration: {error:#}"

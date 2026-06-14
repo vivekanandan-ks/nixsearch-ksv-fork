@@ -282,7 +282,7 @@ fn client_generation_matches(
     client_generation_id: Option<&str>,
     snapshot: &ServedGenerationSnapshot,
 ) -> bool {
-    client_generation_id == Some(snapshot.manifest.generation_id.as_str())
+    client_generation_id == Some(snapshot.manifest().generation_id.as_str())
 }
 
 struct GenerationChangeContent {
@@ -432,7 +432,7 @@ fn generation_change_events_response(
     target_public_url: &str,
 ) -> Response {
     let event = ExecuteScript::new(generation_change_script(
-        &snapshot.manifest.generation_id,
+        &snapshot.manifest().generation_id,
         &content.results_html,
         &content.modal_html,
         &content.metadata,
@@ -608,7 +608,7 @@ fn stale_generation_response(snapshot: &ServedGenerationSnapshot) -> Response {
         Json(serde_json::json!({
             "error": "stale_generation",
             "reload": true,
-            "generationId": snapshot.manifest.generation_id.as_str(),
+            "generationId": snapshot.manifest().generation_id.as_str(),
         })),
     )
         .into_response()
