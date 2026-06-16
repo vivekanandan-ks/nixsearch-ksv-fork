@@ -22,19 +22,7 @@ pub struct PublishedGeneration {
 
 #[derive(Debug)]
 pub struct GenerationLease {
-    path: Utf8PathBuf,
-    lock_path: Utf8PathBuf,
     _file: File,
-}
-
-impl GenerationLease {
-    pub fn path(&self) -> &Utf8Path {
-        &self.path
-    }
-
-    pub fn lock_path(&self) -> &Utf8Path {
-        &self.lock_path
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -52,14 +40,13 @@ impl LeasedPublishedGeneration {
         &self.generation.manifest
     }
 
-    pub fn identity(&self) -> &PublishedGeneration {
+    pub fn published_generation(&self) -> &PublishedGeneration {
         &self.generation
     }
 
-    pub fn clone_identity(&self) -> PublishedGeneration {
+    pub fn to_published_generation(&self) -> PublishedGeneration {
         self.generation.clone()
     }
-
 }
 
 impl IndexStore {
@@ -205,8 +192,8 @@ impl IndexStore {
         Ok((generation_path, lock_path))
     }
 
-    pub fn acquire_generation_lease(&self, generation_path: &Utf8Path) -> Result<GenerationLease> {
-        let (generation_path, lock_path) = self.generation_lease_path(generation_path)?;
+    fn open_generation_lease_file(&self, generation_path: &Utf8Path) -> Result<File> {
+        let (_, lock_path) = self.generation_lease_path(generation_path)?;
 
         fs::create_dir_all(self.generation_locks_dir()).with_context(|| {
             format!(
@@ -215,55 +202,39 @@ impl IndexStore {
             )
         })?;
 
-        let file = OpenOptions::new()
+        OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
-            .with_context(|| format!("failed to open generation lease {}", lock_path.as_str()))?;
-
-        file.lock_shared().with_context(|| {
-            format!("failed to acquire generation lease {}", lock_path.as_str())
-        })?;
-
-        Ok(GenerationLease {
-            path: generation_path,
-            lock_path,
-            _file: file,
-        })
+            .with_context(|| format!("failed to open generation lease {}", lock_path.as_str()))
     }
 
-    pub fn try_acquire_generation_lease(
+    pub fn acquire_shared_generation_lease(
+        &self,
+        generation_path: &Utf8Path,
+    ) -> Result<GenerationLease> {
+        let file = self.open_generation_lease_file(generation_path)?;
+
+        file.lock_shared().with_context(|| {
+            format!("failed to acquire shared generation lease for {generation_path}")
+        })?;
+
+        Ok(GenerationLease { _file: file })
+    }
+
+    pub fn try_acquire_exclusive_generation_lease(
         &self,
         generation_path: &Utf8Path,
     ) -> Result<Option<GenerationLease>> {
-        let (generation_path, lock_path) = self.generation_lease_path(generation_path)?;
-
-        fs::create_dir_all(self.generation_locks_dir()).with_context(|| {
-            format!(
-                "failed to create generation locks dir {}",
-                self.generation_locks_dir()
-            )
-        })?;
-
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open generation lease {}", lock_path.as_str()))?;
+        let file = self.open_generation_lease_file(generation_path)?;
 
         match file.try_lock() {
-            Ok(()) => Ok(Some(GenerationLease {
-                path: generation_path,
-                lock_path,
-                _file: file,
-            })),
+            Ok(()) => Ok(Some(GenerationLease { _file: file })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error).with_context(|| {
-                format!("failed to acquire generation lease {}", lock_path.as_str())
+                format!("failed to acquire exclusive generation lease for {generation_path}")
             }),
         }
     }
@@ -275,7 +246,7 @@ impl IndexStore {
         validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let lease = Arc::new(self.acquire_generation_lease(&generation.path)?);
+        let lease = Arc::new(self.acquire_shared_generation_lease(&generation.path)?);
 
         Ok(LeasedPublishedGeneration {
             generation,
@@ -480,7 +451,7 @@ impl IndexStore {
         self.read_manifest(&current).map(Some)
     }
 
-    pub fn try_current_published_generation_metadata(&self) -> Result<Option<PublishedGeneration>> {
+    pub fn try_current_generation_metadata(&self) -> Result<Option<PublishedGeneration>> {
         let Some(path) = self.try_current_path()? else {
             return Ok(None);
         };
@@ -505,7 +476,7 @@ impl IndexStore {
                 return Ok(None);
             };
 
-            let lease = Arc::new(self.acquire_generation_lease(&path)?);
+            let lease = Arc::new(self.acquire_shared_generation_lease(&path)?);
 
             match self.try_current_path()? {
                 Some(current) if current == path => {
@@ -666,16 +637,16 @@ mod tests {
     }
 
     #[test]
-    fn generation_lease_blocks_second_try_acquire() {
+    fn shared_generation_lease_blocks_exclusive_try_acquire() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
 
-        let lease = store.acquire_generation_lease(&generation).unwrap();
+        let lease = store.acquire_shared_generation_lease(&generation).unwrap();
 
         assert!(
             store
-                .try_acquire_generation_lease(&generation)
+                .try_acquire_exclusive_generation_lease(&generation)
                 .unwrap()
                 .is_none()
         );
@@ -684,14 +655,14 @@ mod tests {
 
         assert!(
             store
-                .try_acquire_generation_lease(&generation)
+                .try_acquire_exclusive_generation_lease(&generation)
                 .unwrap()
                 .is_some()
         );
     }
 
     #[test]
-    fn generation_lease_rejects_paths_outside_generations_dir() {
+    fn shared_generation_lease_rejects_paths_outside_generations_dir() {
         let tempdir = tempdir().unwrap();
         let store = IndexStore::new(utf8_path(tempdir.path().join("indexes")));
         store.create_generation_path().unwrap();
@@ -700,21 +671,21 @@ mod tests {
         fs::create_dir(&external_generation).unwrap();
 
         let error = store
-            .acquire_generation_lease(&external_generation)
+            .acquire_shared_generation_lease(&external_generation)
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("is outside generations dir"));
     }
 
     #[test]
-    fn generation_lease_rejects_nested_generation_path() {
+    fn shared_generation_lease_rejects_nested_generation_path() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
         let nested = generation.join("nested");
         fs::create_dir(&nested).unwrap();
 
-        let error = store.acquire_generation_lease(&nested).unwrap_err();
+        let error = store.acquire_shared_generation_lease(&nested).unwrap_err();
 
         assert!(format!("{error:#}").contains("is not a direct child"));
     }
@@ -944,7 +915,7 @@ mod tests {
         store.publish(&generation).unwrap();
 
         let loaded = store
-            .try_current_published_generation_metadata()
+            .try_current_generation_metadata()
             .unwrap()
             .unwrap();
 
@@ -979,7 +950,7 @@ mod tests {
         assert_eq!(leased.manifest().document_count, 1);
         assert!(
             store
-                .try_acquire_generation_lease(leased.path())
+                .try_acquire_exclusive_generation_lease(leased.path())
                 .unwrap()
                 .is_none()
         );
@@ -992,7 +963,7 @@ mod tests {
 
         assert!(
             store
-                .try_current_published_generation_metadata()
+                .try_current_generation_metadata()
                 .unwrap()
                 .is_none()
         );

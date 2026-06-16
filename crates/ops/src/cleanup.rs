@@ -292,7 +292,7 @@ fn prune_complete_generations(
     let keep_non_current = config.maintenance.index_generations.keep.saturating_sub(1);
 
     for generation in complete.into_iter().skip(keep_non_current) {
-        let Some(_lease) = (match index_store.try_acquire_generation_lease(&generation.path) {
+        let Some(_lease) = (match index_store.try_acquire_exclusive_generation_lease(&generation.path) {
             Ok(lease) => lease,
             Err(error) => {
                 report.warnings.push(format!(
@@ -688,7 +688,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn cleanup_preserves_active_non_current_generation() {
+    async fn cleanup_preserves_generation_with_active_shared_lease() {
         let tempdir = tempdir().unwrap();
         let index_dir = Utf8PathBuf::from_path_buf(tempdir.path().join("indexes")).unwrap();
 
@@ -710,7 +710,7 @@ mod tests {
         );
 
         let store = IndexStore::new(&index_dir);
-        let _lease = store.acquire_generation_lease(&leased).unwrap();
+        let _lease = store.acquire_shared_generation_lease(&leased).unwrap();
 
         let mut config = nixsearch_test_support::app_config(&index_dir);
         config.maintenance.index_generations.keep = 2;
@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_deletes_preserved_generation_after_lease_drops() {
+    async fn cleanup_deletes_generation_after_shared_lease_drops() {
         let tempdir = tempdir().unwrap();
         let index_dir = Utf8PathBuf::from_path_buf(tempdir.path().join("indexes")).unwrap();
 
@@ -745,7 +745,7 @@ mod tests {
         );
 
         let store = IndexStore::new(&index_dir);
-        let lease = store.acquire_generation_lease(&leased).unwrap();
+        let lease = store.acquire_shared_generation_lease(&leased).unwrap();
 
         let mut config = nixsearch_test_support::app_config(&index_dir);
         config.maintenance.index_generations.keep = 2;

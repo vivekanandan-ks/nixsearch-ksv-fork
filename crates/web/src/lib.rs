@@ -46,7 +46,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     let config = Arc::new(config);
     let search = SearchService::open_current(Arc::clone(&config))?;
-    let generation = search.snapshot().generation.clone_identity();
+    let generation = search.snapshot().to_published_generation();
 
     log_startup_maintenance_state(&config, &generation);
 
@@ -89,7 +89,7 @@ fn app_router(state: AppState) -> Router {
 async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    match index_store.try_current_published_generation_metadata() {
+    match index_store.try_current_generation_metadata() {
         Ok(Some(generation)) => {
             if let Err(error) = SearchService::validate_generation(&generation.path) {
                 if !config.server.bootstrap {
@@ -166,7 +166,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         .await
         .context("failed to join maintenance lock task")??;
 
-    match index_store.try_current_published_generation_metadata() {
+    match index_store.try_current_generation_metadata() {
         Ok(Some(generation)) => {
             match SearchService::validate_generation(&generation.path) {
                 Ok(()) => {
@@ -214,7 +214,7 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         );
     }
 
-    match index_store.try_current_published_generation_metadata()? {
+    match index_store.try_current_generation_metadata()? {
         Some(generation) => {
             SearchService::validate_generation(&generation.path).with_context(|| {
                 format!(

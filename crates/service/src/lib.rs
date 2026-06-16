@@ -38,12 +38,12 @@ struct ServedGeneration {
 }
 
 impl ServedGeneration {
-    fn identity(&self) -> PublishedGeneration {
-        self.generation.clone_identity()
+    fn to_published_generation(&self) -> PublishedGeneration {
+        self.generation.to_published_generation()
     }
 
     fn matches(&self, generation: &PublishedGeneration) -> bool {
-        self.generation.identity() == generation
+        self.generation.published_generation() == generation
     }
 }
 
@@ -58,7 +58,7 @@ impl fmt::Debug for ServedGeneration {
 
 #[derive(Clone)]
 pub struct ServedGenerationSnapshot {
-    pub generation: LeasedPublishedGeneration,
+    generation: LeasedPublishedGeneration,
     pub index: Arc<SearchIndex>,
     pub seo_facts: SeoFactsState,
 }
@@ -81,8 +81,12 @@ impl ServedGenerationSnapshot {
         self.generation.manifest()
     }
 
-    pub fn generation_identity(&self) -> &PublishedGeneration {
-        self.generation.identity()
+    pub fn published_generation(&self) -> &PublishedGeneration {
+        self.generation.published_generation()
+    }
+
+    pub fn to_published_generation(&self) -> PublishedGeneration {
+        self.generation.to_published_generation()
     }
 }
 
@@ -223,7 +227,7 @@ impl SearchService {
             .context("failed to validate supplied index generation manifest")?;
 
         let index = open_index(generation.path())?;
-        let seo_facts = load_seo_facts_state(&config, generation.identity());
+        let seo_facts = load_seo_facts_state(&config, generation.published_generation());
 
         Ok(Self {
             config,
@@ -274,7 +278,7 @@ impl SearchService {
                 self.config.data.index_dir
             )
         })?;
-        let identity = generation.clone_identity();
+        let identity = generation.to_published_generation();
         let outcome = self.reconcile_leased_generation(&index_store, generation)?;
 
         Ok(ReconcileReport::from_outcome(outcome, identity))
@@ -288,14 +292,14 @@ impl SearchService {
         validate_generation_id(generation.manifest())
             .context("failed to validate supplied index generation manifest")?;
 
-        let identity = generation.clone_identity();
+        let identity = generation.to_published_generation();
 
         let (observed_current, should_retry_seo_facts) = {
             let current = self
                 .current
                 .read()
                 .expect("served generation lock poisoned");
-            let observed_current = current.identity();
+            let observed_current = current.to_published_generation();
 
             if current.matches(&identity) {
                 if current.seo_facts.is_loaded() {
@@ -313,7 +317,7 @@ impl SearchService {
         };
 
         if should_retry_seo_facts {
-            let seo_facts = load_seo_facts_state(&self.config, generation.identity());
+            let seo_facts = load_seo_facts_state(&self.config, generation.published_generation());
             return self.try_update_current_seo_facts(index_store, identity, seo_facts);
         }
 
@@ -350,7 +354,7 @@ impl SearchService {
         generation: LeasedPublishedGeneration,
         observed_current: PublishedGeneration,
     ) -> Result<ReconcileOutcome> {
-        let identity = generation.clone_identity();
+        let identity = generation.to_published_generation();
 
         let index = open_index(generation.path()).with_context(|| {
             format!(
@@ -377,7 +381,7 @@ impl SearchService {
             return Ok(ReconcileOutcome::Unchanged);
         }
 
-        if current.identity() != observed_current {
+        if current.to_published_generation() != observed_current {
             return Ok(ReconcileOutcome::Superseded);
         }
 
@@ -839,7 +843,7 @@ fn published_generation_is_current(
     index_store: &IndexStore,
     generation: &PublishedGeneration,
 ) -> Result<bool> {
-    let Some(current) = index_store.try_current_published_generation_metadata()? else {
+    let Some(current) = index_store.try_current_generation_metadata()? else {
         return Ok(false);
     };
 
@@ -1536,7 +1540,7 @@ mod tests {
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         let old_snapshot = service.snapshot();
-        let observed_old = old_snapshot.generation.clone_identity();
+        let observed_old = old_snapshot.to_published_generation();
 
         let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
@@ -1712,11 +1716,21 @@ mod tests {
         let service = SearchService::open_current(config).unwrap();
 
         let store = IndexStore::new(&index_dir);
-        assert!(store.try_acquire_generation_lease(&path).unwrap().is_none());
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&path)
+                .unwrap()
+                .is_none()
+        );
 
         drop(service);
 
-        assert!(store.try_acquire_generation_lease(&path).unwrap().is_some());
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&path)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1737,13 +1751,33 @@ mod tests {
         assert_eq!(report.outcome(), ReconcileOutcome::Reloaded);
 
         let store = IndexStore::new(&index_dir);
-        assert!(store.try_acquire_generation_lease(&old_path).unwrap().is_none());
-        assert!(store.try_acquire_generation_lease(&new_path).unwrap().is_none());
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&old_path)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&new_path)
+                .unwrap()
+                .is_none()
+        );
 
         drop(snapshot);
 
-        assert!(store.try_acquire_generation_lease(&old_path).unwrap().is_some());
-        assert!(store.try_acquire_generation_lease(&new_path).unwrap().is_none());
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&old_path)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&new_path)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

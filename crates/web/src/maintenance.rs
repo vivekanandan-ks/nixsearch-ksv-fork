@@ -221,7 +221,7 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     };
 
     let index_store = IndexStore::new(&config.data.index_dir);
-    match index_store.try_current_published_generation_metadata() {
+    match index_store.try_current_generation_metadata() {
         Ok(Some(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 tracing::warn!(
@@ -309,7 +309,7 @@ pub(crate) fn current_generation_needs_regeneration(
     interval: Duration,
     now: OffsetDateTime,
 ) -> Result<bool> {
-    match index_store.try_current_published_generation_metadata() {
+    match index_store.try_current_generation_metadata() {
         Ok(Some(generation)) => {
             if current_generation_missing_configured_targets(config, &generation) {
                 return Ok(true);
