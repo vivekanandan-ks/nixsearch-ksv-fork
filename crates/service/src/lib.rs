@@ -219,7 +219,7 @@ impl SearchService {
         config: &AppConfig,
         generation: &PublishedGeneration,
     ) -> Result<()> {
-        validate_published_generation(config, generation).map(|_| ())
+        open_valid_published_generation(config, generation).map(|_| ())
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -787,11 +787,8 @@ fn load_servable_generation(
     config: &AppConfig,
     generation: LeasedPublishedGeneration,
 ) -> Result<ServedGeneration> {
-    validate_generation_id(generation.manifest())
-        .context("failed to validate supplied index generation manifest")?;
-
-    let index = open_index(generation.path())?;
-    let seo_facts = load_valid_seo_facts(config, generation.published_generation(), &index)?;
+    let (index, seo_facts) =
+        open_valid_published_generation(config, generation.published_generation())?;
 
     Ok(ServedGeneration {
         generation,
@@ -800,15 +797,16 @@ fn load_servable_generation(
     })
 }
 
-fn validate_published_generation(
+fn open_valid_published_generation(
     config: &AppConfig,
     generation: &PublishedGeneration,
-) -> Result<Arc<SeoSidecar>> {
+) -> Result<(SearchIndex, Arc<SeoSidecar>)> {
     validate_generation_id(&generation.manifest)
         .context("failed to validate supplied index generation manifest")?;
     let index = open_index(&generation.path)?;
+    let seo_facts = load_valid_seo_facts(config, generation, &index)?;
 
-    load_valid_seo_facts(config, generation, &index)
+    Ok((index, seo_facts))
 }
 
 fn load_valid_seo_facts(
@@ -1470,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_current_generation_preserves_loaded_sidecar() {
+    fn reconcile_current_generation_keeps_in_memory_sidecar_when_disk_sidecar_disappears() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);

@@ -10,7 +10,7 @@ use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
-use nixsearch_service::{ReconcileOutcome, ReconcileReport, SearchService};
+use nixsearch_service::{ReconcileReport, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -55,7 +55,7 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
     let modes = regeneration_modes(&config);
 
     loop {
-        let (generation, reconcile_outcome) = match search.reconcile_current_generation() {
+        let (generation, reloaded) = match search.reconcile_current_generation() {
             Ok(ReconcileReport::Superseded) => {
                 tracing::debug!("published index generation changed during reconciliation");
 
@@ -68,11 +68,9 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
                     "detected published index generation change"
                 );
 
-                (generation, ReconcileOutcome::Reloaded)
+                (generation, true)
             }
-            Ok(ReconcileReport::Unchanged { generation }) => {
-                (generation, ReconcileOutcome::Unchanged)
-            }
+            Ok(ReconcileReport::Unchanged { generation }) => (generation, false),
             Err(error) => {
                 tracing::error!(
                     "failed to switch to published index generation; continuing to serve previous generation: {error:#}"
@@ -83,7 +81,7 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
             }
         };
 
-        if reconcile_outcome == ReconcileOutcome::Reloaded {
+        if reloaded {
             run_cleanup_after_reload(&config).await;
         }
 
