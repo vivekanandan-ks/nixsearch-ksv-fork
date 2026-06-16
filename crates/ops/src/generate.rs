@@ -111,7 +111,6 @@ async fn build_and_publish_generation_with_policy(
         let spool = DocumentSpool::create()?;
         let mut spool_writer = spool.writer()?;
         let mut annotations = EntryAnnotationIndex::new();
-        let mut seo_facts = SeoSidecarAccumulator::new();
 
         let mut total_documents = 0usize;
         let mut manifest_targets = Vec::new();
@@ -143,7 +142,6 @@ async fn build_and_publish_generation_with_policy(
 
             for document in &documents {
                 annotations.observe(document);
-                seo_facts.observe(document);
                 spool_writer.push(document)?;
             }
 
@@ -196,7 +194,9 @@ async fn build_and_publish_generation_with_policy(
         writer.commit()?;
 
         let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
-        let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
+        let index = SearchIndex::open(&generation_path)?;
+        let sidecar =
+            SeoSidecarAccumulator::from_index(&index)?.into_sidecar_for_manifest(&manifest);
         let published_generation = PublishedGeneration {
             path: generation_path.clone(),
             manifest: manifest.clone(),

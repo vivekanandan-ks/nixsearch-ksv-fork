@@ -9,8 +9,7 @@ use tokio::process::Command;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
-use nixsearch_index::search::SearchIndex;
-use nixsearch_index::store::{GenerationLease, IndexStore};
+use nixsearch_index::store::{GenerationLease, IndexStore, PublishedGeneration};
 
 use crate::lock::{self, UpdateLock};
 
@@ -160,9 +159,9 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
     };
 
     let current = current_generation_canonical(&index_store, report);
-    let current_is_complete = current
+    let current_is_valid = current
         .as_ref()
-        .and_then(|path| complete_manifest(&index_store, path))
+        .and_then(|path| valid_generation_manifest(&index_store, path))
         .is_some();
 
     let mut complete = Vec::new();
@@ -245,7 +244,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
             .as_ref()
             .is_some_and(|current| current == &canonical);
 
-        if let Some(manifest) = complete_manifest(&index_store, &canonical) {
+        if let Some(manifest) = valid_generation_manifest(&index_store, &canonical) {
             if !is_current {
                 complete.push(CompleteGeneration {
                     path: canonical,
@@ -261,7 +260,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
         }
     }
 
-    if current_is_complete {
+    if current_is_valid {
         prune_complete_generations(config, &index_store, complete, report);
     } else {
         report.warnings.push(
@@ -301,9 +300,17 @@ fn current_generation_canonical(
     }
 }
 
-fn complete_manifest(index_store: &IndexStore, path: &Utf8Path) -> Option<IndexGenerationManifest> {
+fn valid_generation_manifest(
+    index_store: &IndexStore,
+    path: &Utf8Path,
+) -> Option<IndexGenerationManifest> {
     let manifest = index_store.read_manifest(path).ok()?;
-    SearchIndex::open(path).ok()?;
+    index_store
+        .validate_published_generation(&PublishedGeneration {
+            path: path.to_owned(),
+            manifest: manifest.clone(),
+        })
+        .ok()?;
     Some(manifest)
 }
 
@@ -914,6 +921,37 @@ mod tests {
         assert!(retained.exists());
         assert!(!leased.exists());
         assert_eq!(report.deleted_generations, vec![leased]);
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_complete_generations_when_current_sidecar_is_missing() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = Utf8PathBuf::from_path_buf(tempdir.path().join("indexes")).unwrap();
+
+        let fallback =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let current = publish_canonical_index_with_generated_at(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
+        );
+        let store = IndexStore::new(&index_dir);
+        fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
+
+        let mut config = nixsearch_test_support::app_config(&index_dir);
+        config.maintenance.index_generations.keep = 1;
+
+        let update_lock = crate::lock::acquire_update_lock(&index_dir).unwrap();
+        let report = cleanup_under_lock(&config, &update_lock).await.unwrap();
+
+        assert!(fallback.exists());
+        assert!(current.exists());
+        assert!(report.deleted_generations.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("current index generation is missing"))
+        );
     }
 
     #[tokio::test]

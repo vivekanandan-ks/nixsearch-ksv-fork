@@ -5,7 +5,7 @@ use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::manifest::IndexGenerationManifest;
-use crate::search::{EntryLookup, EntrySeoCounts, SearchIndex};
+use crate::search::SearchIndex;
 
 pub const SEO_SIDECAR_SCHEMA_VERSION: u32 = 1;
 
@@ -48,6 +48,16 @@ pub struct SeoSidecarAccumulator {
 impl SeoSidecarAccumulator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_index(index: &SearchIndex) -> Result<Self> {
+        let mut accumulator = Self::new();
+
+        for document in index.supported_entry_documents()? {
+            accumulator.observe(&document);
+        }
+
+        Ok(accumulator)
     }
 
     pub fn observe(&mut self, document: &SearchDocument) {
@@ -309,29 +319,11 @@ impl SeoSidecar {
     ) -> Result<()> {
         self.validate_for_manifest(manifest)?;
 
-        for entry in &self.entries {
-            let counts = index
-                .entry_seo_counts(EntryLookup {
-                    source: entry.source.clone(),
-                    ref_id: entry.ref_id.clone(),
-                    name: entry.name.clone(),
-                    kind: None,
-                })
-                .with_context(|| {
-                    format!(
-                        "failed to validate SEO sidecar entry {}/{}/{} against index",
-                        entry.source, entry.ref_id, entry.name
-                    )
-                })?;
+        let expected =
+            SeoSidecarAccumulator::from_index(index)?.into_sidecar_for_manifest(manifest);
 
-            if !entry.matches_index_counts(&counts) {
-                bail!(
-                    "SEO sidecar entry {}/{}/{} does not match indexed documents",
-                    entry.source,
-                    entry.ref_id,
-                    entry.name
-                );
-            }
+        if self != &expected {
+            bail!("SEO sidecar does not match indexed documents");
         }
 
         Ok(())
@@ -341,13 +333,6 @@ impl SeoSidecar {
 impl SeoEntryFacts {
     pub fn is_indexable(&self) -> bool {
         self.package_eligible_count + self.option_eligible_count > 0
-    }
-
-    fn matches_index_counts(&self, counts: &EntrySeoCounts) -> bool {
-        self.package_supported_count == counts.package_supported_count
-            && self.option_supported_count == counts.option_supported_count
-            && self.package_eligible_count == counts.package_eligible_count
-            && self.option_eligible_count == counts.option_eligible_count
     }
 
     fn counts(&self) -> SeoCounts {
@@ -931,6 +916,25 @@ mod tests {
         let (_tempdir, index) = index_for(&docs);
 
         sidecar.entries[0].name = "not-real".to_owned();
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
+        let error = sidecar.validate_for_index(&manifest, &index).unwrap_err();
+
+        assert!(format!("{error:#}").contains("does not match indexed documents"));
+    }
+
+    #[test]
+    fn index_validation_rejects_missing_indexed_entry() {
+        let manifest = manifest(2, 0);
+        let sidecar_docs = vec![package("git")];
+        let index_docs = vec![package("git"), package("ripgrep")];
+        let mut sidecar = sidecar_for(&sidecar_docs, &manifest);
+        let (_tempdir, index) = index_for(&index_docs);
+
+        sidecar.entries[0].total_supported_indexed_count = 2;
+        sidecar.entries[0].package_supported_count = 2;
+        sidecar.refs[0].total_supported_indexed_count = 2;
+        sidecar.refs[0].package_supported_count = 2;
 
         sidecar.validate_for_manifest(&manifest).unwrap();
         let error = sidecar.validate_for_index(&manifest, &index).unwrap_err();

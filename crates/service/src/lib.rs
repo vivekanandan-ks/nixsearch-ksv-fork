@@ -285,6 +285,8 @@ impl SearchService {
                     return Ok(ReconcileOutcome::Superseded);
                 }
 
+                index_store.validate_published_generation(&identity)?;
+
                 return Ok(ReconcileOutcome::Unchanged);
             }
 
@@ -776,13 +778,6 @@ impl SearchService {
     }
 }
 
-fn open_index(path: impl AsRef<Utf8Path>) -> Result<SearchIndex> {
-    let path = path.as_ref();
-
-    SearchIndex::open(path)
-        .with_context(|| format!("failed to open search index {}", path.as_str()))
-}
-
 fn load_servable_generation(
     config: &AppConfig,
     generation: LeasedPublishedGeneration,
@@ -801,27 +796,10 @@ fn open_valid_published_generation(
     config: &AppConfig,
     generation: &PublishedGeneration,
 ) -> Result<(SearchIndex, Arc<SeoSidecar>)> {
-    validate_generation_id(&generation.manifest)
-        .context("failed to validate supplied index generation manifest")?;
-    let index = open_index(&generation.path)?;
-    let seo_facts = load_valid_seo_facts(config, generation, &index)?;
-
-    Ok((index, seo_facts))
-}
-
-fn load_valid_seo_facts(
-    config: &AppConfig,
-    generation: &PublishedGeneration,
-    index: &SearchIndex,
-) -> Result<Arc<SeoSidecar>> {
     let index_store = IndexStore::new(&config.data.index_dir);
-    let sidecar = index_store.read_seo_sidecar(generation)?;
+    let (index, seo_facts) = index_store.open_valid_published_generation(generation)?;
 
-    sidecar
-        .validate_for_index(&generation.manifest, &index)
-        .context("failed to validate SEO sidecar against index")?;
-
-    Ok(Arc::new(sidecar))
+    Ok((index, Arc::new(seo_facts)))
 }
 
 fn published_generation_is_current(
@@ -1468,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_current_generation_keeps_in_memory_sidecar_when_disk_sidecar_disappears() {
+    fn reconcile_current_generation_rejects_current_when_disk_sidecar_disappears() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -1485,9 +1463,9 @@ mod tests {
         let before = service.current_index();
         fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
 
-        let report = service.reconcile_current_generation().unwrap();
+        let error = service.reconcile_current_generation().unwrap_err();
 
-        assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
+        assert!(format!("{error:#}").contains("failed to read SEO sidecar"));
         assert!(Arc::ptr_eq(&before, &service.current_index()));
         assert_eq!(
             service.snapshot().seo_facts.generation_id,

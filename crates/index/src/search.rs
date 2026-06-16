@@ -4,7 +4,7 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
@@ -500,6 +500,27 @@ impl SearchIndex {
         self.add_entry_seo_counts_for_kind(&searcher, &lookup, &DocumentKind::Option, &mut counts)?;
 
         Ok(counts)
+    }
+
+    pub fn supported_entry_documents(&self) -> Result<Vec<SearchDocument>> {
+        let searcher = self.reader.searcher();
+        let count = searcher
+            .search(&AllQuery, &Count)
+            .context("failed to count indexed documents")?;
+        let top_docs = searcher
+            .search(&AllQuery, &TopDocs::with_limit(count).order_by_score())
+            .context("failed to retrieve indexed documents")?;
+        let mut documents = Vec::new();
+
+        for (_, address) in top_docs {
+            let document = self.document_at_with_searcher(&searcher, address)?;
+
+            if document.kind().is_supported_indexed_entry() {
+                documents.push(document);
+            }
+        }
+
+        Ok(documents)
     }
 
     fn add_entry_seo_counts_for_kind(
