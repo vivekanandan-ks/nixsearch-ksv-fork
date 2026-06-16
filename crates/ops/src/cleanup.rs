@@ -153,9 +153,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             prune_orphaned_generation_locks(&index_store, report);
-            if index_store.generation_locks_dir().exists() {
-                sync_dir_best_effort(&index_store.generation_locks_dir(), report);
-            }
+            sync_generation_locks_dir_best_effort(&index_store, report);
             return;
         }
         Err(error) => {
@@ -257,9 +255,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
     prune_orphaned_generation_locks(&index_store, report);
 
     sync_dir_best_effort(&index_store.generations_dir(), report);
-    if index_store.generation_locks_dir().exists() {
-        sync_dir_best_effort(&index_store.generation_locks_dir(), report);
-    }
+    sync_generation_locks_dir_best_effort(&index_store, report);
 }
 
 fn current_generation_canonical(
@@ -466,6 +462,12 @@ fn sync_dir_best_effort(path: &Utf8Path, report: &mut CleanupReport) {
         report.warnings.push(format!(
             "failed to sync generation directory {path}: {error}"
         ));
+    }
+}
+
+fn sync_generation_locks_dir_best_effort(index_store: &IndexStore, report: &mut CleanupReport) {
+    if index_store.generation_locks_dir().exists() {
+        sync_dir_best_effort(&index_store.generation_locks_dir(), report);
     }
 }
 
@@ -781,9 +783,7 @@ mod tests {
         let generation_name = generation
             .file_name()
             .expect("generation path should have a file name");
-        store
-            .generation_locks_dir()
-            .join(format!("{generation_name}.lock"))
+        store.generation_lock_path(generation_name)
     }
 
     #[tokio::test]

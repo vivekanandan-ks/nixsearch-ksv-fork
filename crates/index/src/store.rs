@@ -67,6 +67,11 @@ impl IndexStore {
         self.root.join("generation-locks")
     }
 
+    pub fn generation_lock_path(&self, generation_name: &str) -> Utf8PathBuf {
+        self.generation_locks_dir()
+            .join(format!("{generation_name}.lock"))
+    }
+
     pub fn current_file(&self) -> Utf8PathBuf {
         self.root.join("CURRENT")
     }
@@ -187,7 +192,7 @@ impl IndexStore {
             })?
             .to_owned();
 
-        let lock_path = self.generation_locks_dir().join(format!("{name}.lock"));
+        let lock_path = self.generation_lock_path(&name);
 
         Ok((generation_path, lock_path))
     }
@@ -471,12 +476,22 @@ impl IndexStore {
     }
 
     pub fn try_current_leased_generation(&self) -> Result<Option<LeasedPublishedGeneration>> {
+        self.try_current_leased_generation_with(IndexStore::acquire_shared_generation_lease)
+    }
+
+    fn try_current_leased_generation_with(
+        &self,
+        mut acquire_shared_generation_lease: impl FnMut(
+            &IndexStore,
+            &Utf8Path,
+        ) -> Result<GenerationLease>,
+    ) -> Result<Option<LeasedPublishedGeneration>> {
         for _ in 0..100 {
             let Some(path) = self.try_current_path()? else {
                 return Ok(None);
             };
 
-            let lease = match self.acquire_shared_generation_lease(&path) {
+            let lease = match acquire_shared_generation_lease(self, &path) {
                 Ok(lease) => Arc::new(lease),
                 Err(error) => match self.try_current_path()? {
                     Some(current) if current != path => continue,
@@ -958,6 +973,70 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn index_store_retries_current_leased_generation_when_observed_current_is_deleted_before_lease()
+    {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = IndexGenerationManifest::new(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = IndexGenerationManifest::new(
+            2,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 2,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_leased_generation_with(|store, path| {
+                if first_attempt {
+                    first_attempt = false;
+                    assert_eq!(path, old_canonical.as_path());
+                    store.publish(&new_generation).unwrap();
+                    fs::remove_dir_all(&old_generation).unwrap();
+                    anyhow::bail!("simulated stale current generation deletion");
+                }
+
+                store.acquire_shared_generation_lease(path)
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path(), new_canonical.as_path());
+        assert_eq!(loaded.manifest().document_count, 2);
+        assert!(!old_generation.exists());
     }
 
     #[test]
