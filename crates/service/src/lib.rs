@@ -234,7 +234,7 @@ impl SearchService {
             .context("failed to validate supplied index generation manifest")?;
 
         let index = open_index(generation.path())?;
-        let seo_facts = load_seo_facts_state(&config, generation.published_generation());
+        let seo_facts = load_seo_facts_state(&config, generation.published_generation(), &index);
 
         Ok(Self {
             config,
@@ -301,7 +301,7 @@ impl SearchService {
 
         let identity = generation.to_published_generation();
 
-        let (observed_current, should_retry_seo_facts) = {
+        let (observed_current, seo_facts_index) = {
             let current = self
                 .current
                 .read()
@@ -317,14 +317,18 @@ impl SearchService {
                     return Ok(ReconcileOutcome::Unchanged);
                 }
 
-                (observed_current, true)
+                (observed_current, Some(Arc::clone(&current.index)))
             } else {
-                (observed_current, false)
+                (observed_current, None)
             }
         };
 
-        if should_retry_seo_facts {
-            let seo_facts = load_seo_facts_state(&self.config, generation.published_generation());
+        if let Some(index) = seo_facts_index {
+            let seo_facts = load_seo_facts_state(
+                &self.config,
+                generation.published_generation(),
+                index.as_ref(),
+            );
             return self.try_update_current_seo_facts(index_store, identity, seo_facts);
         }
 
@@ -369,7 +373,7 @@ impl SearchService {
                 generation.path()
             )
         })?;
-        let seo_facts = load_seo_facts_state(&self.config, &identity);
+        let seo_facts = load_seo_facts_state(&self.config, &identity, &index);
 
         let mut current = self
             .current
@@ -862,11 +866,18 @@ fn open_index(path: impl AsRef<Utf8Path>) -> Result<SearchIndex> {
         .with_context(|| format!("failed to open search index {}", path.as_str()))
 }
 
-fn load_seo_facts_state(config: &AppConfig, generation: &PublishedGeneration) -> SeoFactsState {
+fn load_seo_facts_state(
+    config: &AppConfig,
+    generation: &PublishedGeneration,
+    index: &SearchIndex,
+) -> SeoFactsState {
     let index_store = IndexStore::new(&config.data.index_dir);
 
     match index_store.read_seo_sidecar(generation) {
-        Ok(sidecar) => SeoFactsState::Loaded(Arc::new(sidecar)),
+        Ok(sidecar) => match sidecar.validate_for_index(&generation.manifest, index) {
+            Ok(()) => SeoFactsState::Loaded(Arc::new(sidecar)),
+            Err(error) => SeoFactsState::Unavailable(format!("{error:#}")),
+        },
         Err(error) => SeoFactsState::Unavailable(format!("{error:#}")),
     }
 }

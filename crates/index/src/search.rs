@@ -90,6 +90,14 @@ pub struct EntryFacts {
     pub representative: Option<EntryRepresentative>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntrySeoCounts {
+    pub package_supported_count: usize,
+    pub option_supported_count: usize,
+    pub package_eligible_count: usize,
+    pub option_eligible_count: usize,
+}
+
 impl EntryFacts {
     pub fn count_for_kind(&self, kind: &DocumentKind) -> usize {
         match kind {
@@ -477,6 +485,75 @@ impl SearchIndex {
         }
 
         Ok(facts)
+    }
+
+    pub fn entry_seo_counts(&self, lookup: EntryLookup) -> Result<EntrySeoCounts> {
+        let searcher = self.reader.searcher();
+        let mut counts = EntrySeoCounts::default();
+
+        self.add_entry_seo_counts_for_kind(
+            &searcher,
+            &lookup,
+            &DocumentKind::Package,
+            &mut counts,
+        )?;
+        self.add_entry_seo_counts_for_kind(&searcher, &lookup, &DocumentKind::Option, &mut counts)?;
+
+        Ok(counts)
+    }
+
+    fn add_entry_seo_counts_for_kind(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+        kind: &DocumentKind,
+        counts: &mut EntrySeoCounts,
+    ) -> Result<()> {
+        let query = self.exact_entry_kind_query(lookup, kind);
+        let count = searcher
+            .search(&*query, &Count)
+            .with_context(|| format!("failed to count exact {} SEO entry facts", kind.as_str()))?;
+
+        match kind {
+            DocumentKind::Package => counts.package_supported_count = count,
+            DocumentKind::Option => counts.option_supported_count = count,
+            DocumentKind::App | DocumentKind::Service => {}
+        }
+
+        if count == 0 {
+            return Ok(());
+        }
+
+        let top_docs = searcher
+            .search(&*query, &TopDocs::with_limit(count).order_by_score())
+            .with_context(|| {
+                format!(
+                    "failed to retrieve exact {} SEO entry documents",
+                    kind.as_str()
+                )
+            })?;
+
+        for (_, address) in top_docs {
+            let document = self.document_at_with_searcher(searcher, address)?;
+
+            if !document_deserialized_as_kind(&document, kind) {
+                bail!(
+                    "exact {} SEO entry document deserialized as {}",
+                    kind.as_str(),
+                    document_variant_name(&document)
+                );
+            }
+
+            if document.is_seo_eligible_entry() {
+                match kind {
+                    DocumentKind::Package => counts.package_eligible_count += 1,
+                    DocumentKind::Option => counts.option_eligible_count += 1,
+                    DocumentKind::App | DocumentKind::Service => {}
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn count_exact_entry_kind(

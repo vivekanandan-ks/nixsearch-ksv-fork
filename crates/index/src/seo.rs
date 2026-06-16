@@ -5,6 +5,7 @@ use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::manifest::IndexGenerationManifest;
+use crate::search::{EntryLookup, SearchIndex};
 
 pub const SEO_SIDECAR_SCHEMA_VERSION: u32 = 1;
 
@@ -300,6 +301,45 @@ impl SeoSidecar {
 
         Ok(())
     }
+
+    pub fn validate_for_index(
+        &self,
+        manifest: &IndexGenerationManifest,
+        index: &SearchIndex,
+    ) -> Result<()> {
+        self.validate_for_manifest(manifest)?;
+
+        for entry in &self.entries {
+            let counts = index
+                .entry_seo_counts(EntryLookup {
+                    source: entry.source.clone(),
+                    ref_id: entry.ref_id.clone(),
+                    name: entry.name.clone(),
+                    kind: None,
+                })
+                .with_context(|| {
+                    format!(
+                        "failed to validate SEO sidecar entry {}/{}/{} against index",
+                        entry.source, entry.ref_id, entry.name
+                    )
+                })?;
+
+            if counts.package_supported_count != entry.package_supported_count
+                || counts.option_supported_count != entry.option_supported_count
+                || counts.package_eligible_count != entry.package_eligible_count
+                || counts.option_eligible_count != entry.option_eligible_count
+            {
+                bail!(
+                    "SEO sidecar entry {}/{}/{} does not match indexed documents",
+                    entry.source,
+                    entry.ref_id,
+                    entry.name
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl SeoEntryFacts {
@@ -513,8 +553,11 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::{OptionDoc, PackageDoc, SearchDocument};
     use nixsearch_core::ingest::IngestContext;
+    use tempfile::tempdir;
 
+    use crate::annotation::SearchHitAnnotation;
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::search::SearchIndex;
     use crate::seo::{SEO_SIDECAR_SCHEMA_VERSION, SeoSidecar, SeoSidecarAccumulator};
 
     const SOURCE: &str = "fixtures";
@@ -581,6 +624,28 @@ mod tests {
         }
 
         accumulator.into_sidecar_for_manifest(manifest)
+    }
+
+    fn index_for(docs: &[SearchDocument]) -> (tempfile::TempDir, SearchIndex) {
+        let tempdir = tempdir().unwrap();
+        let index_path = camino::Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+            .expect("test path must be valid UTF-8");
+        let index = SearchIndex::create_or_replace(&index_path).unwrap();
+        let mut writer = index.writer().unwrap();
+        let annotation = SearchHitAnnotation {
+            ambiguous_entry_url: false,
+            unique_within_kind: true,
+        };
+
+        for doc in docs {
+            writer.add_document(doc, &annotation).unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(&index_path).unwrap();
+
+        (tempdir, index)
     }
 
     fn empty_sidecar(manifest: &IndexGenerationManifest) -> SeoSidecar {
@@ -843,5 +908,30 @@ mod tests {
         let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
 
         assert!(format!("{error:#}").contains("references ref missing from manifest"));
+    }
+
+    #[test]
+    fn index_validation_accepts_generated_sidecar() {
+        let manifest = manifest(1, 1);
+        let docs = vec![package("git"), option("programs.git.enable")];
+        let sidecar = sidecar_for(&docs, &manifest);
+        let (_tempdir, index) = index_for(&docs);
+
+        sidecar.validate_for_index(&manifest, &index).unwrap();
+    }
+
+    #[test]
+    fn index_validation_rejects_forged_entry_name() {
+        let manifest = manifest(1, 0);
+        let docs = vec![package("git")];
+        let mut sidecar = sidecar_for(&docs, &manifest);
+        let (_tempdir, index) = index_for(&docs);
+
+        sidecar.entries[0].name = "not-real".to_owned();
+
+        sidecar.validate_for_manifest(&manifest).unwrap();
+        let error = sidecar.validate_for_index(&manifest, &index).unwrap_err();
+
+        assert!(format!("{error:#}").contains("does not match indexed documents"));
     }
 }

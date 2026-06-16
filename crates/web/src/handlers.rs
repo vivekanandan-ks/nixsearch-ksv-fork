@@ -10,8 +10,8 @@ use futures_util::stream;
 
 use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult, SearchResult};
 use nixsearch_service::{
-    EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
-    ServiceResult,
+    EntryRequest, ReconcileReport, RequestResolutionError, SearchRequest, ServedGenerationSnapshot,
+    ServiceError, ServiceResult,
 };
 
 use crate::AppState;
@@ -31,6 +31,8 @@ use crate::templates::layout::{
     head_metadata_script, modal_patch_script, results_patch_script,
 };
 use crate::urls::close_url_for_state;
+
+const REQUEST_RECONCILE_ATTEMPTS: usize = 3;
 
 pub async fn health() -> &'static str {
     "ok"
@@ -130,7 +132,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     };
     let target_public_url = public_path_and_query(&target_uri);
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
-    let snapshot = state.search.snapshot();
+    let snapshot = reconcile_snapshot_for_request(&state);
 
     if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return generation_change_response(
@@ -283,6 +285,30 @@ fn client_generation_matches(
     snapshot: &ServedGenerationSnapshot,
 ) -> bool {
     client_generation_id == Some(snapshot.manifest().generation_id.as_str())
+}
+
+fn reconcile_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
+    for _ in 0..REQUEST_RECONCILE_ATTEMPTS {
+        match state.search.reconcile_current_generation() {
+            Ok(ReconcileReport::Unchanged { .. } | ReconcileReport::Reloaded { .. }) => {
+                return state.search.snapshot();
+            }
+            Ok(ReconcileReport::Superseded) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    "failed to reconcile published index generation during request; continuing to serve previous generation: {error:#}"
+                );
+                return state.search.snapshot();
+            }
+        }
+    }
+
+    tracing::warn!(
+        attempts = REQUEST_RECONCILE_ATTEMPTS,
+        "published index generation changed repeatedly during request reconciliation; continuing with current snapshot"
+    );
+
+    state.search.snapshot()
 }
 
 struct GenerationChangeContent {
@@ -537,7 +563,7 @@ pub async fn results_slice(
         }
     };
 
-    let snapshot = state.search.snapshot();
+    let snapshot = reconcile_snapshot_for_request(&state);
 
     if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return stale_generation_response(&snapshot);

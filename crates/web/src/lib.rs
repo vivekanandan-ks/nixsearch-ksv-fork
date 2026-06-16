@@ -931,6 +931,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn results_slice_reconciles_new_published_generation_before_generation_check() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let old_generation_id = current_generation_id(&index_dir);
+        let app = test_app(app_config(&index_dir));
+
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + time::Duration::hours(1),
+            vec![option_doc_for(
+                &context,
+                "programs.ripgrep.enable",
+                "Ripgrep option.",
+            )],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 1)],
+        );
+        let new_generation_id = current_generation_id(&index_dir);
+
+        let uri = with_generation(
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0",
+            &old_generation_id,
+        );
+        let (status, body) = request_body(app, &uri).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains(r#""error":"stale_generation""#));
+        assert!(body.contains(&format!(r#""generationId":"{new_generation_id}""#)));
+    }
+
+    #[tokio::test]
+    async fn state_events_reconciles_new_published_generation_before_generation_check() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let old_generation_id = current_generation_id(&index_dir);
+        let app = test_app(app_config(&index_dir));
+
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::UNIX_EPOCH + time::Duration::hours(1),
+            vec![option_doc_for(
+                &context,
+                "programs.ripgrep.enable",
+                "Ripgrep option.",
+            )],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 1)],
+        );
+        let new_generation_id = current_generation_id(&index_dir);
+
+        let uri = with_generation("/-/state/events?url=%2F%3Fq%3Dgit", &old_generation_id);
+        let (status, body) = request_body(app, &uri).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&new_generation_id));
+    }
+
+    #[tokio::test]
     async fn full_page_state_events_and_results_slice_accept_valid_ref() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
