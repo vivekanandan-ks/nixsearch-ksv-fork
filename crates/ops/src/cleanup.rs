@@ -10,7 +10,7 @@ use tokio::process::Command;
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::SearchIndex;
-use nixsearch_index::store::IndexStore;
+use nixsearch_index::store::{GenerationLease, IndexStore};
 
 use crate::lock::{self, UpdateLock};
 
@@ -323,18 +323,8 @@ fn prune_complete_generations(
 
     for generation in complete.into_iter().skip(keep_non_current) {
         let Some(_lease) =
-            (match index_store.try_acquire_exclusive_generation_lease(&generation.path) {
-                Ok(lease) => lease,
-                Err(error) => {
-                    report.warnings.push(format!(
-                        "failed to check active generation lease for {}: {error:#}",
-                        generation.path
-                    ));
-                    continue;
-                }
-            })
+            try_acquire_cleanup_generation_lease(index_store, &generation.path, report)
         else {
-            report.preserved_active_generations.push(generation.path);
             continue;
         };
 
@@ -359,16 +349,7 @@ fn prune_incomplete_generations(
             continue;
         }
 
-        let Some(_lease) = (match index_store.try_acquire_exclusive_generation_lease(&path) {
-            Ok(lease) => lease,
-            Err(error) => {
-                report.warnings.push(format!(
-                    "failed to check active generation lease for {path}: {error:#}"
-                ));
-                continue;
-            }
-        }) else {
-            report.preserved_active_generations.push(path);
+        let Some(_lease) = try_acquire_cleanup_generation_lease(index_store, &path, report) else {
             continue;
         };
 
@@ -377,6 +358,26 @@ fn prune_incomplete_generations(
             Err(error) => report.warnings.push(format!(
                 "failed to delete stale incomplete index generation {path}: {error}"
             )),
+        }
+    }
+}
+
+fn try_acquire_cleanup_generation_lease(
+    index_store: &IndexStore,
+    path: &Utf8Path,
+    report: &mut CleanupReport,
+) -> Option<GenerationLease> {
+    match index_store.try_acquire_exclusive_generation_lease(path) {
+        Ok(Some(lease)) => Some(lease),
+        Ok(None) => {
+            report.preserved_active_generations.push(path.to_owned());
+            None
+        }
+        Err(error) => {
+            report.warnings.push(format!(
+                "failed to check active generation lease for {path}: {error:#}"
+            ));
+            None
         }
     }
 }
