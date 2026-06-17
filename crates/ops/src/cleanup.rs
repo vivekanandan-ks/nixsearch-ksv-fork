@@ -159,10 +159,7 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
     };
 
     let current = current_generation_canonical(&index_store, report);
-    let current_is_valid = current
-        .as_ref()
-        .and_then(|path| valid_generation_manifest(&index_store, path))
-        .is_some();
+    let mut current_is_valid = false;
 
     let mut complete = Vec::new();
     let mut incomplete = Vec::new();
@@ -245,7 +242,9 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
             .is_some_and(|current| current == &canonical);
 
         if let Some(manifest) = valid_generation_manifest(&index_store, &canonical) {
-            if !is_current {
+            if is_current {
+                current_is_valid = true;
+            } else {
                 complete.push(CompleteGeneration {
                     path: canonical,
                     generated_at: manifest.generated_at,

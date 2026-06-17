@@ -53,7 +53,7 @@ impl SeoSidecarAccumulator {
     pub fn from_index(index: &SearchIndex) -> Result<Self> {
         let mut accumulator = Self::new();
 
-        for document in index.supported_entry_documents()? {
+        for document in index.supported_indexed_entry_documents()? {
             accumulator.observe(&document);
         }
 
@@ -322,8 +322,12 @@ impl SeoSidecar {
         let expected =
             SeoSidecarAccumulator::from_index(index)?.into_sidecar_for_manifest(manifest);
 
-        if self != &expected {
-            bail!("SEO sidecar does not match indexed documents");
+        if self.refs != expected.refs {
+            bail!("SEO sidecar ref facts do not match indexed documents");
+        }
+
+        if self.entries != expected.entries {
+            bail!("SEO sidecar entry facts do not match indexed documents");
         }
 
         Ok(())
@@ -662,6 +666,24 @@ mod tests {
         }
     }
 
+    fn inflate_first_entry_and_ref_counts(
+        sidecar: &mut SeoSidecar,
+        total_supported_count: usize,
+        package_supported_count: usize,
+        option_supported_count: usize,
+    ) {
+        sidecar.entries[0].total_supported_indexed_count = total_supported_count;
+        sidecar.entries[0].package_supported_count = package_supported_count;
+        sidecar.entries[0].option_supported_count = option_supported_count;
+        sidecar.entries[0].package_eligible_count = package_supported_count;
+        sidecar.entries[0].option_eligible_count = option_supported_count;
+        sidecar.refs[0].total_supported_indexed_count = total_supported_count;
+        sidecar.refs[0].package_supported_count = package_supported_count;
+        sidecar.refs[0].option_supported_count = option_supported_count;
+        sidecar.refs[0].package_eligible_count = package_supported_count;
+        sidecar.refs[0].option_eligible_count = option_supported_count;
+    }
+
     #[test]
     fn accumulator_counts_supported_and_eligible_documents() {
         let manifest = manifest(1, 2);
@@ -920,7 +942,7 @@ mod tests {
         sidecar.validate_for_manifest(&manifest).unwrap();
         let error = sidecar.validate_for_index(&manifest, &index).unwrap_err();
 
-        assert!(format!("{error:#}").contains("does not match indexed documents"));
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 
     #[test]
@@ -931,14 +953,11 @@ mod tests {
         let mut sidecar = sidecar_for(&sidecar_docs, &manifest);
         let (_tempdir, index) = index_for(&index_docs);
 
-        sidecar.entries[0].total_supported_indexed_count = 2;
-        sidecar.entries[0].package_supported_count = 2;
-        sidecar.refs[0].total_supported_indexed_count = 2;
-        sidecar.refs[0].package_supported_count = 2;
+        inflate_first_entry_and_ref_counts(&mut sidecar, 2, 2, 0);
 
         sidecar.validate_for_manifest(&manifest).unwrap();
         let error = sidecar.validate_for_index(&manifest, &index).unwrap_err();
 
-        assert!(format!("{error:#}").contains("does not match indexed documents"));
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 }

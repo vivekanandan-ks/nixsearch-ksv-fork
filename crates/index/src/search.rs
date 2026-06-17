@@ -502,7 +502,7 @@ impl SearchIndex {
         Ok(counts)
     }
 
-    pub fn supported_entry_documents(&self) -> Result<Vec<SearchDocument>> {
+    pub fn supported_indexed_entry_documents(&self) -> Result<Vec<SearchDocument>> {
         let searcher = self.reader.searcher();
         let count = searcher
             .search(&AllQuery, &Count)

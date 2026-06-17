@@ -219,7 +219,7 @@ impl SearchService {
         config: &AppConfig,
         generation: &PublishedGeneration,
     ) -> Result<()> {
-        open_valid_published_generation(config, generation).map(|_| ())
+        IndexStore::new(&config.data.index_dir).validate_published_generation(generation)
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -782,24 +782,14 @@ fn load_servable_generation(
     config: &AppConfig,
     generation: LeasedPublishedGeneration,
 ) -> Result<ServedGeneration> {
-    let (index, seo_facts) =
-        open_valid_published_generation(config, generation.published_generation())?;
+    let (index, seo_facts) = IndexStore::new(&config.data.index_dir)
+        .open_valid_published_generation(generation.published_generation())?;
 
     Ok(ServedGeneration {
         generation,
         index: Arc::new(index),
-        seo_facts,
+        seo_facts: Arc::new(seo_facts),
     })
-}
-
-fn open_valid_published_generation(
-    config: &AppConfig,
-    generation: &PublishedGeneration,
-) -> Result<(SearchIndex, Arc<SeoSidecar>)> {
-    let index_store = IndexStore::new(&config.data.index_dir);
-    let (index, seo_facts) = index_store.open_valid_published_generation(generation)?;
-
-    Ok((index, Arc::new(seo_facts)))
 }
 
 fn published_generation_is_current(
@@ -1046,7 +1036,7 @@ mod tests {
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let error = SearchService::open_current(config).unwrap_err();
 
-        assert!(format!("{error:#}").contains("does not match indexed documents"));
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 
     #[test]
@@ -1521,7 +1511,7 @@ mod tests {
 
         let error = service.reconcile_current_generation().unwrap_err();
 
-        assert!(format!("{error:#}").contains("does not match indexed documents"));
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
         assert_eq!(service.snapshot().path(), old_path);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
     }
