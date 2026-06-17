@@ -89,40 +89,41 @@ fn app_router(state: AppState) -> Router {
 async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    match index_store.try_current_generation_metadata() {
+    match index_store.try_current_leased_generation() {
         Ok(Some(generation)) => {
-            if let Err(error) = SearchService::validate_published_generation(config, &generation) {
+            if let Err(error) = SearchService::validate_leased_generation(config, &generation) {
                 if !config.server.bootstrap {
                     return Err(error).with_context(|| {
                         format!(
                             "failed to validate current index generation {}; run `nixsearch update` first",
-                            generation.path
+                            generation.path()
                         )
                     });
                 }
 
                 tracing::warn!(
-                    generation = %generation.path,
+                    generation = %generation.path(),
                     "current index generation cannot be validated; bootstrap will rebuild it: {error:#}"
                 );
             } else {
-                let missing = maintenance::missing_configured_targets(config, &generation.manifest);
+                let missing =
+                    maintenance::missing_configured_targets(config, generation.manifest());
 
                 if missing.is_empty() {
-                    return Ok(generation);
+                    return Ok(generation.to_published_generation());
                 }
 
-                if generation_serves_default_scope(config, &generation)? {
+                if generation_serves_default_scope(config, generation.published_generation())? {
                     tracing::warn!(
                         missing = %format_target_keys(&missing),
                         "current index is missing configured targets but still serves a default search scope; startup will continue"
                     );
 
-                    return Ok(generation);
+                    return Ok(generation.to_published_generation());
                 }
 
                 if !config.server.bootstrap {
-                    return Ok(generation);
+                    return Ok(generation.to_published_generation());
                 }
 
                 tracing::info!(
@@ -166,29 +167,34 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         .await
         .context("failed to join maintenance lock task")??;
 
-    match index_store.try_current_generation_metadata() {
+    match index_store.try_current_leased_generation() {
         Ok(Some(generation)) => {
-            match SearchService::validate_published_generation(config, &generation) {
+            match SearchService::validate_leased_generation(config, &generation) {
                 Ok(()) => {
                     let missing =
-                        maintenance::missing_configured_targets(config, &generation.manifest);
+                        maintenance::missing_configured_targets(config, generation.manifest());
 
-                    if missing.is_empty() || generation_serves_default_scope(config, &generation)? {
+                    if missing.is_empty()
+                        || generation_serves_default_scope(
+                            config,
+                            generation.published_generation(),
+                        )?
+                    {
                         tracing::info!(
                             "current index was created by another process while waiting for lock"
                         );
-                        return Ok(generation);
+                        return Ok(generation.to_published_generation());
                     }
 
                     tracing::warn!(
-                        generation = %generation.path,
+                        generation = %generation.path(),
                         missing = %format_target_keys(&missing),
                         "current index still does not serve a default search scope after acquiring lock; rebuilding"
                     );
                 }
                 Err(error) => {
                     tracing::warn!(
-                        generation = %generation.path,
+                        generation = %generation.path(),
                         "current index generation is still invalid after acquiring lock; rebuilding it: {error:#}"
                     );
                 }
@@ -214,21 +220,19 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
         );
     }
 
-    match index_store.try_current_generation_metadata()? {
+    match index_store.try_current_leased_generation()? {
         Some(generation) => {
-            SearchService::validate_published_generation(config, &generation).with_context(
-                || {
-                    format!(
-                        "bootstrap published index generation {} but it cannot be validated",
-                        generation.path
-                    )
-                },
-            )?;
+            SearchService::validate_leased_generation(config, &generation).with_context(|| {
+                format!(
+                    "bootstrap published index generation {} but it cannot be validated",
+                    generation.path()
+                )
+            })?;
 
             let report = cleanup::cleanup_under_lock(config, &update_lock).await?;
             cleanup::log_report(&report);
 
-            Ok(generation)
+            Ok(generation.to_published_generation())
         }
         None => {
             bail!("bootstrap completed without publishing a current index")

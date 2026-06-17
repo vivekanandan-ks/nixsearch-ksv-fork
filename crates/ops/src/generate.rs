@@ -185,18 +185,18 @@ async fn build_and_publish_generation_with_policy(
 
         let index = SearchIndex::create_or_replace(&generation_path)?;
         let mut writer = index.writer()?;
+        let mut seo_facts = SeoSidecarAccumulator::new();
 
         for document in spool.reader()? {
             let document = document?;
             writer.add_document(&document, &annotations.annotation_for(&document))?;
+            seo_facts.observe(&document);
         }
 
         writer.commit()?;
 
         let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
-        let index = SearchIndex::open(&generation_path)?;
-        let sidecar =
-            SeoSidecarAccumulator::from_index(&index)?.into_sidecar_for_manifest(&manifest);
+        let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
         let published_generation = PublishedGeneration {
             path: generation_path.clone(),
             manifest: manifest.clone(),

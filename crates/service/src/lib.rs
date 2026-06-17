@@ -7,7 +7,9 @@ use camino::Utf8Path;
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceConfig;
 use nixsearch_core::document::DocumentKind;
-use nixsearch_index::manifest::{IndexGenerationManifest, validate_generation_id};
+use nixsearch_index::manifest::IndexGenerationManifest;
+#[cfg(test)]
+use nixsearch_index::manifest::validate_generation_id;
 use nixsearch_index::search::{
     EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
     SearchScope,
@@ -215,11 +217,11 @@ impl SearchService {
         })
     }
 
-    pub fn validate_published_generation(
+    pub fn validate_leased_generation(
         config: &AppConfig,
-        generation: &PublishedGeneration,
+        generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
-        IndexStore::new(&config.data.index_dir).validate_published_generation(generation)
+        IndexStore::new(&config.data.index_dir).validate_leased_generation(generation)
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -251,6 +253,28 @@ impl SearchService {
 
     pub fn reconcile_current_generation(&self) -> Result<ReconcileReport> {
         let index_store = IndexStore::new(&self.config.data.index_dir);
+        let current_path = index_store.current_path().with_context(|| {
+            format!(
+                "failed to locate current index in {}",
+                self.config.data.index_dir
+            )
+        })?;
+
+        let observed_current = {
+            let current = self
+                .current
+                .read()
+                .expect("served generation lock poisoned");
+
+            if current.generation.path() == current_path {
+                return Ok(ReconcileReport::Unchanged {
+                    generation: current.to_published_generation(),
+                });
+            }
+
+            current.to_published_generation()
+        };
+
         let generation = index_store.current_leased_generation().with_context(|| {
             format!(
                 "failed to locate current index in {}",
@@ -258,11 +282,12 @@ impl SearchService {
             )
         })?;
         let identity = generation.to_published_generation();
-        let outcome = self.reconcile_leased_generation(&index_store, generation)?;
+        let outcome = self.reload_generation(&index_store, generation, observed_current)?;
 
         Ok(ReconcileReport::from_outcome(outcome, identity))
     }
 
+    #[cfg(test)]
     fn reconcile_leased_generation(
         &self,
         index_store: &IndexStore,
@@ -284,8 +309,6 @@ impl SearchService {
                 if !published_generation_is_current(index_store, &identity)? {
                     return Ok(ReconcileOutcome::Superseded);
                 }
-
-                index_store.validate_published_generation(&identity)?;
 
                 return Ok(ReconcileOutcome::Unchanged);
             }
@@ -787,8 +810,8 @@ fn load_servable_generation(
     config: &AppConfig,
     generation: LeasedPublishedGeneration,
 ) -> Result<ServedGeneration> {
-    let (index, seo_facts) = IndexStore::new(&config.data.index_dir)
-        .open_valid_published_generation(generation.published_generation())?;
+    let (index, seo_facts) =
+        IndexStore::new(&config.data.index_dir).open_valid_leased_generation(&generation)?;
 
     Ok(ServedGeneration {
         generation,
@@ -1442,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_current_generation_rejects_current_when_disk_sidecar_disappears() {
+    fn reconcile_current_generation_does_not_revalidate_unchanged_current() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
@@ -1459,9 +1482,9 @@ mod tests {
         let before = service.current_index();
         fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
 
-        let error = service.reconcile_current_generation().unwrap_err();
+        let report = service.reconcile_current_generation().unwrap();
 
-        assert!(format!("{error:#}").contains("failed to read SEO sidecar"));
+        assert_eq!(report.outcome(), ReconcileOutcome::Unchanged);
         assert!(Arc::ptr_eq(&before, &service.current_index()));
         assert_eq!(
             service.snapshot().seo_facts.generation_id,

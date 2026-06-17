@@ -40,31 +40,38 @@ pub(super) fn inspect(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::load(args.config.as_deref()).context("failed to load config")?;
     let index_store = IndexStore::new(&config.data.index_dir);
 
-    let current_path = index_store.current_path()?;
-    let manifest = index_store.current_manifest()?;
+    let generation = index_store.current_leased_generation()?;
+    let validation = index_store.validate_leased_generation(&generation);
+    let manifest = generation.manifest();
 
     println!("current index");
-    println!("  path = {}", current_path.as_str());
+    println!("  path = {}", generation.path().as_str());
     println!("  schema_version = {}", manifest.schema_version);
     println!("  generated_at = {}", manifest.generated_at);
     println!("  generation_id = {}", manifest.generation_id);
     println!("  documents = {}", manifest.document_count);
     println!("  targets = {}", manifest.targets.len());
+    println!(
+        "  servable = {}",
+        if validation.is_ok() { "yes" } else { "no" }
+    );
 
-    for target in manifest.targets {
+    for target in &manifest.targets {
         println!(
             "    {}/{} {:?} documents={}",
             target.source, target.ref_id, target.artifact_kind, target.document_count
         );
 
-        if let Some(revision) = target.revision {
+        if let Some(revision) = &target.revision {
             println!("      revision = {revision}");
         }
 
-        if let Some(hash) = target.artifact_hash {
+        if let Some(hash) = &target.artifact_hash {
             println!("      artifact_hash = {hash}");
         }
     }
+
+    validation.context("current index generation is not servable")?;
 
     Ok(())
 }

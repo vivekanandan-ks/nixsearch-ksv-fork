@@ -15,6 +15,8 @@ use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rer
 use crate::schema::{IndexFields, build_schema};
 use crate::writer::SearchIndexWriter;
 
+const INDEX_DOCUMENT_SCAN_BATCH_SIZE: usize = 1024;
+
 pub struct SearchIndex {
     pub(crate) index: Index,
     reader: IndexReader,
@@ -502,25 +504,43 @@ impl SearchIndex {
         Ok(counts)
     }
 
-    pub fn supported_indexed_entry_documents(&self) -> Result<Vec<SearchDocument>> {
+    pub fn visit_supported_indexed_entry_documents(
+        &self,
+        mut visit: impl FnMut(&SearchDocument) -> Result<()>,
+    ) -> Result<()> {
         let searcher = self.reader.searcher();
         let count = searcher
             .search(&AllQuery, &Count)
             .context("failed to count indexed documents")?;
-        let top_docs = searcher
-            .search(&AllQuery, &TopDocs::with_limit(count).order_by_score())
-            .context("failed to retrieve indexed documents")?;
-        let mut documents = Vec::new();
+        let mut offset = 0;
 
-        for (_, address) in top_docs {
-            let document = self.document_at_with_searcher(&searcher, address)?;
+        while offset < count {
+            let limit = (count - offset).min(INDEX_DOCUMENT_SCAN_BATCH_SIZE);
+            let top_docs = searcher
+                .search(
+                    &AllQuery,
+                    &TopDocs::with_limit(limit)
+                        .and_offset(offset)
+                        .order_by_score(),
+                )
+                .context("failed to retrieve indexed documents")?;
 
-            if document.kind().is_supported_indexed_entry() {
-                documents.push(document);
+            if top_docs.is_empty() {
+                bail!("indexed document scan returned no documents before reaching counted total");
+            }
+
+            offset += top_docs.len();
+
+            for (_, address) in top_docs {
+                let document = self.document_at_with_searcher(&searcher, address)?;
+
+                if document.kind().is_supported_indexed_entry() {
+                    visit(&document)?;
+                }
             }
         }
 
-        Ok(documents)
+        Ok(())
     }
 
     fn add_entry_seo_counts_for_kind(

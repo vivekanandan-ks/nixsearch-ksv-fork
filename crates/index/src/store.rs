@@ -506,8 +506,19 @@ impl IndexStore {
         Ok((index, sidecar))
     }
 
+    pub fn open_valid_leased_generation(
+        &self,
+        generation: &LeasedPublishedGeneration,
+    ) -> Result<(SearchIndex, SeoSidecar)> {
+        self.open_valid_published_generation(generation.published_generation())
+    }
+
     pub fn validate_published_generation(&self, generation: &PublishedGeneration) -> Result<()> {
         self.open_valid_published_generation(generation).map(|_| ())
+    }
+
+    pub fn validate_leased_generation(&self, generation: &LeasedPublishedGeneration) -> Result<()> {
+        self.open_valid_leased_generation(generation).map(|_| ())
     }
 
     pub fn current_manifest(&self) -> Result<IndexGenerationManifest> {

@@ -53,9 +53,10 @@ impl SeoSidecarAccumulator {
     pub fn from_index(index: &SearchIndex) -> Result<Self> {
         let mut accumulator = Self::new();
 
-        for document in index.supported_indexed_entry_documents()? {
-            accumulator.observe(&document);
-        }
+        index.visit_supported_indexed_entry_documents(|document| {
+            accumulator.observe(document);
+            Ok(())
+        })?;
 
         Ok(accumulator)
     }
@@ -924,6 +925,18 @@ mod tests {
     fn index_validation_accepts_generated_sidecar() {
         let manifest = manifest(1, 1);
         let docs = vec![package("git"), option("programs.git.enable")];
+        let sidecar = sidecar_for(&docs, &manifest);
+        let (_tempdir, index) = index_for(&docs);
+
+        sidecar.validate_for_index(&manifest, &index).unwrap();
+    }
+
+    #[test]
+    fn index_validation_accepts_more_documents_than_one_scan_batch() {
+        let docs = (0..1030)
+            .map(|index| package(&format!("package-{index}")))
+            .collect::<Vec<_>>();
+        let manifest = manifest(docs.len(), 0);
         let sidecar = sidecar_for(&docs, &manifest);
         let (_tempdir, index) = index_for(&docs);
 
