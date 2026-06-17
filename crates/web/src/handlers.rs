@@ -132,7 +132,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     };
     let target_public_url = public_path_and_query(&target_uri);
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
-    let snapshot = current_snapshot_for_incremental_request(&state);
+    let snapshot = current_snapshot_for_request(&state);
 
     if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return generation_change_response(
@@ -287,7 +287,7 @@ fn client_generation_matches(
     client_generation_id == Some(snapshot.manifest().generation_id.as_str())
 }
 
-fn current_snapshot_for_incremental_request(state: &AppState) -> ServedGenerationSnapshot {
+fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
     for _ in 0..REQUEST_RECONCILE_ATTEMPTS {
         let report = match state.search.reconcile_current_generation() {
             Ok(report) => report,
@@ -566,7 +566,7 @@ pub async fn results_slice(
         }
     };
 
-    let snapshot = current_snapshot_for_incremental_request(&state);
+    let snapshot = current_snapshot_for_request(&state);
 
     if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
         return stale_generation_response(&snapshot);
@@ -648,7 +648,7 @@ fn render_full_page_response(
     page_urls: PageUrls,
     request: PageRequest,
 ) -> Response {
-    let snapshot = state.search.snapshot();
+    let snapshot = current_snapshot_for_request(state);
 
     let page_state = match resolve_page_state(state, &snapshot, &request) {
         Ok(page_state) => page_state,

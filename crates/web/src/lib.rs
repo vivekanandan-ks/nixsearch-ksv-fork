@@ -645,6 +645,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_page_reconciles_published_generation_before_rendering() {
+        let fixture = reconciled_generation_fixture();
+
+        let (status, body) = request_body(fixture.app, "/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&format!(
+            r#""generationId":"{}""#,
+            fixture.new_generation_id
+        )));
+        assert!(!body.contains(&format!(
+            r#""generationId":"{}""#,
+            fixture.old_generation_id
+        )));
+    }
+
+    #[tokio::test]
     async fn full_page_non_default_served_ref_returns_200() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));

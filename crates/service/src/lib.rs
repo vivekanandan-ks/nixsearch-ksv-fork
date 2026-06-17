@@ -303,10 +303,15 @@ impl SearchService {
         observed_current: PublishedGeneration,
     ) -> Result<ReconcileOutcome> {
         let candidate_path = generation.path().to_owned();
+        let identity = generation.to_published_generation();
+
+        if !published_generation_is_current(index_store, &identity)? {
+            return Ok(ReconcileOutcome::Superseded);
+        }
+
         let loaded = load_servable_generation(&self.config, generation).with_context(|| {
             format!("failed to load published index generation {candidate_path}")
         })?;
-        let identity = loaded.to_published_generation();
 
         let mut current = self
             .current
@@ -821,6 +826,7 @@ mod tests {
     use nixsearch_index_test_support::{
         options_target, publish_canonical_index, publish_canonical_index_with_generated_at,
         publish_documents_with_manifest_targets, publish_fixture_options_index_for_refs,
+        write_raw_seo_sidecar,
     };
     use nixsearch_test_support::{
         REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
@@ -1031,7 +1037,7 @@ mod tests {
         let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
 
         sidecar.entries[0].name = "not-real".to_owned();
-        store.write_seo_sidecar(&generation, &sidecar).unwrap();
+        write_raw_seo_sidecar(&store, &generation, &sidecar);
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let error = SearchService::open_current(config).unwrap_err();
@@ -1507,7 +1513,7 @@ mod tests {
         };
         let mut sidecar = store.read_seo_sidecar(&next_generation).unwrap();
         sidecar.entries[0].name = "not-real".to_owned();
-        store.write_seo_sidecar(&next_generation, &sidecar).unwrap();
+        write_raw_seo_sidecar(&store, &next_generation, &sidecar);
 
         let error = service.reconcile_current_generation().unwrap_err();
 
@@ -1569,6 +1575,76 @@ mod tests {
 
         service.reconcile_current_generation().unwrap();
 
+        let stale = store
+            .lease_published_generation(PublishedGeneration {
+                path: old_path,
+                manifest: old_manifest,
+            })
+            .unwrap();
+
+        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
+        assert_eq!(service.snapshot().path(), next_path);
+        assert_eq!(service.snapshot().manifest(), &next_manifest);
+    }
+
+    #[test]
+    fn stale_candidate_with_missing_sidecar_is_superseded() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let store = IndexStore::new(&index_dir);
+        let old_manifest = store.read_manifest(&old_path).unwrap();
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+        service.reconcile_current_generation().unwrap();
+
+        fs::remove_file(store.seo_sidecar_path(&old_path)).unwrap();
+        let stale = store
+            .lease_published_generation(PublishedGeneration {
+                path: old_path,
+                manifest: old_manifest,
+            })
+            .unwrap();
+
+        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::Superseded);
+        assert_eq!(service.snapshot().path(), next_path);
+        assert_eq!(service.snapshot().manifest(), &next_manifest);
+    }
+
+    #[test]
+    fn stale_candidate_with_invalid_sidecar_is_superseded() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let old_path =
+            publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
+        let store = IndexStore::new(&index_dir);
+        let old_manifest = store.read_manifest(&old_path).unwrap();
+        let old_generation = PublishedGeneration {
+            path: old_path.clone(),
+            manifest: old_manifest.clone(),
+        };
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
+        let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
+        let next_manifest = store.read_manifest(&next_path).unwrap();
+        service.reconcile_current_generation().unwrap();
+
+        let mut sidecar = store.read_seo_sidecar(&old_generation).unwrap();
+        sidecar.entries[0].name = "not-real".to_owned();
+        write_raw_seo_sidecar(&store, &old_generation, &sidecar);
         let stale = store
             .lease_published_generation(PublishedGeneration {
                 path: old_path,

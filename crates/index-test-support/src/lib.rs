@@ -9,7 +9,7 @@ use nixsearch_core::document::SearchDocument;
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
-use nixsearch_index::seo::SeoSidecarAccumulator;
+use nixsearch_index::seo::{SeoSidecar, SeoSidecarAccumulator};
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_test_support::{
     REF_SMALL, SOURCE_FIXTURES, canonical_documents, ingest_context_for, option_doc_for,
@@ -165,6 +165,18 @@ pub fn publish_documents_with_manifest_targets(
     store.write_manifest(&generation, &manifest).unwrap();
     store.publish(&generation).unwrap();
     store.current_path().unwrap()
+}
+
+pub fn write_raw_seo_sidecar(
+    store: &IndexStore,
+    generation: &PublishedGeneration,
+    sidecar: &SeoSidecar,
+) {
+    std::fs::write(
+        store.seo_sidecar_path(&generation.path),
+        serde_json::to_vec_pretty(sidecar).unwrap(),
+    )
+    .unwrap();
 }
 
 pub fn index_target(

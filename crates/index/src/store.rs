@@ -249,6 +249,8 @@ impl IndexStore {
             format!("failed to acquire shared generation lease for {generation_path}")
         })?;
 
+        self.validate_generation_path(generation_path)?;
+
         Ok(GenerationLease { _file: file })
     }
 
@@ -434,6 +436,13 @@ impl IndexStore {
             .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
+        let index = SearchIndex::open(&generation_path)
+            .with_context(|| format!("failed to open search index {generation_path}"))?;
+
+        sidecar
+            .validate_for_index(&generation.manifest, &index)
+            .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
+
         let bytes =
             serde_json::to_vec_pretty(sidecar).context("failed to serialize SEO sidecar")?;
 
@@ -576,7 +585,14 @@ impl IndexStore {
 
             match self.try_current_path()? {
                 Some(current) if current == path => {
-                    let manifest = self.read_manifest(&path)?;
+                    let manifest = match self.read_manifest(&path) {
+                        Ok(manifest) => manifest,
+                        Err(error) => match self.try_current_path()? {
+                            Some(current) if current != path => continue,
+                            Some(_) => return Err(error),
+                            None => return Ok(None),
+                        },
+                    };
 
                     after_manifest_read(self, &path)?;
 
@@ -614,13 +630,21 @@ fn validate_generation_name(generation_name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use camino::Utf8PathBuf;
     use tempfile::{TempDir, tempdir};
 
     use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::{OptionDoc, SearchDocument};
+    use nixsearch_core::ingest::IngestContext;
 
+    use crate::annotation::EntryAnnotationIndex;
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, canonical_generation_id};
+    use crate::search::SearchIndex;
+    use crate::seo::SeoSidecarAccumulator;
     use crate::store::{IndexStore, PublishedGeneration};
 
     const SOURCE_FIXTURES: &str = "fixtures";
@@ -632,6 +656,55 @@ mod tests {
 
     fn store_for(tempdir: &TempDir) -> IndexStore {
         IndexStore::new(utf8_path(tempdir.path().to_path_buf()))
+    }
+
+    fn context() -> IngestContext {
+        IngestContext {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            revision: None,
+            repo: None,
+        }
+    }
+
+    fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
+        let generation = store.create_generation_path().unwrap();
+        let document = SearchDocument::Option(OptionDoc::new(&context(), "programs.git.enable"));
+        let index = SearchIndex::create_or_replace(&generation).unwrap();
+        let mut annotations = EntryAnnotationIndex::new();
+        annotations.observe(&document);
+        let mut writer = index.writer().unwrap();
+        writer
+            .add_document(&document, &annotations.annotation_for(&document))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut accumulator = SeoSidecarAccumulator::new();
+        accumulator.observe(&document);
+        let sidecar = accumulator.into_sidecar_for_manifest(&manifest);
+        let generation = PublishedGeneration {
+            path: generation,
+            manifest,
+        };
+
+        store.write_seo_sidecar(&generation, &sidecar).unwrap();
+        store
+            .write_manifest(&generation.path, &generation.manifest)
+            .unwrap();
+        generation
     }
 
     #[test]
@@ -800,6 +873,34 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn shared_generation_lease_revalidates_after_waiting_for_exclusive_lock() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let exclusive = store
+            .try_acquire_exclusive_generation_lease(&generation)
+            .unwrap()
+            .unwrap();
+        let waiter_store = store.clone();
+        let waiter_generation = generation.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+
+        let waiter = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiter_store.acquire_shared_generation_lease(&waiter_generation)
+        });
+
+        started_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(10));
+        fs::remove_dir_all(&generation).unwrap();
+        drop(exclusive);
+
+        let error = waiter.join().unwrap().unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to canonicalize"));
     }
 
     #[test]
@@ -1247,6 +1348,73 @@ mod tests {
     }
 
     #[test]
+    fn index_store_retries_current_leased_generation_when_manifest_read_fails_after_current_changes()
+     {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = IndexGenerationManifest::new(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = IndexGenerationManifest::new(
+            2,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 2,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap();
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_leased_generation_with(
+                |store, path| {
+                    let lease = store.acquire_shared_generation_lease(path)?;
+
+                    if first_attempt {
+                        first_attempt = false;
+                        assert_eq!(path, old_canonical.as_path());
+                        store.publish(&new_generation).unwrap();
+                        fs::remove_file(store.manifest_path(path)).unwrap();
+                    }
+
+                    Ok(lease)
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path(), new_canonical.as_path());
+        assert_eq!(loaded.manifest().document_count, 2);
+    }
+
+    #[test]
     fn index_store_retries_current_leased_generation_when_current_changes_after_manifest_read() {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
@@ -1459,6 +1627,20 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn index_store_write_seo_sidecar_rejects_forged_entry_name() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = publish_one_option_generation(&store);
+        let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
+
+        sidecar.entries[0].name = "not-real".to_owned();
+
+        let error = store.write_seo_sidecar(&generation, &sidecar).unwrap_err();
+
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 
     #[test]
