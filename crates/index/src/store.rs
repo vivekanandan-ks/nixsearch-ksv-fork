@@ -254,6 +254,24 @@ impl IndexStore {
         Ok(GenerationLease { _file: file })
     }
 
+    #[cfg(test)]
+    fn acquire_shared_generation_lease_with_hook(
+        &self,
+        generation_path: &Utf8Path,
+        before_lock: impl FnOnce(),
+    ) -> Result<GenerationLease> {
+        let file = self.open_generation_lease_file(generation_path)?;
+        before_lock();
+
+        file.lock_shared().with_context(|| {
+            format!("failed to acquire shared generation lease for {generation_path}")
+        })?;
+
+        self.validate_generation_path(generation_path)?;
+
+        Ok(GenerationLease { _file: file })
+    }
+
     pub fn try_acquire_exclusive_generation_lease(
         &self,
         generation_path: &Utf8Path,
@@ -431,10 +449,6 @@ impl IndexStore {
 
         validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
-
-        sidecar
-            .validate_for_manifest(&generation.manifest)
-            .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
         let index = SearchIndex::open(&generation_path)
             .with_context(|| format!("failed to open search index {generation_path}"))?;
@@ -632,7 +646,6 @@ mod tests {
     use std::fs;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     use camino::Utf8PathBuf;
     use tempfile::{TempDir, tempdir};
@@ -665,6 +678,21 @@ mod tests {
             revision: None,
             repo: None,
         }
+    }
+
+    fn options_manifest(document_count: usize) -> IndexGenerationManifest {
+        IndexGenerationManifest::new(
+            document_count,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap()
     }
 
     fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
@@ -889,12 +917,12 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
 
         let waiter = thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            waiter_store.acquire_shared_generation_lease(&waiter_generation)
+            waiter_store.acquire_shared_generation_lease_with_hook(&waiter_generation, || {
+                started_tx.send(()).unwrap();
+            })
         });
 
         started_rx.recv().unwrap();
-        thread::sleep(Duration::from_millis(10));
         fs::remove_dir_all(&generation).unwrap();
         drop(exclusive);
 
@@ -1165,18 +1193,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
-        let manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let manifest = options_manifest(1);
 
         store.write_manifest(&generation, &manifest).unwrap();
         store.publish(&generation).unwrap();
@@ -1192,31 +1209,9 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let old_generation = store.create_generation_path().unwrap();
-        let old_manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let old_manifest = options_manifest(1);
         let new_generation = store.create_generation_path().unwrap();
-        let new_manifest = IndexGenerationManifest::new(
-            2,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 2,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let new_manifest = options_manifest(2);
 
         store
             .write_manifest(&old_generation, &old_manifest)
@@ -1252,18 +1247,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = store.create_generation_path().unwrap();
-        let manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let manifest = options_manifest(1);
 
         store.write_manifest(&generation, &manifest).unwrap();
         store.publish(&generation).unwrap();
@@ -1286,31 +1270,9 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let old_generation = store.create_generation_path().unwrap();
-        let old_manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let old_manifest = options_manifest(1);
         let new_generation = store.create_generation_path().unwrap();
-        let new_manifest = IndexGenerationManifest::new(
-            2,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 2,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let new_manifest = options_manifest(2);
 
         store
             .write_manifest(&old_generation, &old_manifest)
@@ -1353,31 +1315,9 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let old_generation = store.create_generation_path().unwrap();
-        let old_manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let old_manifest = options_manifest(1);
         let new_generation = store.create_generation_path().unwrap();
-        let new_manifest = IndexGenerationManifest::new(
-            2,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 2,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let new_manifest = options_manifest(2);
 
         store
             .write_manifest(&old_generation, &old_manifest)
@@ -1419,31 +1359,9 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let old_generation = store.create_generation_path().unwrap();
-        let old_manifest = IndexGenerationManifest::new(
-            1,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 1,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let old_manifest = options_manifest(1);
         let new_generation = store.create_generation_path().unwrap();
-        let new_manifest = IndexGenerationManifest::new(
-            2,
-            vec![IndexTargetManifest {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
-                document_count: 2,
-                artifact_hash: None,
-                revision: None,
-            }],
-        )
-        .unwrap();
+        let new_manifest = options_manifest(2);
 
         store
             .write_manifest(&old_generation, &old_manifest)

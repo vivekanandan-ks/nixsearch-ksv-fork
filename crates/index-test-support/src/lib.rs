@@ -167,6 +167,9 @@ pub fn publish_documents_with_manifest_targets(
     store.current_path().unwrap()
 }
 
+/// Writes a sidecar directly, bypassing production validation.
+///
+/// Use only in tests that intentionally simulate corrupt on-disk sidecars.
 pub fn write_raw_seo_sidecar(
     store: &IndexStore,
     generation: &PublishedGeneration,
