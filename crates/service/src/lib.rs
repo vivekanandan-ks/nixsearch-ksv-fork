@@ -8,8 +8,6 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::SourceConfig;
 use nixsearch_core::document::DocumentKind;
 use nixsearch_index::manifest::IndexGenerationManifest;
-#[cfg(test)]
-use nixsearch_index::manifest::validate_generation_id;
 use nixsearch_index::search::{
     EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
     SearchScope,
@@ -285,38 +283,6 @@ impl SearchService {
         let outcome = self.reload_generation(&index_store, generation, observed_current)?;
 
         Ok(ReconcileReport::from_outcome(outcome, identity))
-    }
-
-    #[cfg(test)]
-    fn reconcile_leased_generation(
-        &self,
-        index_store: &IndexStore,
-        generation: LeasedPublishedGeneration,
-    ) -> Result<ReconcileOutcome> {
-        validate_generation_id(generation.manifest())
-            .context("failed to validate supplied index generation manifest")?;
-
-        let identity = generation.to_published_generation();
-
-        let observed_current = {
-            let current = self
-                .current
-                .read()
-                .expect("served generation lock poisoned");
-            let observed_current = current.to_published_generation();
-
-            if current.matches(&identity) {
-                if !published_generation_is_current(index_store, &identity)? {
-                    return Ok(ReconcileOutcome::Superseded);
-                }
-
-                return Ok(ReconcileOutcome::Unchanged);
-            }
-
-            observed_current
-        };
-
-        self.reload_generation(index_store, generation, observed_current)
     }
 
     fn reload_generation(
@@ -1597,6 +1563,7 @@ mod tests {
         let next_manifest = store.read_manifest(&next_path).unwrap();
 
         service.reconcile_current_generation().unwrap();
+        let observed_current = service.snapshot().to_published_generation();
 
         let stale = store
             .lease_published_generation(PublishedGeneration {
@@ -1605,7 +1572,9 @@ mod tests {
             })
             .unwrap();
 
-        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+        let outcome = service
+            .reload_generation(&store, stale, observed_current)
+            .unwrap();
 
         assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path(), next_path);
@@ -1628,6 +1597,7 @@ mod tests {
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
         let next_manifest = store.read_manifest(&next_path).unwrap();
         service.reconcile_current_generation().unwrap();
+        let observed_current = service.snapshot().to_published_generation();
 
         fs::remove_file(store.seo_sidecar_path(&old_path)).unwrap();
         let stale = store
@@ -1637,7 +1607,9 @@ mod tests {
             })
             .unwrap();
 
-        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+        let outcome = service
+            .reload_generation(&store, stale, observed_current)
+            .unwrap();
 
         assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path(), next_path);
@@ -1664,6 +1636,7 @@ mod tests {
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
         let next_manifest = store.read_manifest(&next_path).unwrap();
         service.reconcile_current_generation().unwrap();
+        let observed_current = service.snapshot().to_published_generation();
 
         let mut sidecar = store.read_seo_sidecar(&old_generation).unwrap();
         sidecar.entries[0].name = "not-real".to_owned();
@@ -1675,7 +1648,9 @@ mod tests {
             })
             .unwrap();
 
-        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+        let outcome = service
+            .reload_generation(&store, stale, observed_current)
+            .unwrap();
 
         assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path(), next_path);
@@ -1699,6 +1674,7 @@ mod tests {
         let next_manifest = store.read_manifest(&next_path).unwrap();
 
         service.reconcile_current_generation().unwrap();
+        let observed_current = service.snapshot().to_published_generation();
 
         let stale = store
             .lease_published_generation(PublishedGeneration {
@@ -1707,7 +1683,9 @@ mod tests {
             })
             .unwrap();
 
-        let outcome = service.reconcile_leased_generation(&store, stale).unwrap();
+        let outcome = service
+            .reload_generation(&store, stale, observed_current)
+            .unwrap();
 
         assert_eq!(outcome, ReconcileOutcome::Superseded);
         assert_eq!(service.snapshot().path(), next_path);
@@ -1715,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_leased_generation_rejects_mismatched_generation_id_before_reconcile() {
+    fn lease_published_generation_rejects_mismatched_generation_id_before_reconcile() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);

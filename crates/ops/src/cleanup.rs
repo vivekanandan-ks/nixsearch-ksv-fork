@@ -305,7 +305,7 @@ fn valid_generation_manifest(
 ) -> Option<IndexGenerationManifest> {
     let manifest = index_store.read_manifest(path).ok()?;
     index_store
-        .validate_published_generation(&PublishedGeneration {
+        .validate_unleased_published_generation(&PublishedGeneration {
             path: path.to_owned(),
             manifest: manifest.clone(),
         })

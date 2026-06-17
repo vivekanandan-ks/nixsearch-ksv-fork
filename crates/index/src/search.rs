@@ -504,7 +504,7 @@ impl SearchIndex {
         Ok(counts)
     }
 
-    pub fn visit_supported_indexed_entry_documents(
+    pub fn try_for_each_supported_indexed_entry_document(
         &self,
         mut visit: impl FnMut(&SearchDocument) -> Result<()>,
     ) -> Result<()> {

@@ -53,7 +53,7 @@ impl SeoSidecarAccumulator {
     pub fn from_index(index: &SearchIndex) -> Result<Self> {
         let mut accumulator = Self::new();
 
-        index.visit_supported_indexed_entry_documents(|document| {
+        index.try_for_each_supported_indexed_entry_document(|document| {
             accumulator.observe(document);
             Ok(())
         })?;

@@ -489,7 +489,7 @@ impl IndexStore {
         Ok(sidecar)
     }
 
-    pub fn open_valid_published_generation(
+    fn open_valid_published_generation(
         &self,
         generation: &PublishedGeneration,
     ) -> Result<(SearchIndex, SeoSidecar)> {
@@ -513,7 +513,14 @@ impl IndexStore {
         self.open_valid_published_generation(generation.published_generation())
     }
 
-    pub fn validate_published_generation(&self, generation: &PublishedGeneration) -> Result<()> {
+    /// Validates a published generation without acquiring a generation lease.
+    ///
+    /// Callers must already prevent concurrent deletion, for example by holding the
+    /// update lock. Request and startup paths should use leased validation instead.
+    pub fn validate_unleased_published_generation(
+        &self,
+        generation: &PublishedGeneration,
+    ) -> Result<()> {
         self.open_valid_published_generation(generation).map(|_| ())
     }
 

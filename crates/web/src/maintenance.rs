@@ -39,6 +39,20 @@ enum InvalidCurrentAction {
     Retry,
 }
 
+enum CurrentGenerationStatus {
+    Missing,
+    MissingConfiguredTargets {
+        generation: PublishedGeneration,
+    },
+    Invalid {
+        generation: PublishedGeneration,
+        error: anyhow::Error,
+    },
+    Valid {
+        generation: PublishedGeneration,
+    },
+}
+
 pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
     let interval = config
         .server
@@ -227,32 +241,27 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     };
 
     let index_store = IndexStore::new(&config.data.index_dir);
-    match index_store.try_current_leased_generation() {
-        Ok(Some(generation)) => {
-            if !missing_configured_targets(config, generation.manifest()).is_empty() {
-                tracing::warn!(
-                    generation = %generation.path(),
-                    "current index remains missing configured targets after lock acquisition; rebuilding"
-                );
-            } else {
-                match SearchService::validate_leased_generation(config, &generation) {
-                    Ok(()) => {
-                        tracing::info!(
-                            generation = %generation.path(),
-                            "recovery regeneration skipped; current index generation is valid"
-                        );
-                        return MaintenanceOutcome::Completed;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            generation = %generation.path(),
-                            "current index generation remains invalid after lock acquisition; rebuilding: {error:#}"
-                        );
-                    }
-                }
-            }
+    match current_generation_status(config, &index_store) {
+        Ok(CurrentGenerationStatus::Valid { generation }) => {
+            tracing::info!(
+                generation = %generation.path,
+                "recovery regeneration skipped; current index generation is valid"
+            );
+            return MaintenanceOutcome::Completed;
         }
-        Ok(None) => {
+        Ok(CurrentGenerationStatus::MissingConfiguredTargets { generation }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "current index remains missing configured targets after lock acquisition; rebuilding"
+            );
+        }
+        Ok(CurrentGenerationStatus::Invalid { generation, error }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "current index generation remains invalid after lock acquisition; rebuilding: {error:#}"
+            );
+        }
+        Ok(CurrentGenerationStatus::Missing) => {
             tracing::warn!("current index remains missing after lock acquisition; rebuilding");
         }
         Err(error) => {
@@ -317,27 +326,23 @@ pub(crate) fn current_generation_needs_regeneration(
     interval: Duration,
     now: OffsetDateTime,
 ) -> Result<bool> {
-    match index_store.try_current_leased_generation() {
-        Ok(Some(generation)) => {
-            if !missing_configured_targets(config, generation.manifest()).is_empty() {
-                return Ok(true);
-            }
-
-            if let Err(error) = SearchService::validate_leased_generation(config, &generation) {
-                tracing::warn!(
-                    generation = %generation.path(),
-                    "treating invalid current index generation as needing regeneration: {error:#}"
-                );
-                return Ok(true);
-            }
-
-            let Some(next_due) = next_due(generation.manifest().generated_at, interval) else {
+    match current_generation_status(config, index_store) {
+        Ok(CurrentGenerationStatus::Missing) => Ok(true),
+        Ok(CurrentGenerationStatus::MissingConfiguredTargets { .. }) => Ok(true),
+        Ok(CurrentGenerationStatus::Invalid { generation, error }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "treating invalid current index generation as needing regeneration: {error:#}"
+            );
+            Ok(true)
+        }
+        Ok(CurrentGenerationStatus::Valid { generation }) => {
+            let Some(next_due) = next_due(generation.manifest.generated_at, interval) else {
                 bail!("failed to compute next scheduled regeneration time")
             };
 
             Ok(now >= next_due)
         }
-        Ok(None) => Ok(true),
         Err(error) => {
             tracing::warn!(
                 "treating unreadable current index generation as needing regeneration: {error:#}"
@@ -345,6 +350,33 @@ pub(crate) fn current_generation_needs_regeneration(
             Ok(true)
         }
     }
+}
+
+fn current_generation_status(
+    config: &AppConfig,
+    index_store: &IndexStore,
+) -> Result<CurrentGenerationStatus> {
+    let Some(generation) = index_store.try_current_leased_generation()? else {
+        return Ok(CurrentGenerationStatus::Missing);
+    };
+    let published = generation.to_published_generation();
+
+    if !missing_configured_targets(config, generation.manifest()).is_empty() {
+        return Ok(CurrentGenerationStatus::MissingConfiguredTargets {
+            generation: published,
+        });
+    }
+
+    if let Err(error) = SearchService::validate_leased_generation(config, &generation) {
+        return Ok(CurrentGenerationStatus::Invalid {
+            generation: published,
+            error,
+        });
+    }
+
+    Ok(CurrentGenerationStatus::Valid {
+        generation: published,
+    })
 }
 
 pub(crate) fn current_generation_missing_configured_targets(
