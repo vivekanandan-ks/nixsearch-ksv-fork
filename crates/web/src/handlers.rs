@@ -31,7 +31,7 @@ use crate::templates::layout::{
     InitialReturnMetadata, PageMetadata, ResultsContent, generation_change_script,
     head_metadata_script, modal_patch_script, results_patch_script,
 };
-use crate::urls::close_url_for_state;
+use crate::urls::{canonical_home_path, close_url_for_state, sitemap_candidate_path};
 
 const REQUEST_RECONCILE_ATTEMPTS: usize = 3;
 
@@ -74,13 +74,27 @@ pub async fn robots_txt(State(state): State<AppState>, headers: HeaderMap, uri: 
 
 pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let urls = page_urls(state.config.as_ref(), &headers, &uri);
-    let root_url = format!("{}/", urls.origin);
-    let loc = html_escape::encode_text(&root_url);
+    let snapshot = current_snapshot_for_request(&state);
+
+    let mut paths = vec![canonical_home_path()];
+    if let Ok(candidates) = state.search.sitemap_candidates(&snapshot) {
+        paths.extend(candidates.iter().map(sitemap_candidate_path));
+    }
+    paths.sort();
+
+    let sitemap_urls = paths
+        .into_iter()
+        .map(|path| {
+            let url = format!("{}{}", urls.origin, path);
+            let loc = html_escape::encode_text(&url);
+            format!("<url><loc>{loc}</loc></url>")
+        })
+        .collect::<String>();
 
     (
         [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>{loc}</loc></url></urlset>"#
+            r#"<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{sitemap_urls}</urlset>"#
         ),
     )
         .into_response()

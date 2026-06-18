@@ -371,6 +371,8 @@ mod tests {
 
     use super::{AppState, ensure_current_generation};
 
+    const TEST_PUBLIC_ORIGIN: &str = "https://search.example.com";
+
     fn test_app(config: AppConfig) -> Router {
         verified_test_app_and_search(config).0
     }
@@ -454,6 +456,16 @@ mod tests {
         }
     }
 
+    async fn request_sitemap(app: Router) -> String {
+        let (status, content_type, body) = request_content_type_and_body(app, "/sitemap.xml").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("application/xml"));
+        assert!(body.contains(r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">"#));
+
+        body
+    }
+
     fn current_generation_id(index_dir: impl AsRef<camino::Utf8Path>) -> String {
         let store = IndexStore::new(index_dir.as_ref());
         let path = store.current_path().unwrap();
@@ -513,13 +525,13 @@ mod tests {
 
     fn app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
         let mut config = app_config(index_dir);
-        config.server.public_url = Some("https://search.example.com/".to_owned());
+        config.server.public_url = Some(format!("{TEST_PUBLIC_ORIGIN}/"));
         config
     }
 
     fn multi_ref_app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
         let mut config = multi_ref_app_config(index_dir);
-        config.server.public_url = Some("https://search.example.com/".to_owned());
+        config.server.public_url = Some(format!("{TEST_PUBLIC_ORIGIN}/"));
         config
     }
 
@@ -628,6 +640,30 @@ mod tests {
         assert!(
             !body.contains(r#"name="robots""#),
             "unexpected robots tag in body"
+        );
+    }
+
+    fn sitemap_loc_for_path(path: &str) -> String {
+        let url = format!("{TEST_PUBLIC_ORIGIN}{path}");
+        format!("<loc>{}</loc>", html_escape::encode_text(&url))
+    }
+
+    fn assert_sitemap_has_path(body: &str, path: &str) {
+        let loc = sitemap_loc_for_path(path);
+        assert!(body.contains(&loc), "missing sitemap loc {loc:?}");
+    }
+
+    fn assert_sitemap_missing_path(body: &str, path: &str) {
+        let loc = sitemap_loc_for_path(path);
+        assert!(!body.contains(&loc), "unexpected sitemap loc {loc:?}");
+    }
+
+    fn assert_sitemap_home_only(body: &str) {
+        assert_sitemap_has_path(body, "/");
+        assert_eq!(
+            body.matches("<loc>").count(),
+            1,
+            "expected home-only sitemap, got {body}"
         );
     }
 
@@ -884,6 +920,147 @@ mod tests {
 
         assert!(body.contains("http://example.com&amp;x=&lt;tag&gt;/"));
         assert!(!body.contains("http://example.com&x=<tag>/"));
+    }
+
+    #[tokio::test]
+    async fn sitemap_includes_home_url() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_has_path(&body, "/");
+    }
+
+    #[tokio::test]
+    async fn sitemap_includes_clean_candidate_url() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_has_path(&body, "/fixtures/programs.git.enable");
+    }
+
+    #[tokio::test]
+    async fn sitemap_includes_kind_urls_for_cross_kind_ambiguous_candidates() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_ambiguous_package_option_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_has_path(&body, "/fixtures/git?kind=package");
+        assert_sitemap_has_path(&body, "/fixtures/git?kind=option");
+        assert_sitemap_missing_path(&body, "/fixtures/git");
+    }
+
+    #[tokio::test]
+    async fn sitemap_excludes_hidden_and_internal_only_options() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_internal_and_hidden_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_missing_path(&body, "/fixtures/internal.entry");
+        assert_sitemap_missing_path(&body, "/fixtures/hidden.entry");
+        assert_sitemap_home_only(&body);
+    }
+
+    #[tokio::test]
+    async fn sitemap_excludes_same_kind_duplicates() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_duplicate_option_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_missing_path(&body, "/fixtures/duplicate.entry?kind=option");
+        assert_sitemap_home_only(&body);
+    }
+
+    #[tokio::test]
+    async fn sitemap_excludes_non_default_refs() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_fixture_options_index_for_refs(&index_dir, &[REF_SMALL, REF_STABLE]);
+
+        let app = test_app(multi_ref_app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_has_path(&body, "/fixtures/programs.small.git.enable");
+        assert_sitemap_missing_path(&body, "/fixtures/programs.stable.git.enable");
+        assert!(
+            !body.contains("ref="),
+            "sitemap must not include ref params"
+        );
+    }
+
+    #[tokio::test]
+    async fn sitemap_excludes_app_and_service_sources() {
+        for source_kind in [SourceKind::Apps, SourceKind::Services] {
+            let tempdir = tempdir().unwrap();
+            let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+            publish_canonical_options_index(&index_dir);
+
+            let mut config = app_config_with_public_url(&index_dir);
+            config
+                .sources
+                .get_mut(SOURCE_FIXTURES)
+                .expect("fixture source exists")
+                .kind = source_kind;
+            let app = test_app(config);
+            let body = request_sitemap(app).await;
+
+            assert_sitemap_home_only(&body);
+        }
+    }
+
+    #[tokio::test]
+    async fn sitemap_with_unverified_seo_facts_renders_home_only() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app_with_unverified_seo_facts(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_home_only(&body);
+    }
+
+    #[tokio::test]
+    async fn sitemap_with_missing_sidecar_renders_home_only() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        remove_current_seo_sidecar(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let body = request_sitemap(app).await;
+
+        assert_sitemap_home_only(&body);
+    }
+
+    #[tokio::test]
+    async fn robots_txt_references_sitemap_xml() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, content_type, body) = request_content_type_and_body(app, "/robots.txt").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/plain"));
+        assert!(body.contains("Sitemap: http://localhost/sitemap.xml"));
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::annotation::SearchHitAnnotation;
 use nixsearch_index::search::SearchHit;
+use nixsearch_service::SitemapCandidate;
 
 use crate::entry::AnnotatedEntryDocument;
 #[cfg(test)]
@@ -42,6 +43,15 @@ pub fn canonical_source_path(config: &AppConfig, source: &str, ref_id: &str) -> 
             ref_id: ref_id_for_link(config, source, ref_id),
             ..PageQuery::default()
         },
+    )
+}
+
+pub fn sitemap_candidate_path(candidate: &SitemapCandidate) -> String {
+    entry_url_for(
+        &candidate.source,
+        &candidate.name,
+        candidate.kind.as_ref().map(DocumentKind::as_str),
+        &PageQuery::default(),
     )
 }
 
