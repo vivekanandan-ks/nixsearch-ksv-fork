@@ -708,41 +708,6 @@ impl SearchService {
             .any(|target| target.source == source_id && target.ref_id == ref_id)
     }
 
-    pub fn is_indexable_ref(&self, source_id: &str, ref_id: &str) -> bool {
-        let snapshot = self.snapshot();
-        self.is_indexable_ref_in_snapshot(&snapshot, source_id, ref_id)
-    }
-
-    pub fn is_indexable_ref_in_snapshot(
-        &self,
-        snapshot: &ServedGenerationSnapshot,
-        source_id: &str,
-        ref_id: &str,
-    ) -> bool {
-        self.source_has_indexable_entries(snapshot, source_id, ref_id)
-            .unwrap_or(false)
-    }
-
-    pub fn is_indexable_entry_in_snapshot(
-        &self,
-        snapshot: &ServedGenerationSnapshot,
-        source_id: &str,
-        ref_id: &str,
-        name: &str,
-    ) -> bool {
-        let Some(source) = self.config.sources.get(source_id) else {
-            return false;
-        };
-        let Ok(seo_facts) = snapshot.seo_facts.verified_facts() else {
-            return false;
-        };
-
-        self.ref_allowed_to_be_indexed(source, ref_id)
-            && Self::served_ref_exists_in_snapshot(snapshot, source_id, ref_id)
-            && seo_facts.ref_is_indexable(source_id, ref_id)
-            && seo_facts.entry_is_indexable(source_id, ref_id, name)
-    }
-
     pub fn source_has_indexable_entries(
         &self,
         snapshot: &ServedGenerationSnapshot,
@@ -1259,8 +1224,12 @@ mod tests {
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         verify_current_seo_facts(&service);
+        let snapshot = service.snapshot();
 
-        assert!(service.is_indexable_ref(SOURCE_FIXTURES, REF_SMALL));
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
+            Ok(true)
+        );
     }
 
     #[test]
@@ -1279,7 +1248,6 @@ mod tests {
             service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
             Err(super::SeoFactsUnavailable)
         );
-        assert!(!service.is_indexable_ref_in_snapshot(&snapshot, SOURCE_FIXTURES, REF_SMALL));
 
         verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
@@ -1353,34 +1321,13 @@ mod tests {
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         verify_current_seo_facts(&service);
-
-        assert!(service.served_ref_exists(SOURCE_FIXTURES, REF_SMALL));
-        assert!(!service.is_indexable_ref(SOURCE_FIXTURES, REF_SMALL));
-    }
-
-    #[test]
-    fn indexable_entry_requires_loaded_sidecar_entry_facts() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        publish_canonical_index(&index_dir);
-
-        let config = Arc::new(multi_ref_app_config(&index_dir));
-        let service = SearchService::open_current(config).unwrap();
-        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
-        assert!(service.is_indexable_entry_in_snapshot(
-            &snapshot,
-            SOURCE_FIXTURES,
-            REF_SMALL,
-            "programs.git.enable"
-        ));
-        assert!(!service.is_indexable_entry_in_snapshot(
-            &snapshot,
-            SOURCE_FIXTURES,
-            REF_SMALL,
-            "missing"
-        ));
+        assert!(service.served_ref_exists(SOURCE_FIXTURES, REF_SMALL));
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -1408,7 +1355,6 @@ mod tests {
             service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
             Err(super::SeoFactsUnavailable)
         );
-        assert!(!service.is_indexable_ref_in_snapshot(&snapshot, SOURCE_FIXTURES, REF_SMALL));
 
         let report = service.verify_current_seo_facts();
         assert!(matches!(report, SeoFactsVerificationReport::Invalid { .. }));
@@ -1437,9 +1383,13 @@ mod tests {
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         verify_current_seo_facts(&service);
+        let snapshot = service.snapshot();
 
         assert!(service.served_ref_exists(SOURCE_FIXTURES, REF_STABLE));
-        assert!(!service.is_indexable_ref(SOURCE_FIXTURES, REF_STABLE));
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_STABLE),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -1460,7 +1410,6 @@ mod tests {
                 .is_err()
         );
         assert!(service.sitemap_candidates(&snapshot).is_err());
-        assert!(!service.is_indexable_ref_in_snapshot(&snapshot, SOURCE_FIXTURES, REF_SMALL));
     }
 
     #[test]
@@ -1766,6 +1715,7 @@ mod tests {
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
         verify_current_seo_facts(&service);
+        let snapshot = service.snapshot();
 
         let scopes = service
             .search_scopes(Some(SOURCE_FIXTURES), Some(REF_STABLE), None)
@@ -1774,7 +1724,10 @@ mod tests {
         assert_eq!(scopes.len(), 1);
         assert_eq!(scopes[0].source, SOURCE_FIXTURES);
         assert_eq!(scopes[0].ref_id, REF_STABLE);
-        assert!(!service.is_indexable_ref(SOURCE_FIXTURES, REF_STABLE));
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_STABLE),
+            Ok(false)
+        );
     }
 
     #[test]
