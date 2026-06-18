@@ -39,15 +39,16 @@ struct ServedGeneration {
 
 #[derive(Clone)]
 enum SeoFactsState {
-    Available(Arc<SeoSidecar>),
+    Verified(Arc<SeoSidecar>),
+    Unverified(Arc<SeoSidecar>),
     Unavailable,
 }
 
 impl SeoFactsState {
-    fn facts(&self) -> SeoFactsResult<&SeoSidecar> {
+    fn verified_facts(&self) -> SeoFactsResult<&SeoSidecar> {
         match self {
-            Self::Available(facts) => Ok(facts),
-            Self::Unavailable => Err(SeoFactsUnavailable),
+            Self::Verified(facts) => Ok(facts),
+            Self::Unverified(_) | Self::Unavailable => Err(SeoFactsUnavailable),
         }
     }
 }
@@ -150,6 +151,24 @@ pub struct SitemapCandidate {
     pub source: String,
     pub name: String,
     pub kind: Option<DocumentKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeoFactsVerificationReport {
+    AlreadyVerified {
+        generation: PublishedGeneration,
+    },
+    AlreadyUnavailable {
+        generation: PublishedGeneration,
+    },
+    Verified {
+        generation: PublishedGeneration,
+    },
+    Invalid {
+        generation: PublishedGeneration,
+        error: String,
+    },
+    Superseded,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -293,6 +312,80 @@ impl SearchService {
             generation: current.generation.clone(),
             index: Arc::clone(&current.index),
             seo_facts: current.seo_facts.clone(),
+        }
+    }
+
+    pub fn verify_current_seo_facts(&self) -> SeoFactsVerificationReport {
+        let Some(candidate) = ({
+            let current = self
+                .current
+                .read()
+                .expect("served generation lock poisoned");
+
+            match &current.seo_facts {
+                SeoFactsState::Verified(_) => {
+                    return SeoFactsVerificationReport::AlreadyVerified {
+                        generation: current.to_published_generation(),
+                    };
+                }
+                SeoFactsState::Unavailable => {
+                    return SeoFactsVerificationReport::AlreadyUnavailable {
+                        generation: current.to_published_generation(),
+                    };
+                }
+                SeoFactsState::Unverified(facts) => Some((
+                    current.generation.clone(),
+                    Arc::clone(&current.index),
+                    Arc::clone(facts),
+                )),
+            }
+        }) else {
+            unreachable!("all SEO facts states return or provide a verification candidate")
+        };
+
+        let (generation, index, facts) = candidate;
+        let published = generation.to_published_generation();
+        let verification = facts.validate_for_index(generation.manifest(), &index);
+
+        let mut current = self
+            .current
+            .write()
+            .expect("served generation lock poisoned");
+
+        if !current.matches(&published) {
+            return SeoFactsVerificationReport::Superseded;
+        }
+
+        let SeoFactsState::Unverified(current_facts) = &current.seo_facts else {
+            return match &current.seo_facts {
+                SeoFactsState::Verified(_) => SeoFactsVerificationReport::AlreadyVerified {
+                    generation: current.to_published_generation(),
+                },
+                SeoFactsState::Unavailable => SeoFactsVerificationReport::AlreadyUnavailable {
+                    generation: current.to_published_generation(),
+                },
+                SeoFactsState::Unverified(_) => unreachable!(),
+            };
+        };
+
+        if !Arc::ptr_eq(current_facts, &facts) {
+            return SeoFactsVerificationReport::Superseded;
+        }
+
+        match verification {
+            Ok(()) => {
+                current.seo_facts = SeoFactsState::Verified(facts);
+                SeoFactsVerificationReport::Verified {
+                    generation: published,
+                }
+            }
+            Err(error) => {
+                current.seo_facts = SeoFactsState::Unavailable;
+                SeoFactsVerificationReport::Invalid {
+                    generation: published,
+                    error: format!("{error:#}"),
+                }
+            }
         }
     }
 
@@ -619,7 +712,7 @@ impl SearchService {
         let Some(source) = self.config.sources.get(source_id) else {
             return false;
         };
-        let Ok(seo_facts) = snapshot.seo_facts.facts() else {
+        let Ok(seo_facts) = snapshot.seo_facts.verified_facts() else {
             return false;
         };
 
@@ -635,7 +728,7 @@ impl SearchService {
         source_id: &str,
         ref_id: &str,
     ) -> SeoFactsResult<bool> {
-        let seo_facts = snapshot.seo_facts.facts()?;
+        let seo_facts = snapshot.seo_facts.verified_facts()?;
 
         if !self.source_ref_allowed_for_seo(snapshot, source_id, ref_id) {
             return Ok(false);
@@ -652,7 +745,7 @@ impl SearchService {
         &self,
         snapshot: &ServedGenerationSnapshot,
     ) -> SeoFactsResult<Vec<SitemapCandidate>> {
-        let seo_facts = snapshot.seo_facts.facts()?;
+        let seo_facts = snapshot.seo_facts.verified_facts()?;
         let mut candidates = Vec::new();
 
         for entry in &seo_facts.entries {
@@ -891,7 +984,7 @@ fn load_servable_generation(
         .context("failed to validate supplied index generation manifest")?;
     let index = SearchIndex::open(generation.path())
         .with_context(|| format!("failed to open search index {}", generation.path()))?;
-    let seo_facts = load_seo_facts(&index_store, &generation, &index);
+    let seo_facts = load_seo_facts(&index_store, &generation);
 
     Ok(ServedGeneration {
         generation,
@@ -903,18 +996,13 @@ fn load_servable_generation(
 fn load_seo_facts(
     index_store: &IndexStore,
     generation: &LeasedPublishedGeneration,
-    index: &SearchIndex,
 ) -> SeoFactsState {
     let published = generation.published_generation();
     let path = generation.path();
-    let result = index_store.read_seo_sidecar(published).and_then(|sidecar| {
-        sidecar
-            .validate_for_index(generation.manifest(), index)
-            .map(|()| sidecar)
-    });
+    let result = index_store.read_seo_sidecar(published);
 
     match result {
-        Ok(sidecar) => SeoFactsState::Available(Arc::new(sidecar)),
+        Ok(sidecar) => SeoFactsState::Unverified(Arc::new(sidecar)),
         Err(error) => {
             tracing::warn!(
                 generation = %path,
@@ -990,7 +1078,7 @@ mod tests {
 
     use super::{
         EntryRequest, ReconcileOutcome, ReconcileReport, RequestResolutionError, SearchRequest,
-        SearchService, ServiceError,
+        SearchService, SeoFactsVerificationReport, ServiceError,
     };
 
     fn leased_generation(
@@ -1015,6 +1103,19 @@ mod tests {
             .collect()
     }
 
+    fn verify_current_seo_facts(service: &SearchService) {
+        let report = service.verify_current_seo_facts();
+
+        assert!(
+            matches!(
+                report,
+                SeoFactsVerificationReport::Verified { .. }
+                    | SeoFactsVerificationReport::AlreadyVerified { .. }
+            ),
+            "expected verified SEO facts, got {report:?}"
+        );
+    }
+
     #[test]
     fn search_current_uses_configured_default_scopes() {
         let tempdir = tempdir().unwrap();
@@ -1022,7 +1123,7 @@ mod tests {
         publish_canonical_index(&index_dir);
 
         let config = Arc::new(app_config(&index_dir));
-        let service = SearchService::open_current(config).unwrap();
+        let service = SearchService::open_current(Arc::clone(&config)).unwrap();
 
         let result = service
             .search_current(SearchRequest {
@@ -1043,7 +1144,7 @@ mod tests {
         publish_canonical_index(&index_dir);
 
         let config = Arc::new(app_config(&index_dir));
-        let service = SearchService::open_current(config).unwrap();
+        let service = SearchService::open_current(Arc::clone(&config)).unwrap();
 
         let result = service
             .search_current(SearchRequest {
@@ -1136,8 +1237,36 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
 
         assert!(service.is_indexable_ref(SOURCE_FIXTURES, REF_SMALL));
+    }
+
+    #[test]
+    fn loaded_sidecar_facts_are_unavailable_until_verified() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+
+        assert!(service.sitemap_candidates(&snapshot).is_err());
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
+            Err(super::SeoFactsUnavailable)
+        );
+        assert!(!service.is_indexable_ref_in_snapshot(&snapshot, SOURCE_FIXTURES, REF_SMALL));
+
+        verify_current_seo_facts(&service);
+        let snapshot = service.snapshot();
+
+        assert!(service.sitemap_candidates(&snapshot).is_ok());
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
+            Ok(true)
+        );
     }
 
     #[test]
@@ -1163,6 +1292,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
 
         assert!(service.served_ref_exists(SOURCE_FIXTURES, REF_SMALL));
         assert!(!service.is_indexable_ref(SOURCE_FIXTURES, REF_SMALL));
@@ -1176,6 +1306,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert!(service.is_indexable_entry_in_snapshot(
@@ -1193,28 +1324,41 @@ mod tests {
     }
 
     #[test]
-    fn open_current_marks_forged_sidecar_entry_name_unavailable() {
+    fn open_current_does_not_use_manifest_valid_sidecar_until_deep_validation() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
         let store = IndexStore::new(&index_dir);
         let manifest = store.read_manifest(&path).unwrap();
-        let generation = PublishedGeneration { path, manifest };
+        let generation = PublishedGeneration {
+            path,
+            manifest: manifest.clone(),
+        };
         let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
 
         sidecar.entries[0].name = "not-real".to_owned();
         write_raw_seo_sidecar(&store, &generation, &sidecar);
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
-        let service = SearchService::open_current(config).unwrap();
+        let service = SearchService::open_current(Arc::clone(&config)).unwrap();
         let snapshot = service.snapshot();
 
         assert!(service.sitemap_candidates(&snapshot).is_err());
-        assert!(
-            service
-                .source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL)
-                .is_err()
+        assert_eq!(
+            service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
+            Err(super::SeoFactsUnavailable)
         );
+        assert!(!service.is_indexable_ref_in_snapshot(&snapshot, SOURCE_FIXTURES, REF_SMALL));
+
+        let report = service.verify_current_seo_facts();
+        assert!(matches!(report, SeoFactsVerificationReport::Invalid { .. }));
+        assert!(service.sitemap_candidates(&service.snapshot()).is_err());
+
+        let leased = leased_generation(&index_dir, generation.path, manifest);
+        let error =
+            SearchService::validate_leased_generation_seo_facts(&config, &leased).unwrap_err();
+
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 
     #[test]
@@ -1225,6 +1369,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
 
         assert!(service.served_ref_exists(SOURCE_FIXTURES, REF_STABLE));
         assert!(!service.is_indexable_ref(SOURCE_FIXTURES, REF_STABLE));
@@ -1270,6 +1415,7 @@ mod tests {
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert_eq!(
@@ -1307,6 +1453,7 @@ mod tests {
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert_eq!(
@@ -1354,6 +1501,7 @@ mod tests {
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert_eq!(
@@ -1381,6 +1529,7 @@ mod tests {
 
         let config = Arc::new(app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert!(service.sitemap_candidates(&snapshot).unwrap().is_empty());
@@ -1394,6 +1543,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
         let snapshot = service.snapshot();
 
         assert_eq!(
@@ -1432,6 +1582,7 @@ mod tests {
                 .expect("fixture source exists")
                 .kind = source_kind;
             let service = SearchService::open_current(Arc::new(config)).unwrap();
+            verify_current_seo_facts(&service);
             let snapshot = service.snapshot();
 
             assert_eq!(
@@ -1528,6 +1679,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
 
         let scopes = service
             .search_scopes(Some(SOURCE_FIXTURES), None, None)
@@ -1546,6 +1698,7 @@ mod tests {
 
         let config = Arc::new(multi_ref_app_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
+        verify_current_seo_facts(&service);
 
         let scopes = service
             .search_scopes(Some(SOURCE_FIXTURES), Some(REF_STABLE), None)
@@ -1853,7 +2006,7 @@ mod tests {
             service.snapshot().manifest().generation_id,
             manifest.generation_id
         );
-        assert!(service.sitemap_candidates(&service.snapshot()).is_ok());
+        assert!(service.sitemap_candidates(&service.snapshot()).is_err());
     }
 
     #[test]
@@ -1888,7 +2041,7 @@ mod tests {
         let store = IndexStore::new(&index_dir);
 
         let config = Arc::new(app_config(&index_dir));
-        let service = SearchService::open_current(config).unwrap();
+        let service = SearchService::open_current(Arc::clone(&config)).unwrap();
         let before = service.current_index();
 
         let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
@@ -1909,6 +2062,20 @@ mod tests {
         assert_eq!(snapshot.path(), next_generation.path);
         assert!(!Arc::ptr_eq(&before, &service.current_index()));
         assert!(service.sitemap_candidates(&snapshot).is_err());
+
+        let report = service.verify_current_seo_facts();
+        assert!(matches!(report, SeoFactsVerificationReport::Invalid { .. }));
+        assert!(service.sitemap_candidates(&service.snapshot()).is_err());
+
+        let leased = leased_generation(
+            &index_dir,
+            next_generation.path.clone(),
+            next_generation.manifest.clone(),
+        );
+        let error =
+            SearchService::validate_leased_generation_seo_facts(&config, &leased).unwrap_err();
+
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 
     #[test]

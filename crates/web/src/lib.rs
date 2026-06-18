@@ -53,6 +53,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     maintenance::spawn(Arc::clone(&config), search.clone());
 
+    let verification_search = search.clone();
     let state = AppState { config, search };
 
     let app = app_router(state).layer(TraceLayer::new_for_http());
@@ -62,6 +63,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
 
     tracing::info!("serving nixsearch web UI at http://{addr}");
+    maintenance::spawn_seo_facts_verification(verification_search);
 
     axum::serve(listener, app)
         .await
@@ -370,6 +372,7 @@ mod tests {
     fn test_app(config: AppConfig) -> Router {
         let config = Arc::new(config);
         let search = SearchService::open_current(Arc::clone(&config)).unwrap();
+        search.verify_current_seo_facts();
 
         app_router(AppState { config, search })
     }

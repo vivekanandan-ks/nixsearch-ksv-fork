@@ -10,7 +10,7 @@ use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
 use nixsearch_ops::{cleanup, generate, lock};
-use nixsearch_service::{ReconcileReport, SearchService};
+use nixsearch_service::{ReconcileReport, SearchService, SeoFactsVerificationReport};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -65,6 +65,44 @@ pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
     });
 }
 
+pub(crate) fn spawn_seo_facts_verification(search: SearchService) {
+    tokio::task::spawn_blocking(move || {
+        log_seo_facts_verification_report(search.verify_current_seo_facts());
+    });
+}
+
+fn log_seo_facts_verification_report(report: SeoFactsVerificationReport) {
+    match report {
+        SeoFactsVerificationReport::AlreadyVerified { generation } => {
+            tracing::debug!(
+                generation = %generation.path,
+                "SEO facts were already verified"
+            );
+        }
+        SeoFactsVerificationReport::AlreadyUnavailable { generation } => {
+            tracing::warn!(
+                generation = %generation.path,
+                "SEO facts are unavailable for served generation"
+            );
+        }
+        SeoFactsVerificationReport::Verified { generation } => {
+            tracing::info!(
+                generation = %generation.path,
+                "verified SEO facts for served generation"
+            );
+        }
+        SeoFactsVerificationReport::Invalid { generation, error } => {
+            tracing::warn!(
+                generation = %generation.path,
+                "SEO facts failed deep validation and were marked unavailable: {error}"
+            );
+        }
+        SeoFactsVerificationReport::Superseded => {
+            tracing::debug!("SEO facts verification was superseded by a newer generation");
+        }
+    }
+}
+
 async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Duration) {
     let modes = regeneration_modes(&config);
 
@@ -97,6 +135,7 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
 
         if reloaded {
             run_cleanup_after_reload(&config).await;
+            spawn_seo_facts_verification(search.clone());
         }
 
         if !modes.scheduled_enabled && !modes.recovery_enabled {
