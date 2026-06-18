@@ -7,7 +7,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::server::{AnalyticsScriptConfig, ScriptAttributeValue};
 use nixsearch_config::source::SourceKind;
 use nixsearch_index::search::SearchResult;
-use nixsearch_service::ServedGenerationSnapshot;
+use nixsearch_service::{SeoFactsResult, ServedGenerationSnapshot};
 
 use crate::AppState;
 use crate::DATASTAR_JS_URL;
@@ -392,7 +392,6 @@ fn page_index_metadata(
     match entry {
         EntryData::Found(entry) => {
             let document = &entry.document;
-            let common = document.common();
 
             if !entry.annotation.unique_within_kind {
                 return noindex_metadata();
@@ -402,18 +401,11 @@ fn page_index_metadata(
                 return noindex_metadata();
             }
 
-            if state.search.is_indexable_entry_in_snapshot(
-                served_generation,
-                &common.source,
-                &common.ref_id,
-                &common.name,
-            ) {
-                return canonical_metadata(page_urls.absolute_url(
-                    &canonical_entry_path_for_document(&state.config, document, &entry.annotation),
-                ));
-            }
-
-            return noindex_metadata();
+            return canonical_metadata(page_urls.absolute_url(&canonical_entry_path_for_document(
+                &state.config,
+                document,
+                &entry.annotation,
+            )));
         }
         EntryData::NotFound { .. } | EntryData::Ambiguous(_) | EntryData::Error(_) => {
             return noindex_metadata();
@@ -465,19 +457,23 @@ fn page_index_metadata(
                 return noindex_metadata();
             };
 
-            if state
-                .search
-                .is_indexable_ref_in_snapshot(served_generation, source, ref_id)
-            {
-                canonical_metadata(page_urls.absolute_url(&canonical_source_path(
-                    &state.config,
-                    source,
-                    ref_id,
-                )))
-            } else {
-                noindex_metadata()
-            }
+            source_index_metadata(
+                state
+                    .search
+                    .source_has_indexable_entries(served_generation, source, ref_id),
+                page_urls.absolute_url(&canonical_source_path(&state.config, source, ref_id)),
+            )
         }
+    }
+}
+
+fn source_index_metadata(
+    has_indexable_entries: SeoFactsResult<bool>,
+    canonical_url: String,
+) -> IndexMetadata {
+    match has_indexable_entries {
+        Ok(true) => canonical_metadata(canonical_url),
+        Ok(false) | Err(_) => noindex_metadata(),
     }
 }
 

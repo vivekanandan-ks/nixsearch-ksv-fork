@@ -571,6 +571,39 @@ mod tests {
         );
     }
 
+    fn publish_internal_and_hidden_options_index(index_dir: &camino::Utf8Path) {
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+        let mut internal = match option_doc_for(&context, "internal.entry", "Internal option.") {
+            SearchDocument::Option(option) => option,
+            SearchDocument::Package(_) => unreachable!(),
+        };
+        internal.internal = Some(true);
+
+        let mut hidden = match option_doc_for(&context, "hidden.entry", "Hidden option.") {
+            SearchDocument::Option(option) => option,
+            SearchDocument::Package(_) => unreachable!(),
+        };
+        hidden.visible = Some(false);
+
+        publish_documents_with_manifest_targets(
+            index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                SearchDocument::Option(internal),
+                SearchDocument::Option(hidden),
+            ],
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
+        );
+    }
+
+    fn remove_current_seo_sidecar(index_dir: &camino::Utf8Path) {
+        let store = IndexStore::new(index_dir);
+        let current = store.current_path().unwrap();
+
+        fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
+    }
+
     fn assert_has_canonical(body: &str, expected: &str) {
         let tag = format!(r#"<link rel="canonical" href="{expected}">"#);
         assert!(body.contains(&tag), "missing canonical tag {tag:?}");
@@ -1347,6 +1380,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_default_ref_without_sidecar_emits_noindex_without_canonical() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        remove_current_seo_sidecar(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn source_default_ref_without_indexable_entries_emits_noindex_without_canonical() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_internal_and_hidden_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
     async fn direct_entry_page_renders_entry_in_results_with_empty_modal() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
@@ -1361,6 +1423,24 @@ mod tests {
         assert!(body.contains("Description"));
         assert_h1_count(&body, 1);
         assert_empty_modal_container(&body);
+        assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_entry_page_without_sidecar_still_emits_canonical() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        remove_current_seo_sidecar(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures/programs.git.enable").await;
+
+        assert_eq!(status, StatusCode::OK);
         assert_has_canonical(
             &body,
             "https://search.example.com/fixtures/programs.git.enable",
@@ -1589,29 +1669,7 @@ mod tests {
     async fn internal_and_hidden_entry_pages_render_but_emit_noindex() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
-        let mut internal = match option_doc_for(&context, "internal.entry", "Internal option.") {
-            SearchDocument::Option(option) => option,
-            SearchDocument::Package(_) => unreachable!(),
-        };
-        internal.internal = Some(true);
-
-        let mut hidden = match option_doc_for(&context, "hidden.entry", "Hidden option.") {
-            SearchDocument::Option(option) => option,
-            SearchDocument::Package(_) => unreachable!(),
-        };
-        hidden.visible = Some(false);
-
-        publish_documents_with_manifest_targets(
-            &index_dir,
-            time::OffsetDateTime::now_utc(),
-            vec![
-                SearchDocument::Option(internal),
-                SearchDocument::Option(hidden),
-            ],
-            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 2)],
-        );
+        publish_internal_and_hidden_options_index(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
 
