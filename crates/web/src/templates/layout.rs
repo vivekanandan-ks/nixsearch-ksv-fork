@@ -401,6 +401,13 @@ fn page_index_metadata(
                 return noindex_metadata();
             }
 
+            if !state
+                .search
+                .document_ref_allowed_for_seo(served_generation, document)
+            {
+                return noindex_metadata();
+            }
+
             return canonical_metadata(page_urls.absolute_url(&canonical_entry_path_for_document(
                 &state.config,
                 document,

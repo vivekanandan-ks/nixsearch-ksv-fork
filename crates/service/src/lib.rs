@@ -6,7 +6,7 @@ use camino::Utf8Path;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{SourceConfig, SourceKind};
-use nixsearch_core::document::DocumentKind;
+use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::manifest::{IndexGenerationManifest, validate_generation_id};
 use nixsearch_index::search::{
     EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
@@ -708,6 +708,16 @@ impl SearchService {
             .any(|target| target.source == source_id && target.ref_id == ref_id)
     }
 
+    pub fn document_ref_allowed_for_seo(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        document: &SearchDocument,
+    ) -> bool {
+        let common = document.common();
+
+        self.source_ref_allowed_for_seo(snapshot, &common.source, &common.ref_id)
+    }
+
     pub fn source_has_indexable_entries(
         &self,
         snapshot: &ServedGenerationSnapshot,
@@ -1230,6 +1240,103 @@ mod tests {
             service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn document_ref_allowed_for_seo_accepts_default_served_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+        let document = option_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+            "programs.git.enable",
+            "Git option.",
+        );
+
+        assert!(service.document_ref_allowed_for_seo(&snapshot, &document));
+    }
+
+    #[test]
+    fn document_ref_allowed_for_seo_rejects_non_default_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_fixture_options_index_for_refs(&index_dir, &[REF_SMALL, REF_STABLE]);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+        let document = option_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_STABLE),
+            "programs.stable.git.enable",
+            "Stable Git option.",
+        );
+
+        assert!(!service.document_ref_allowed_for_seo(&snapshot, &document));
+    }
+
+    #[test]
+    fn document_ref_allowed_for_seo_rejects_unserved_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+        let document = option_doc_for(
+            &ingest_context_for(SOURCE_FIXTURES, REF_STABLE),
+            "programs.stable.git.enable",
+            "Stable Git option.",
+        );
+
+        assert!(!service.document_ref_allowed_for_seo(&snapshot, &document));
+    }
+
+    #[test]
+    fn document_ref_allowed_for_seo_rejects_unknown_source() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+        let document = option_doc_for(
+            &ingest_context_for("missing", REF_SMALL),
+            "programs.git.enable",
+            "Git option.",
+        );
+
+        assert!(!service.document_ref_allowed_for_seo(&snapshot, &document));
+    }
+
+    #[test]
+    fn document_ref_allowed_for_seo_rejects_app_and_service_sources() {
+        for source_kind in [SourceKind::Apps, SourceKind::Services] {
+            let tempdir = tempdir().unwrap();
+            let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+            publish_canonical_index(&index_dir);
+            let mut config = multi_ref_app_config(&index_dir);
+            config
+                .sources
+                .get_mut(SOURCE_FIXTURES)
+                .expect("fixture source exists")
+                .kind = source_kind;
+
+            let service = SearchService::open_current(Arc::new(config)).unwrap();
+            let snapshot = service.snapshot();
+            let document = option_doc_for(
+                &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
+                "programs.git.enable",
+                "Git option.",
+            );
+
+            assert!(!service.document_ref_allowed_for_seo(&snapshot, &document));
+        }
     }
 
     #[test]

@@ -349,6 +349,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use nixsearch_config::app::AppConfig;
+    use nixsearch_config::source::SourceKind;
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::SearchDocument;
     use nixsearch_index::search::SearchIndex;
@@ -1446,6 +1447,45 @@ mod tests {
             "https://search.example.com/fixtures/programs.git.enable",
         );
         assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_entry_non_default_ref_emits_noindex_without_canonical() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_fixture_options_index_for_refs(&index_dir, &[REF_SMALL, REF_STABLE]);
+
+        let app = test_app(multi_ref_app_config_with_public_url(&index_dir));
+        let (status, body) =
+            request_body(app, "/fixtures/programs.stable.git.enable?ref=stable").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("entry-page"));
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn direct_entry_app_and_service_sources_emit_noindex_without_canonical() {
+        for source_kind in [SourceKind::Apps, SourceKind::Services] {
+            let tempdir = tempdir().unwrap();
+            let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+            publish_canonical_options_index(&index_dir);
+
+            let mut config = app_config_with_public_url(&index_dir);
+            config
+                .sources
+                .get_mut(SOURCE_FIXTURES)
+                .expect("fixture source exists")
+                .kind = source_kind;
+            let app = test_app(config);
+            let (status, body) = request_body(app, "/fixtures/programs.git.enable").await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("entry-page"));
+            assert_no_canonical(&body);
+            assert_has_robots(&body);
+        }
     }
 
     #[tokio::test]
