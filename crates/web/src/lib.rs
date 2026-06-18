@@ -1779,7 +1779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_current_generation_bootstraps_generation_with_missing_seo_sidecar() {
+    async fn ensure_current_generation_keeps_generation_with_missing_seo_sidecar() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let published_path = publish_canonical_options_index(&index_dir);
@@ -1790,10 +1790,12 @@ mod tests {
 
         let generation = ensure_current_generation(&config).await.unwrap();
 
-        assert_ne!(generation.path, published_path);
+        assert_eq!(generation.path, published_path);
         assert_canonical_options_manifest_targets(&generation.manifest);
         assert_eq!(store.current_path().unwrap(), generation.path);
-        assert!(store.seo_sidecar_path(&generation.path).exists());
+        let search = SearchService::open_current(Arc::new(config)).unwrap();
+        let snapshot = search.snapshot();
+        assert!(search.sitemap_candidates(&snapshot).is_err());
     }
 
     #[tokio::test]
@@ -1817,7 +1819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_current_generation_errors_on_missing_seo_sidecar_when_bootstrap_disabled() {
+    async fn ensure_current_generation_allows_missing_seo_sidecar_when_bootstrap_disabled() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let published_path = publish_canonical_options_index(&index_dir);
@@ -1826,11 +1828,10 @@ mod tests {
         let mut config = app_config(&index_dir);
         config.server.bootstrap = false;
 
-        let error = ensure_current_generation(&config).await.unwrap_err();
+        let generation = ensure_current_generation(&config).await.unwrap();
 
-        let error = format!("{error:#}");
-        assert!(error.contains("failed to read SEO sidecar"));
-        assert!(error.contains("run `nixsearch update` first"));
+        assert_eq!(generation.path, published_path);
+        assert_eq!(store.current_path().unwrap(), generation.path);
     }
 
     #[tokio::test]

@@ -374,6 +374,13 @@ fn current_generation_status(
         });
     }
 
+    if let Err(error) = SearchService::validate_leased_generation_seo_facts(config, &generation) {
+        return Ok(CurrentGenerationStatus::Invalid {
+            generation: published,
+            error,
+        });
+    }
+
     Ok(CurrentGenerationStatus::Valid {
         generation: published,
     })

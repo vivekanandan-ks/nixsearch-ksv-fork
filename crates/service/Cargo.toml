@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 camino.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 nixsearch-config.workspace = true
 nixsearch-core.workspace = true
