@@ -63,7 +63,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
 
     tracing::info!("serving nixsearch web UI at http://{addr}");
-    maintenance::spawn_seo_facts_verification(verification_search);
+    maintenance::spawn_seo_facts_verification_if_needed(verification_search);
 
     axum::serve(listener, app)
         .await
@@ -343,6 +343,7 @@ fn log_startup_maintenance_state(config: &AppConfig, generation: &PublishedGener
 mod tests {
     use std::fs;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
@@ -370,11 +371,40 @@ mod tests {
     use super::{AppState, ensure_current_generation};
 
     fn test_app(config: AppConfig) -> Router {
+        verified_test_app_and_search(config).0
+    }
+
+    fn verified_test_app_and_search(config: AppConfig) -> (Router, SearchService) {
         let config = Arc::new(config);
         let search = SearchService::open_current(Arc::clone(&config)).unwrap();
         search.verify_current_seo_facts();
 
+        (
+            app_router(AppState {
+                config,
+                search: search.clone(),
+            }),
+            search,
+        )
+    }
+
+    fn test_app_with_unverified_seo_facts(config: AppConfig) -> Router {
+        let config = Arc::new(config);
+        let search = SearchService::open_current(Arc::clone(&config)).unwrap();
+
         app_router(AppState { config, search })
+    }
+
+    async fn wait_for_seo_facts_verification_to_start(search: &SearchService) {
+        for _ in 0..50 {
+            if !search.current_seo_facts_need_verification() {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("SEO facts verification did not start");
     }
 
     struct TestResponse {
@@ -438,6 +468,7 @@ mod tests {
     struct ReconciledGenerationFixture {
         _tempdir: TempDir,
         app: Router,
+        search: SearchService,
         old_generation_id: String,
         new_generation_id: String,
     }
@@ -447,7 +478,7 @@ mod tests {
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
         let old_generation_id = current_generation_id(&index_dir);
-        let app = test_app(app_config(&index_dir));
+        let (app, search) = verified_test_app_and_search(app_config(&index_dir));
 
         let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
         publish_documents_with_manifest_targets(
@@ -465,6 +496,7 @@ mod tests {
         ReconciledGenerationFixture {
             _tempdir: tempdir,
             app,
+            search,
             old_generation_id,
             new_generation_id,
         }
@@ -686,6 +718,7 @@ mod tests {
         let fixture = reconciled_generation_fixture();
 
         let (status, body) = request_body(fixture.app, "/").await;
+        wait_for_seo_facts_verification_to_start(&fixture.search).await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&format!(
@@ -1297,6 +1330,20 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_has_canonical(&body, "https://search.example.com/fixtures");
         assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn unverified_source_default_ref_emits_noindex_without_canonical() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app_with_unverified_seo_facts(app_config_with_public_url(&index_dir));
+        let (status, body) = request_body(app, "/fixtures").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
     }
 
     #[tokio::test]

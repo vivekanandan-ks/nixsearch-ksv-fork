@@ -17,6 +17,7 @@ use nixsearch_service::{
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::entry::{AnnotatedEntryDocument, EntryData};
+use crate::maintenance;
 use crate::origin::{
     PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query, public_uri_for_request,
 };
@@ -303,7 +304,10 @@ fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
             continue;
         }
 
-        return state.search.snapshot();
+        let snapshot = state.search.snapshot();
+        maintenance::spawn_seo_facts_verification_if_needed(state.search.clone());
+
+        return snapshot;
     }
 
     tracing::warn!(
@@ -311,7 +315,10 @@ fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
         "published index generation changed repeatedly during request reconciliation; continuing with current snapshot"
     );
 
-    state.search.snapshot()
+    let snapshot = state.search.snapshot();
+    maintenance::spawn_seo_facts_verification_if_needed(state.search.clone());
+
+    snapshot
 }
 
 struct GenerationChangeContent {

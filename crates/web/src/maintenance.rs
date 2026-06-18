@@ -65,7 +65,11 @@ pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
     });
 }
 
-pub(crate) fn spawn_seo_facts_verification(search: SearchService) {
+pub(crate) fn spawn_seo_facts_verification_if_needed(search: SearchService) {
+    if !search.current_seo_facts_need_verification() {
+        return;
+    }
+
     tokio::task::spawn_blocking(move || {
         log_seo_facts_verification_report(search.verify_current_seo_facts());
     });
@@ -83,6 +87,12 @@ fn log_seo_facts_verification_report(report: SeoFactsVerificationReport) {
             tracing::warn!(
                 generation = %generation.path,
                 "SEO facts are unavailable for served generation"
+            );
+        }
+        SeoFactsVerificationReport::AlreadyVerifying { generation } => {
+            tracing::debug!(
+                generation = %generation.path,
+                "SEO facts verification is already running"
             );
         }
         SeoFactsVerificationReport::Verified { generation } => {
@@ -135,7 +145,7 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
 
         if reloaded {
             run_cleanup_after_reload(&config).await;
-            spawn_seo_facts_verification(search.clone());
+            spawn_seo_facts_verification_if_needed(search.clone());
         }
 
         if !modes.scheduled_enabled && !modes.recovery_enabled {

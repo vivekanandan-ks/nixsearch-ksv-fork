@@ -41,6 +41,7 @@ struct ServedGeneration {
 enum SeoFactsState {
     Verified(Arc<SeoSidecar>),
     Unverified(Arc<SeoSidecar>),
+    Verifying(Arc<SeoSidecar>),
     Unavailable,
 }
 
@@ -48,7 +49,9 @@ impl SeoFactsState {
     fn verified_facts(&self) -> SeoFactsResult<&SeoSidecar> {
         match self {
             Self::Verified(facts) => Ok(facts),
-            Self::Unverified(_) | Self::Unavailable => Err(SeoFactsUnavailable),
+            Self::Unverified(_) | Self::Verifying(_) | Self::Unavailable => {
+                Err(SeoFactsUnavailable)
+            }
         }
     }
 }
@@ -159,6 +162,9 @@ pub enum SeoFactsVerificationReport {
         generation: PublishedGeneration,
     },
     AlreadyUnavailable {
+        generation: PublishedGeneration,
+    },
+    AlreadyVerifying {
         generation: PublishedGeneration,
     },
     Verified {
@@ -317,9 +323,9 @@ impl SearchService {
 
     pub fn verify_current_seo_facts(&self) -> SeoFactsVerificationReport {
         let Some(candidate) = ({
-            let current = self
+            let mut current = self
                 .current
-                .read()
+                .write()
                 .expect("served generation lock poisoned");
 
             match &current.seo_facts {
@@ -328,16 +334,24 @@ impl SearchService {
                         generation: current.to_published_generation(),
                     };
                 }
+                SeoFactsState::Verifying(_) => {
+                    return SeoFactsVerificationReport::AlreadyVerifying {
+                        generation: current.to_published_generation(),
+                    };
+                }
                 SeoFactsState::Unavailable => {
                     return SeoFactsVerificationReport::AlreadyUnavailable {
                         generation: current.to_published_generation(),
                     };
                 }
-                SeoFactsState::Unverified(facts) => Some((
-                    current.generation.clone(),
-                    Arc::clone(&current.index),
-                    Arc::clone(facts),
-                )),
+                SeoFactsState::Unverified(facts) => {
+                    let generation = current.generation.clone();
+                    let index = Arc::clone(&current.index);
+                    let facts = Arc::clone(facts);
+                    current.seo_facts = SeoFactsState::Verifying(Arc::clone(&facts));
+
+                    Some((generation, index, facts))
+                }
             }
         }) else {
             unreachable!("all SEO facts states return or provide a verification candidate")
@@ -356,15 +370,16 @@ impl SearchService {
             return SeoFactsVerificationReport::Superseded;
         }
 
-        let SeoFactsState::Unverified(current_facts) = &current.seo_facts else {
+        let SeoFactsState::Verifying(current_facts) = &current.seo_facts else {
             return match &current.seo_facts {
                 SeoFactsState::Verified(_) => SeoFactsVerificationReport::AlreadyVerified {
                     generation: current.to_published_generation(),
                 },
+                SeoFactsState::Verifying(_) => unreachable!(),
                 SeoFactsState::Unavailable => SeoFactsVerificationReport::AlreadyUnavailable {
                     generation: current.to_published_generation(),
                 },
-                SeoFactsState::Unverified(_) => unreachable!(),
+                SeoFactsState::Unverified(_) => SeoFactsVerificationReport::Superseded,
             };
         };
 
@@ -387,6 +402,15 @@ impl SearchService {
                 }
             }
         }
+    }
+
+    pub fn current_seo_facts_need_verification(&self) -> bool {
+        let current = self
+            .current
+            .read()
+            .expect("served generation lock poisoned");
+
+        matches!(current.seo_facts, SeoFactsState::Unverified(_))
     }
 
     pub fn reconcile_current_generation(&self) -> Result<ReconcileReport> {
@@ -1252,6 +1276,7 @@ mod tests {
         let service = SearchService::open_current(config).unwrap();
         let snapshot = service.snapshot();
 
+        assert!(service.current_seo_facts_need_verification());
         assert!(service.sitemap_candidates(&snapshot).is_err());
         assert_eq!(
             service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
@@ -1267,6 +1292,44 @@ mod tests {
             service.source_has_indexable_entries(&snapshot, SOURCE_FIXTURES, REF_SMALL),
             Ok(true)
         );
+        assert!(!service.current_seo_facts_need_verification());
+
+        let report = service.verify_current_seo_facts();
+        assert!(matches!(
+            report,
+            SeoFactsVerificationReport::AlreadyVerified { .. }
+        ));
+    }
+
+    #[test]
+    fn claimed_sidecar_verification_is_not_started_twice() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        assert!(service.current_seo_facts_need_verification());
+        {
+            let mut current = service
+                .current
+                .write()
+                .expect("served generation lock poisoned");
+            let super::SeoFactsState::Unverified(facts) = &current.seo_facts else {
+                panic!("expected unverified SEO facts");
+            };
+            let facts = Arc::clone(facts);
+
+            current.seo_facts = super::SeoFactsState::Verifying(facts);
+        }
+
+        assert!(!service.current_seo_facts_need_verification());
+        let report = service.verify_current_seo_facts();
+        assert!(matches!(
+            report,
+            SeoFactsVerificationReport::AlreadyVerifying { .. }
+        ));
     }
 
     #[test]
@@ -1353,6 +1416,13 @@ mod tests {
         let report = service.verify_current_seo_facts();
         assert!(matches!(report, SeoFactsVerificationReport::Invalid { .. }));
         assert!(service.sitemap_candidates(&service.snapshot()).is_err());
+        assert!(!service.current_seo_facts_need_verification());
+
+        let report = service.verify_current_seo_facts();
+        assert!(matches!(
+            report,
+            SeoFactsVerificationReport::AlreadyUnavailable { .. }
+        ));
 
         let leased = leased_generation(&index_dir, generation.path, manifest);
         let error =
