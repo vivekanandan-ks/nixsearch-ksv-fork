@@ -26,6 +26,9 @@ use crate::request::{
     page_request_from_public_uri, page_state, parse_document_kind, public_uri,
 };
 use crate::scripts::datastar_script;
+use crate::sitemap::{
+    SitemapDocument, SitemapRenderError, protocol_sitemap_limits, render_sitemap_entrypoint,
+};
 use crate::templates;
 use crate::templates::layout::{
     InitialReturnMetadata, PageMetadata, ResultsContent, generation_change_script,
@@ -80,22 +83,30 @@ pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri:
     if let Ok(candidates) = state.search.sitemap_candidates(&snapshot) {
         paths.extend(candidates.iter().map(sitemap_candidate_path));
     }
-    paths.sort();
 
-    let sitemap_urls = paths
-        .into_iter()
-        .map(|path| {
-            let url = format!("{}{}", urls.origin, path);
-            let loc = html_escape::encode_text(&url);
-            format!("<url><loc>{loc}</loc></url>")
-        })
-        .collect::<String>();
+    let body = match render_sitemap_entrypoint(
+        &urls.origin,
+        paths,
+        uri.query(),
+        protocol_sitemap_limits(),
+    ) {
+        Ok(SitemapDocument::Urlset(body) | SitemapDocument::Index(body)) => body,
+        Err(
+            SitemapRenderError::MalformedQuery(_)
+            | SitemapRenderError::ShardNotAvailable
+            | SitemapRenderError::ShardOutOfRange,
+        ) => return sitemaps_not_found().await,
+        Err(
+            error @ (SitemapRenderError::IndexTooLarge | SitemapRenderError::NoRepresentableUrls),
+        ) => {
+            tracing::error!(?error, "failed to render protocol-compliant sitemap");
+            return sitemap_internal_error();
+        }
+    };
 
     (
         [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{sitemap_urls}</urlset>"#
-        ),
+        body,
     )
         .into_response()
 }
@@ -105,6 +116,15 @@ pub async fn sitemaps_not_found() -> Response {
         StatusCode::NOT_FOUND,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         "not found",
+    )
+        .into_response()
+}
+
+fn sitemap_internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "sitemap rendering failed",
     )
         .into_response()
 }

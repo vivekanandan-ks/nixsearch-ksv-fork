@@ -20,6 +20,7 @@ mod origin;
 mod render_docs;
 mod request;
 mod scripts;
+mod sitemap;
 mod templates;
 mod urls;
 
@@ -1047,6 +1048,42 @@ mod tests {
         let body = request_sitemap(app).await;
 
         assert_sitemap_home_only(&body);
+    }
+
+    #[tokio::test]
+    async fn sitemap_shard_query_returns_404_when_sitemap_fits_one_document() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        assert_eq!(
+            request_status(app, "/sitemap.xml?shard=00001").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn sitemap_rejects_noncanonical_queries() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        for uri in [
+            "/sitemap.xml?foo=bar",
+            "/sitemap.xml?shard=1",
+            "/sitemap.xml?shard=%30%30%30%30%31",
+            "/sitemap.xml?shard=00001&shard=00002",
+        ] {
+            assert_eq!(
+                request_status(app.clone(), uri).await,
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
     }
 
     #[tokio::test]
