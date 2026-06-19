@@ -82,15 +82,6 @@ pub fn validate_manifest_invariants(manifest: &IndexGenerationManifest) -> Resul
             );
         }
 
-        if target.artifact_kind == ArtifactKind::FlakeInfoJson && target.document_count != 0 {
-            bail!(
-                "target {}/{} has unsupported flake-info indexed document count {}",
-                target.source,
-                target.ref_id,
-                target.document_count
-            );
-        }
-
         target_sum = target_sum
             .checked_add(target.document_count)
             .context("index generation target document counts overflowed")?;
@@ -306,4 +297,55 @@ impl EntryKindCounts {
 
 fn capped_increment(value: u8) -> u8 {
     value.saturating_add(1).min(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use time::OffsetDateTime;
+
+    use nixsearch_core::artifact::ArtifactKind;
+
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+
+    use super::validate_manifest_invariants;
+
+    const SOURCE: &str = "fixtures";
+    const REF: &str = "small";
+
+    #[test]
+    fn manifest_invariants_accept_nonzero_flake_info_targets() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            2,
+            vec![target(ArtifactKind::FlakeInfoJson, 2)],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        validate_manifest_invariants(&manifest).unwrap();
+    }
+
+    #[test]
+    fn manifest_invariants_still_reject_flake_info_count_mismatch() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![target(ArtifactKind::FlakeInfoJson, 2)],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let error = validate_manifest_invariants(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("document_count mismatch"));
+    }
+
+    fn target(artifact_kind: ArtifactKind, document_count: usize) -> IndexTargetManifest {
+        IndexTargetManifest {
+            source: SOURCE.to_owned(),
+            ref_id: REF.to_owned(),
+            artifact_kind,
+            document_count,
+            artifact_hash: None,
+            revision: None,
+        }
+    }
 }
