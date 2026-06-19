@@ -17,13 +17,12 @@ use nixsearch_service::{
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
 use crate::entry::{AnnotatedEntryDocument, EntryData};
-use crate::maintenance;
 use crate::origin::{
     PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query, public_uri_for_request,
 };
 use crate::request::{
     PageRequest, PageState, SourceFilter, non_empty, normalized_query,
-    page_request_from_public_uri, page_state, parse_document_kind, public_uri,
+    page_request_from_public_uri, page_state, parse_document_kind, public_uri, strict_query_pairs,
 };
 use crate::scripts::datastar_script;
 use crate::sitemap::{
@@ -34,7 +33,9 @@ use crate::templates::layout::{
     InitialReturnMetadata, PageMetadata, ResultsContent, generation_change_script,
     head_metadata_script, modal_patch_script, results_patch_script,
 };
-use crate::urls::{canonical_home_path, close_url_for_state, sitemap_candidate_path};
+use crate::urls::{
+    canonical_home_path, canonical_source_path, close_url_for_state, sitemap_candidate_path,
+};
 
 const REQUEST_RECONCILE_ATTEMPTS: usize = 3;
 
@@ -83,6 +84,18 @@ pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri:
     if let Ok(candidates) = state.search.sitemap_candidates(&snapshot) {
         paths.extend(candidates.iter().map(sitemap_candidate_path));
     }
+    for (source_id, source) in &state.config.sources {
+        let Some(ref_id) = source.default_ref.as_deref() else {
+            continue;
+        };
+        if state
+            .search
+            .source_has_indexable_entries(&snapshot, source_id, ref_id)
+            .unwrap_or(false)
+        {
+            paths.push(canonical_source_path(&state.config, source_id, ref_id));
+        }
+    }
 
     let body = match render_sitemap_entrypoint(
         &urls.origin,
@@ -130,6 +143,17 @@ fn sitemap_internal_error() -> Response {
 }
 
 pub async fn public_page(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    match normalized_public_uri(&uri) {
+        Ok(Some(target)) => {
+            return (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, target)]).into_response();
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let page_urls = page_urls(state.config.as_ref(), &headers, &uri);
+            return render_parse_error_response(&state, page_urls, &error);
+        }
+    }
+
     let request = match page_request_from_public_uri(&uri) {
         Ok(request) => request,
         Err(error) => {
@@ -143,6 +167,92 @@ pub async fn public_page(State(state): State<AppState>, headers: HeaderMap, uri:
         page_urls(state.config.as_ref(), &headers, &uri),
         request,
     )
+}
+
+fn normalized_public_uri(uri: &Uri) -> std::result::Result<Option<String>, String> {
+    let path = uri.path();
+    if path.starts_with("//") {
+        return Err("public URL must not be protocol-relative".to_owned());
+    }
+    if path != "/" && path.contains("//") {
+        return Err("path must not contain empty segments".to_owned());
+    }
+
+    let mut normalized_path = path.to_owned();
+    if normalized_path != "/" {
+        while normalized_path.ends_with('/') {
+            normalized_path.pop();
+        }
+    }
+
+    let mut seen_semantic = std::collections::HashSet::new();
+    let mut semantic = Vec::<(String, String)>::new();
+    if let Some(query) = uri.query() {
+        for (key, value) in strict_query_pairs(query).map_err(|error| error.to_string())? {
+            if is_tracking_param(&key) {
+                continue;
+            }
+
+            if !is_supported_public_param(&key) {
+                return Err(format!("unknown query parameter {key:?}"));
+            }
+
+            if !seen_semantic.insert(key.clone()) {
+                return Err(format!("duplicate query parameter {key:?}"));
+            }
+
+            if (key == "q" && value.trim().is_empty()) || (key == "page" && value == "1") {
+                continue;
+            }
+
+            semantic.push((key, value));
+        }
+    }
+
+    let normalized_query = semantic
+        .into_iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                urlencoding::encode(&key),
+                urlencoding::encode(&value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let normalized = if normalized_query.is_empty() {
+        normalized_path
+    } else {
+        format!("{normalized_path}?{normalized_query}")
+    };
+    let current = match uri.query() {
+        Some(query) => format!("{}?{query}", uri.path()),
+        None => uri.path().to_owned(),
+    };
+
+    if normalized == current {
+        Ok(None)
+    } else {
+        Ok(Some(normalized))
+    }
+}
+
+fn is_tracking_param(key: &str) -> bool {
+    matches!(
+        key,
+        "utm_source"
+            | "utm_medium"
+            | "utm_campaign"
+            | "utm_term"
+            | "utm_content"
+            | "fbclid"
+            | "gclid"
+            | "msclkid"
+    )
+}
+
+fn is_supported_public_param(key: &str) -> bool {
+    matches!(key, "q" | "ref" | "ref_set" | "kind" | "source" | "page")
 }
 
 pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
@@ -338,7 +448,7 @@ fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
             continue;
         }
 
-        return snapshot_for_request_with_seo_verification(state);
+        return snapshot_for_request(state);
     }
 
     tracing::warn!(
@@ -346,14 +456,11 @@ fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
         "published index generation changed repeatedly during request reconciliation; continuing with current snapshot"
     );
 
-    snapshot_for_request_with_seo_verification(state)
+    snapshot_for_request(state)
 }
 
-fn snapshot_for_request_with_seo_verification(state: &AppState) -> ServedGenerationSnapshot {
-    let snapshot = state.search.snapshot();
-    maintenance::spawn_seo_facts_verification_if_needed(state.search.clone());
-
-    snapshot
+fn snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
+    state.search.snapshot()
 }
 
 struct GenerationChangeContent {
@@ -1100,7 +1207,7 @@ fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoad
     ))
     .write_as_axum_sse_event()));
 
-    (error.status(), Sse::new(stream::iter(events))).into_response()
+    Sse::new(stream::iter(events)).into_response()
 }
 
 fn json_error_response(status: StatusCode, error: &str) -> Response {

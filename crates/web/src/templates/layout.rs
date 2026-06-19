@@ -393,6 +393,10 @@ fn page_index_metadata(
         EntryData::Found(entry) => {
             let document = &entry.document;
 
+            if request_has_entry_context(request) {
+                return noindex_metadata();
+            }
+
             if !entry.annotation.unique_within_kind {
                 return noindex_metadata();
             }
@@ -472,6 +476,18 @@ fn page_index_metadata(
             )
         }
     }
+}
+
+fn request_has_entry_context(request: &PageRequest) -> bool {
+    normalized_query(&request.query).is_some()
+        || request
+            .query
+            .ref_set
+            .as_deref()
+            .and_then(non_empty)
+            .is_some()
+        || request.query.source.is_some()
+        || request.query.page.unwrap_or(1) > 1
 }
 
 fn source_index_metadata(

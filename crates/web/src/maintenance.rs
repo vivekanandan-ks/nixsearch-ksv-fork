@@ -9,8 +9,8 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, all_targets};
-use nixsearch_ops::{cleanup, generate, lock};
-use nixsearch_service::{ReconcileReport, SearchService, SeoFactsVerificationReport};
+use nixsearch_ops::{cleanup, generate, lock, seo};
+use nixsearch_service::{ReconcileReport, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -65,54 +65,6 @@ pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
     });
 }
 
-pub(crate) fn spawn_seo_facts_verification_if_needed(search: SearchService) {
-    if !search.current_seo_facts_can_start_verification() {
-        return;
-    }
-
-    tokio::task::spawn_blocking(move || {
-        log_seo_facts_verification_report(search.verify_current_seo_facts());
-    });
-}
-
-fn log_seo_facts_verification_report(report: SeoFactsVerificationReport) {
-    match report {
-        SeoFactsVerificationReport::AlreadyVerified { generation } => {
-            tracing::debug!(
-                generation = %generation.path,
-                "SEO facts were already verified"
-            );
-        }
-        SeoFactsVerificationReport::AlreadyUnavailable { generation } => {
-            tracing::warn!(
-                generation = %generation.path,
-                "SEO facts are unavailable for served generation"
-            );
-        }
-        SeoFactsVerificationReport::AlreadyVerifying { generation } => {
-            tracing::debug!(
-                generation = %generation.path,
-                "SEO facts verification is already running"
-            );
-        }
-        SeoFactsVerificationReport::Verified { generation } => {
-            tracing::info!(
-                generation = %generation.path,
-                "verified SEO facts for served generation"
-            );
-        }
-        SeoFactsVerificationReport::Invalid { generation, error } => {
-            tracing::warn!(
-                generation = %generation.path,
-                "SEO facts failed deep validation and were marked unavailable: {error}"
-            );
-        }
-        SeoFactsVerificationReport::Superseded => {
-            tracing::debug!("SEO facts verification was superseded by a newer generation");
-        }
-    }
-}
-
 async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Duration) {
     let modes = regeneration_modes(&config);
 
@@ -145,7 +97,6 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
 
         if reloaded {
             run_cleanup_after_reload(&config).await;
-            spawn_seo_facts_verification_if_needed(search.clone());
         }
 
         if !modes.scheduled_enabled && !modes.recovery_enabled {
@@ -210,6 +161,16 @@ async fn handle_invalid_current_generation(
     modes: RegenerationModes,
     interval: Duration,
 ) {
+    let repair = run_seo_sidecar_repair(config).await;
+    match repair {
+        MaintenanceOutcome::Completed => return,
+        MaintenanceOutcome::LockBusy => {
+            sleep_after_regeneration_outcome(repair, interval).await;
+            return;
+        }
+        MaintenanceOutcome::Failed => {}
+    }
+
     match invalid_current_action(modes) {
         InvalidCurrentAction::RecoveryRegeneration => {
             tracing::info!("published index generation is invalid; running recovery regeneration");
@@ -223,6 +184,39 @@ async fn handle_invalid_current_generation(
         }
         InvalidCurrentAction::Retry => {
             tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+        }
+    }
+}
+
+async fn run_seo_sidecar_repair(config: &AppConfig) -> MaintenanceOutcome {
+    let update_lock = match lock::try_acquire_update_lock(&config.data.index_dir) {
+        Ok(Some(update_lock)) => update_lock,
+        Ok(None) => return MaintenanceOutcome::LockBusy,
+        Err(error) => {
+            tracing::error!("failed to acquire maintenance lock for SEO sidecar repair: {error:#}");
+            return MaintenanceOutcome::Failed;
+        }
+    };
+
+    match seo::repair_current_seo_sidecar_under_lock(config, &update_lock) {
+        Ok(
+            seo::SeoSidecarRepairOutcome::AlreadySeoComplete { .. }
+            | seo::SeoSidecarRepairOutcome::Repaired { .. }
+            | seo::SeoSidecarRepairOutcome::SupersededBeforeRepair
+            | seo::SeoSidecarRepairOutcome::SupersededAfterRepair,
+        ) => MaintenanceOutcome::Completed,
+        Ok(seo::SeoSidecarRepairOutcome::MissingCurrent) => MaintenanceOutcome::Failed,
+        Ok(seo::SeoSidecarRepairOutcome::Unrepairable { generation, error }) => {
+            tracing::warn!(generation = %generation.path, "current SEO sidecar is not repairable: {error}");
+            MaintenanceOutcome::Failed
+        }
+        Ok(seo::SeoSidecarRepairOutcome::RepairFailed { generation, error }) => {
+            tracing::warn!(generation = %generation.path, "failed to repair current SEO sidecar: {error}");
+            MaintenanceOutcome::Failed
+        }
+        Err(error) => {
+            tracing::warn!("failed to repair current SEO sidecar: {error:#}");
+            MaintenanceOutcome::Failed
         }
     }
 }

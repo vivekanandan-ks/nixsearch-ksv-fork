@@ -1,9 +1,11 @@
-use axum::http::{HeaderMap, Uri, header};
+use axum::http::{HeaderMap, Uri};
 use url::Url;
 
 use nixsearch_config::app::AppConfig;
 
-use crate::request::{non_empty, public_uri};
+#[cfg(test)]
+use crate::request::non_empty;
+use crate::request::public_uri;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageUrls {
@@ -31,6 +33,10 @@ pub(crate) fn public_uri_for_request(
     headers: &HeaderMap,
     raw_url: &str,
 ) -> std::result::Result<Uri, String> {
+    if raw_url.starts_with("//") {
+        return Err("public URL must not be protocol-relative".to_owned());
+    }
+
     let uri = public_uri(raw_url).map_err(|error| error.to_string())?;
 
     if let Some(url_origin) = absolute_url_origin(raw_url) {
@@ -80,7 +86,8 @@ fn origin_for_request(config: &AppConfig, headers: &HeaderMap) -> String {
         return origin_from_url(base);
     }
 
-    origin_from_headers(headers)
+    let _ = headers;
+    "http://localhost".to_owned()
 }
 
 #[cfg(test)]
@@ -88,6 +95,7 @@ fn page_urls_from_headers(headers: &HeaderMap, path: &str, query: Option<&str>) 
     page_urls_from_origin(origin_from_headers(headers), path, query)
 }
 
+#[cfg(test)]
 fn origin_from_headers(headers: &HeaderMap) -> String {
     let forwarded = forwarded_proto_host(headers);
     let proto = forwarded
@@ -99,7 +107,7 @@ fn origin_from_headers(headers: &HeaderMap) -> String {
         .as_ref()
         .and_then(|(_, host)| host.as_deref())
         .or_else(|| first_header_value(headers, "x-forwarded-host"))
-        .or_else(|| first_header_value(headers, header::HOST.as_str()))
+        .or_else(|| first_header_value(headers, axum::http::header::HOST.as_str()))
         .unwrap_or("localhost");
 
     let origin = format!("{proto}://{host}");
@@ -135,6 +143,7 @@ fn absolute_url_origin(raw_url: &str) -> Option<String> {
     url.host_str().is_some().then(|| origin_from_url(url))
 }
 
+#[cfg(test)]
 fn forwarded_proto_host(headers: &HeaderMap) -> Option<(Option<String>, Option<String>)> {
     let header = first_header_value(headers, "forwarded")?;
     let first = header.split(',').next().unwrap_or(header);
@@ -156,6 +165,7 @@ fn forwarded_proto_host(headers: &HeaderMap) -> Option<(Option<String>, Option<S
     (proto.is_some() || host.is_some()).then_some((proto, host))
 }
 
+#[cfg(test)]
 fn first_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get(name)?
@@ -264,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn page_urls_use_forwarded_headers_when_public_url_is_absent() {
+    fn page_urls_ignore_forwarded_headers_when_public_url_is_absent() {
         let config = AppConfig::default();
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("internal.local"));
@@ -275,7 +285,7 @@ mod tests {
 
         let urls = page_urls(&config, &headers, &Uri::from_static("/fixtures"));
 
-        assert_eq!(urls.current_url, "https://search.example.com/fixtures");
+        assert_eq!(urls.current_url, "http://localhost/fixtures");
     }
 
     #[test]
@@ -344,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn public_uri_for_request_uses_forwarded_origin_without_public_url() {
+    fn public_uri_for_request_rejects_absolute_url_without_public_url() {
         let config = AppConfig::default();
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
@@ -353,9 +363,10 @@ mod tests {
             HeaderValue::from_static("search.example.com"),
         );
 
-        let uri = public_uri_for_request(&config, &headers, "https://search.example.com/fixtures")
-            .unwrap();
+        let error =
+            public_uri_for_request(&config, &headers, "https://search.example.com/fixtures")
+                .unwrap_err();
 
-        assert_eq!(uri.path(), "/fixtures");
+        assert!(error.contains("does not match expected origin"));
     }
 }

@@ -504,7 +504,7 @@ pub(crate) fn validate_public_kind(value: Option<&str>) -> ParseResult<()> {
     }
 }
 
-fn strict_query_pairs(raw_query: &str) -> ParseResult<Vec<(String, String)>> {
+pub(crate) fn strict_query_pairs(raw_query: &str) -> ParseResult<Vec<(String, String)>> {
     if raw_query.is_empty() {
         return Ok(Vec::new());
     }
@@ -518,7 +518,7 @@ fn strict_query_pairs(raw_query: &str) -> ParseResult<Vec<(String, String)>> {
         .collect()
 }
 
-fn strict_decode(value: &str, plus_as_space: bool) -> ParseResult<String> {
+pub(crate) fn strict_decode(value: &str, plus_as_space: bool) -> ParseResult<String> {
     let mut bytes = value.as_bytes().to_vec();
 
     if plus_as_space {

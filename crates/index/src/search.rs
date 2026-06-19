@@ -42,6 +42,12 @@ pub struct SearchResult {
     pub total: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexedSearchDocument {
+    pub document: SearchDocument,
+    pub annotation: SearchHitAnnotation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchScope {
     pub source: String,
@@ -543,6 +549,39 @@ impl SearchIndex {
         Ok(())
     }
 
+    pub fn scan_indexed_documents(&self) -> Result<Vec<IndexedSearchDocument>> {
+        let searcher = self.reader.searcher();
+        let count = searcher
+            .search(&AllQuery, &Count)
+            .context("failed to count indexed documents")?;
+        let mut offset = 0;
+        let mut documents = Vec::with_capacity(count);
+
+        while offset < count {
+            let limit = (count - offset).min(INDEX_DOCUMENT_SCAN_BATCH_SIZE);
+            let top_docs = searcher
+                .search(
+                    &AllQuery,
+                    &TopDocs::with_limit(limit)
+                        .and_offset(offset)
+                        .order_by_score(),
+                )
+                .context("failed to retrieve indexed documents")?;
+
+            if top_docs.is_empty() {
+                bail!("indexed document scan returned no documents before reaching counted total");
+            }
+
+            offset += top_docs.len();
+
+            for (_, address) in top_docs {
+                documents.push(self.indexed_document_at_with_searcher(&searcher, address)?);
+            }
+        }
+
+        Ok(documents)
+    }
+
     fn add_entry_seo_counts_for_kind(
         &self,
         searcher: &Searcher,
@@ -761,6 +800,34 @@ impl SearchIndex {
             document,
         })
     }
+
+    fn indexed_document_at_with_searcher(
+        &self,
+        searcher: &Searcher,
+        address: DocAddress,
+    ) -> Result<IndexedSearchDocument> {
+        let retrieved = tantivy_document_at(searcher, address)?;
+        let document = search_document_from_tantivy_strict(&self.fields, &retrieved)?;
+        let ambiguous_entry_url = stored_single_bool(
+            &retrieved,
+            self.fields.entry_ambiguous_entry_url,
+            "entry_ambiguous_entry_url",
+        )?;
+        let unique_within_kind = stored_single_bool(
+            &retrieved,
+            self.fields.entry_unique_within_kind,
+            "entry_unique_within_kind",
+        )?;
+        validate_stored_identity_fields(&self.fields, &retrieved, &document)?;
+
+        Ok(IndexedSearchDocument {
+            annotation: SearchHitAnnotation {
+                ambiguous_entry_url,
+                unique_within_kind,
+            },
+            document,
+        })
+    }
 }
 
 fn tantivy_document_at(searcher: &Searcher, address: DocAddress) -> Result<TantivyDocument> {
@@ -781,11 +848,85 @@ fn search_document_from_tantivy(
     serde_json::from_str(stored_json).context("failed to deserialize entry document")
 }
 
+fn search_document_from_tantivy_strict(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+) -> Result<SearchDocument> {
+    let stored_json = stored_single_str(retrieved, fields.stored_json, "stored_json")?;
+
+    serde_json::from_str(stored_json).context("failed to deserialize entry document")
+}
+
 fn stored_bool(retrieved: &TantivyDocument, field: Field, name: &'static str) -> Result<bool> {
     retrieved
         .get_first(field)
         .and_then(|value| value.as_bool())
         .with_context(|| format!("entry document did not contain {name}"))
+}
+
+fn stored_single_str<'a>(
+    retrieved: &'a TantivyDocument,
+    field: Field,
+    name: &'static str,
+) -> Result<&'a str> {
+    let values = retrieved.get_all(field).collect::<Vec<_>>();
+    if values.len() != 1 {
+        bail!(
+            "entry document contained {} values for singleton field {name}",
+            values.len()
+        );
+    }
+
+    values[0]
+        .as_str()
+        .with_context(|| format!("entry document singleton field {name} was not a string"))
+}
+
+fn stored_single_bool(
+    retrieved: &TantivyDocument,
+    field: Field,
+    name: &'static str,
+) -> Result<bool> {
+    let values = retrieved.get_all(field).collect::<Vec<_>>();
+    if values.len() != 1 {
+        bail!(
+            "entry document contained {} values for singleton field {name}",
+            values.len()
+        );
+    }
+
+    values[0]
+        .as_bool()
+        .with_context(|| format!("entry document singleton field {name} was not a bool"))
+}
+
+fn validate_stored_identity_fields(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+    document: &SearchDocument,
+) -> Result<()> {
+    let common = document.common();
+    validate_stored_string(retrieved, fields.id, "id", &common.id)?;
+    validate_stored_string(retrieved, fields.source, "source", &common.source)?;
+    validate_stored_string(retrieved, fields.ref_id, "ref", &common.ref_id)?;
+    validate_stored_string(retrieved, fields.kind, "kind", common.kind.as_str())?;
+    validate_stored_string(retrieved, fields.name_exact, "name_exact", &common.name)?;
+
+    Ok(())
+}
+
+fn validate_stored_string(
+    retrieved: &TantivyDocument,
+    field: Field,
+    name: &'static str,
+    expected: &str,
+) -> Result<()> {
+    let actual = stored_single_str(retrieved, field, name)?;
+    if actual != expected {
+        bail!("entry document field {name} mismatch: stored {actual:?}, json {expected:?}");
+    }
+
+    Ok(())
 }
 
 fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query> {

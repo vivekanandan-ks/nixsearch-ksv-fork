@@ -272,9 +272,23 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
             .as_ref()
             .is_some_and(|current| current == &canonical);
 
-        if let Some(manifest) = valid_generation_manifest(&index_store, &canonical) {
+        if is_current
+            && valid_seo_complete_generation(&index_store, &canonical)
+                .map(|manifest| {
+                    current_is_valid = true;
+                    Some(manifest)
+                })
+                .is_some()
+        {
+            continue;
+        }
+
+        if let Some(manifest) = structurally_complete_generation_manifest(&index_store, &canonical)
+        {
             if is_current {
-                current_is_valid = true;
+                report.warnings.push(format!(
+                    "current index generation {canonical} is structurally complete but SEO-degraded; preserving rollback generations"
+                ));
             } else {
                 complete.push(CompleteGeneration {
                     path: canonical,
@@ -330,7 +344,21 @@ fn current_generation_canonical(
     }
 }
 
-fn valid_generation_manifest(
+fn structurally_complete_generation_manifest(
+    index_store: &IndexStore,
+    path: &Utf8Path,
+) -> Option<IndexGenerationManifest> {
+    let manifest = index_store.read_manifest(path).ok()?;
+    index_store
+        .open_structurally_complete_published_generation(&PublishedGeneration {
+            path: path.to_owned(),
+            manifest: manifest.clone(),
+        })
+        .ok()?;
+    Some(manifest)
+}
+
+fn valid_seo_complete_generation(
     index_store: &IndexStore,
     path: &Utf8Path,
 ) -> Option<IndexGenerationManifest> {

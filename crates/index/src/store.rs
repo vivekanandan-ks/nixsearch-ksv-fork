@@ -6,6 +6,10 @@ use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use time::OffsetDateTime;
 
+use crate::generation::{
+    StructurallyCompleteGeneration, open_seo_complete_generation,
+    open_structurally_complete_generation,
+};
 use crate::manifest::{IndexGenerationManifest, validate_generation_id};
 use crate::search::SearchIndex;
 use crate::seo::SeoSidecar;
@@ -474,6 +478,37 @@ impl IndexStore {
         Ok(())
     }
 
+    pub fn write_validated_seo_sidecar_unchecked(
+        &self,
+        generation: &PublishedGeneration,
+        sidecar: &SeoSidecar,
+    ) -> Result<()> {
+        let generation_path = self.validate_generation_path(&generation.path)?;
+        let path = self.seo_sidecar_path(&generation_path);
+
+        validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+        sidecar
+            .validate_for_manifest(&generation.manifest)
+            .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
+
+        let bytes =
+            serde_json::to_vec_pretty(sidecar).context("failed to serialize SEO sidecar")?;
+
+        let temp_path = self.create_temp_file(&generation_path, "seo-facts.json.tmp", &bytes)?;
+
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+
+            return Err(error)
+                .with_context(|| format!("failed to write SEO sidecar {}", path.as_str()));
+        }
+
+        Self::sync_dir(&generation_path)?;
+
+        Ok(())
+    }
+
     pub fn read_seo_sidecar(&self, generation: &PublishedGeneration) -> Result<SeoSidecar> {
         let path = self.seo_sidecar_path(&generation.path);
         let bytes = fs::read(&path)
@@ -493,17 +528,19 @@ impl IndexStore {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<(SearchIndex, SeoSidecar)> {
-        validate_generation_id(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
-        let index = SearchIndex::open(&generation.path)
-            .with_context(|| format!("failed to open search index {}", generation.path))?;
         let sidecar = self.read_seo_sidecar(generation)?;
+        let complete =
+            open_seo_complete_generation(&generation.path, &generation.manifest, sidecar)
+                .context("failed to validate SEO-complete generation")?;
 
-        sidecar
-            .validate_for_index(&generation.manifest, &index)
-            .context("failed to validate SEO sidecar against index")?;
+        Ok((complete.index, complete.sidecar))
+    }
 
-        Ok((index, sidecar))
+    pub fn open_structurally_complete_published_generation(
+        &self,
+        generation: &PublishedGeneration,
+    ) -> Result<StructurallyCompleteGeneration> {
+        open_structurally_complete_generation(&generation.path, &generation.manifest)
     }
 
     pub fn open_valid_leased_generation(

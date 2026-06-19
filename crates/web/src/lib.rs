@@ -10,7 +10,7 @@ use tower_http::trace::TraceLayer;
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
-use nixsearch_ops::{cleanup, generate, lock};
+use nixsearch_ops::{cleanup, generate, lock, seo};
 use nixsearch_service::SearchService;
 
 mod entry;
@@ -39,6 +39,10 @@ struct AppState {
 }
 
 pub async fn serve(config: AppConfig) -> Result<()> {
+    if config.server.public_url.is_none() {
+        bail!("server.public_url is required when serving the web UI");
+    }
+
     ensure_current_generation(&config).await?;
 
     let addr: SocketAddr =
@@ -54,7 +58,6 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     maintenance::spawn(Arc::clone(&config), search.clone());
 
-    let verification_search = search.clone();
     let state = AppState { config, search };
 
     let app = app_router(state).layer(TraceLayer::new_for_http());
@@ -64,7 +67,6 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
 
     tracing::info!("serving nixsearch web UI at http://{addr}");
-    maintenance::spawn_seo_facts_verification_if_needed(verification_search);
 
     axum::serve(listener, app)
         .await
@@ -92,6 +94,20 @@ fn app_router(state: AppState) -> Router {
 
 async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
+
+    if matches!(
+        validated_current_generation(config, &index_store),
+        Ok(CurrentGenerationValidation::Invalid { .. })
+    ) {
+        match repair_current_generation(config).await {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "failed to repair current generation before startup validation: {error:#}"
+                );
+            }
+        }
+    }
 
     match validated_current_generation(config, &index_store) {
         Ok(CurrentGenerationValidation::Valid(current)) => {
@@ -229,6 +245,39 @@ async fn ensure_current_generation(config: &AppConfig) -> Result<PublishedGenera
     }
 }
 
+async fn repair_current_generation(config: &AppConfig) -> Result<()> {
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        let update_lock = lock::acquire_update_lock(&config.data.index_dir)?;
+        match seo::repair_current_seo_sidecar_under_lock(&config, &update_lock)? {
+            seo::SeoSidecarRepairOutcome::AlreadySeoComplete { generation }
+            | seo::SeoSidecarRepairOutcome::Repaired { generation } => {
+                tracing::info!(generation = %generation.path, "current generation is SEO-complete");
+            }
+            seo::SeoSidecarRepairOutcome::MissingCurrent => {
+                tracing::debug!(
+                    "skipped SEO sidecar repair because there is no current generation"
+                );
+            }
+            seo::SeoSidecarRepairOutcome::SupersededBeforeRepair
+            | seo::SeoSidecarRepairOutcome::SupersededAfterRepair => {
+                tracing::info!("skipped SEO sidecar repair because current generation changed");
+            }
+            seo::SeoSidecarRepairOutcome::Unrepairable { generation, error }
+            | seo::SeoSidecarRepairOutcome::RepairFailed { generation, error } => {
+                anyhow::bail!(
+                    "failed to repair SEO sidecar for {}: {error}",
+                    generation.path
+                );
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .context("failed to join SEO sidecar repair task")?
+}
+
 struct ValidatedCurrentGeneration {
     generation: PublishedGeneration,
     missing_targets: BTreeSet<TargetKey>,
@@ -344,7 +393,6 @@ fn log_startup_maintenance_state(config: &AppConfig, generation: &PublishedGener
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
@@ -375,40 +423,10 @@ mod tests {
     const TEST_PUBLIC_ORIGIN: &str = "https://search.example.com";
 
     fn test_app(config: AppConfig) -> Router {
-        verified_test_app_and_search(config).0
-    }
-
-    fn verified_test_app_and_search(config: AppConfig) -> (Router, SearchService) {
-        let config = Arc::new(config);
-        let search = SearchService::open_current(Arc::clone(&config)).unwrap();
-        search.verify_current_seo_facts();
-
-        (
-            app_router(AppState {
-                config,
-                search: search.clone(),
-            }),
-            search,
-        )
-    }
-
-    fn test_app_with_unverified_seo_facts(config: AppConfig) -> Router {
         let config = Arc::new(config);
         let search = SearchService::open_current(Arc::clone(&config)).unwrap();
 
         app_router(AppState { config, search })
-    }
-
-    async fn wait_for_seo_facts_verification_to_be_claimed(search: &SearchService) {
-        for _ in 0..50 {
-            if !search.current_seo_facts_can_start_verification() {
-                return;
-            }
-
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        panic!("SEO facts verification was not claimed");
     }
 
     struct TestResponse {
@@ -482,7 +500,6 @@ mod tests {
     struct ReconciledGenerationFixture {
         _tempdir: TempDir,
         app: Router,
-        search: SearchService,
         old_generation_id: String,
         new_generation_id: String,
     }
@@ -492,7 +509,7 @@ mod tests {
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
         let old_generation_id = current_generation_id(&index_dir);
-        let (app, search) = verified_test_app_and_search(app_config(&index_dir));
+        let app = test_app(app_config(&index_dir));
 
         let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
         publish_documents_with_manifest_targets(
@@ -510,7 +527,6 @@ mod tests {
         ReconciledGenerationFixture {
             _tempdir: tempdir,
             app,
-            search,
             old_generation_id,
             new_generation_id,
         }
@@ -789,7 +805,6 @@ mod tests {
         let fixture = reconciled_generation_fixture();
 
         let (status, body) = request_body(fixture.app, "/").await;
-        wait_for_seo_facts_verification_to_be_claimed(&fixture.search).await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&format!(
@@ -900,7 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sitemap_escapes_request_derived_origin() {
+    async fn sitemap_ignores_request_derived_origin() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
@@ -919,7 +934,8 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
 
-        assert!(body.contains("http://example.com&amp;x=&lt;tag&gt;/"));
+        assert!(body.contains("http://localhost/"));
+        assert!(!body.contains("example.com&amp;x=&lt;tag&gt;"));
         assert!(!body.contains("http://example.com&x=<tag>/"));
     }
 
@@ -1026,28 +1042,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sitemap_with_unverified_seo_facts_renders_home_only() {
+    async fn sitemap_with_verified_seo_facts_renders_candidates_immediately() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
 
-        let app = test_app_with_unverified_seo_facts(app_config_with_public_url(&index_dir));
+        let app = test_app(app_config_with_public_url(&index_dir));
         let body = request_sitemap(app).await;
 
-        assert_sitemap_home_only(&body);
+        assert_sitemap_has_path(&body, "/fixtures");
+        assert_sitemap_has_path(&body, "/fixtures/programs.git.enable");
     }
 
     #[tokio::test]
-    async fn sitemap_with_missing_sidecar_renders_home_only() {
+    async fn sitemap_with_missing_sidecar_is_rejected_by_app_startup() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
         remove_current_seo_sidecar(&index_dir);
 
-        let app = test_app(app_config_with_public_url(&index_dir));
-        let body = request_sitemap(app).await;
-
-        assert_sitemap_home_only(&body);
+        let config = Arc::new(app_config_with_public_url(&index_dir));
+        let error = SearchService::open_current(config).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read SEO sidecar"));
     }
 
     #[tokio::test]
@@ -1118,7 +1134,7 @@ mod tests {
         );
         assert_eq!(
             request_status(app.clone(), "/fixtures/").await,
-            StatusCode::BAD_REQUEST
+            StatusCode::PERMANENT_REDIRECT
         );
         assert_eq!(
             request_status(app, "/?q=git&page=1001").await,
@@ -1490,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_events_missing_entry_returns_404_with_modal_error() {
+    async fn state_events_missing_entry_returns_200_with_modal_error() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
@@ -1503,7 +1519,7 @@ mod tests {
         );
         let (status, body) = request_body(app, &uri).await;
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Entry not found"));
         assert!(body.contains("programs.missing.enable"));
     }
@@ -1535,13 +1551,10 @@ mod tests {
             request_body(app, "/fixtures/programs.git.enable?q=git&source=all").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_has_canonical(
-            &body,
-            "https://search.example.com/fixtures/programs.git.enable",
-        );
+        assert_no_canonical(&body);
         assert_og_url(
             &body,
-            "https://search.example.com/fixtures/programs.git.enable",
+            "https://search.example.com/fixtures/programs.git.enable?q=git&amp;source=all",
         );
         assert!(body.contains(r#"<script id="initial-history-metadata" type="application/json">"#));
         assert!(body.contains(r#""returnHeadMetadata":{"#));
@@ -1581,32 +1594,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unverified_source_default_ref_emits_noindex_without_canonical() {
+    async fn verified_source_default_ref_emits_canonical_immediately() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
-
-        let app = test_app_with_unverified_seo_facts(app_config_with_public_url(&index_dir));
-        let (status, body) = request_body(app, "/fixtures").await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_no_canonical(&body);
-        assert_has_robots(&body);
-    }
-
-    #[tokio::test]
-    async fn source_default_ref_without_sidecar_emits_noindex_without_canonical() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        publish_canonical_options_index(&index_dir);
-        remove_current_seo_sidecar(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let (status, body) = request_body(app, "/fixtures").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_no_canonical(&body);
-        assert_has_robots(&body);
+        assert_has_canonical(&body, "https://search.example.com/fixtures");
+        assert_no_robots(&body);
+    }
+
+    #[tokio::test]
+    async fn source_default_ref_without_sidecar_is_rejected_by_app_startup() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        remove_current_seo_sidecar(&index_dir);
+
+        let config = Arc::new(app_config_with_public_url(&index_dir));
+        let error = SearchService::open_current(config).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read SEO sidecar"));
     }
 
     #[tokio::test]
@@ -1646,21 +1656,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_entry_page_without_sidecar_still_emits_canonical() {
+    async fn direct_entry_page_without_sidecar_is_rejected_by_app_startup() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
         remove_current_seo_sidecar(&index_dir);
 
-        let app = test_app(app_config_with_public_url(&index_dir));
-        let (status, body) = request_body(app, "/fixtures/programs.git.enable").await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_has_canonical(
-            &body,
-            "https://search.example.com/fixtures/programs.git.enable",
-        );
-        assert_no_robots(&body);
+        let config = Arc::new(app_config_with_public_url(&index_dir));
+        let error = SearchService::open_current(config).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read SEO sidecar"));
     }
 
     #[tokio::test]
@@ -1776,11 +1780,8 @@ mod tests {
         assert!(body.contains("for "));
         assert_populated_modal(&body);
         assert_h1_count(&body, 1);
-        assert_has_canonical(
-            &body,
-            "https://search.example.com/fixtures/programs.git.enable",
-        );
-        assert_no_robots(&body);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
     }
 
     #[tokio::test]
@@ -1970,7 +1971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contextual_entry_url_canonicalizes_to_clean_entry_url() {
+    async fn contextual_entry_url_emits_noindex_without_canonical() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_options_index(&index_dir);
@@ -1980,11 +1981,8 @@ mod tests {
             request_body(app, "/fixtures/programs.git.enable?q=git&page=2&source=all").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_has_canonical(
-            &body,
-            "https://search.example.com/fixtures/programs.git.enable",
-        );
-        assert_no_robots(&body);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
     }
 
     #[tokio::test]
@@ -2157,7 +2155,7 @@ mod tests {
         assert_eq!(store.current_path().unwrap(), generation.path);
         let search = SearchService::open_current(Arc::new(config)).unwrap();
         let snapshot = search.snapshot();
-        assert!(search.sitemap_candidates(&snapshot).is_err());
+        assert!(search.sitemap_candidates(&snapshot).is_ok());
     }
 
     #[tokio::test]
@@ -2465,10 +2463,8 @@ mod tests {
         assert!(body.contains("entry-modal"));
         assert!(body.contains("nixsearchApplyModalPatch"));
         assert!(body.contains("nixsearchApplyHeadMetadata"));
-        assert!(body.contains(
-            r#""canonicalUrl":"https://search.example.com/fixtures/programs.git.enable""#
-        ));
-        assert!(body.contains(r#""robots":null"#));
+        assert!(body.contains(r#""canonicalUrl":null"#));
+        assert!(body.contains(r#""robots":"noindex,follow""#));
     }
 
     #[tokio::test]
