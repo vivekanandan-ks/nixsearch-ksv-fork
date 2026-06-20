@@ -1637,6 +1637,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_has_canonical(&body, "https://search.example.com/fixtures");
+        assert_og_url(&body, "https://search.example.com/fixtures");
         assert_no_robots(&body);
     }
 
@@ -1725,6 +1726,10 @@ mod tests {
         assert_h1_count(&body, 1);
         assert_empty_modal_container(&body);
         assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_og_url(
             &body,
             "https://search.example.com/fixtures/programs.git.enable",
         );
@@ -1904,6 +1909,10 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_has_canonical(
+            &body,
+            "https://search.example.com/fixtures/programs.git.enable",
+        );
+        assert_og_url(
             &body,
             "https://search.example.com/fixtures/programs.git.enable",
         );

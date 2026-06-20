@@ -290,7 +290,7 @@ pub(crate) fn noindex_head_metadata(
     PageMetadata {
         title: title.to_owned(),
         description: description.to_owned(),
-        open_graph: open_graph_metadata(page_urls),
+        open_graph: open_graph_metadata(page_urls, None),
         canonical_url: None,
         robots: Some(ROBOTS_NOINDEX_FOLLOW),
     }
@@ -358,18 +358,23 @@ fn page_metadata(
     page_urls: &PageUrls,
     index_metadata: IndexMetadata,
 ) -> PageMetadata {
+    let canonical_url = index_metadata.canonical_url;
+
     PageMetadata {
         title: title_for_entry(config, request, source_filter, entry.document()),
         description: description_for(config, request, source_filter, search_result, entry),
-        open_graph: open_graph_metadata(page_urls),
-        canonical_url: index_metadata.canonical_url,
+        open_graph: open_graph_metadata(page_urls, canonical_url.as_deref()),
+        canonical_url,
         robots: index_metadata.robots,
     }
 }
 
-fn open_graph_metadata(page_urls: &PageUrls) -> Option<OpenGraphMetadata> {
+fn open_graph_metadata(
+    page_urls: &PageUrls,
+    canonical_url: Option<&str>,
+) -> Option<OpenGraphMetadata> {
     page_urls.public_seo_enabled.then(|| OpenGraphMetadata {
-        url: page_urls.current_url.clone(),
+        url: canonical_url.unwrap_or(&page_urls.current_url).to_owned(),
         image_url: page_urls.image_url.clone(),
     })
 }
