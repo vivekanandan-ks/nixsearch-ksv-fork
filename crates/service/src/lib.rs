@@ -570,11 +570,11 @@ impl SearchService {
         source_id: &str,
         ref_id: &str,
     ) -> bool {
-        snapshot
-            .manifest()
-            .targets
-            .iter()
-            .any(|target| target.source == source_id && target.ref_id == ref_id)
+        snapshot.manifest().targets.iter().any(|target| {
+            target.source == source_id
+                && target.ref_id == ref_id
+                && target.artifact_kind.indexes_search_documents()
+        })
     }
 
     pub fn document_ref_allowed_for_seo(
@@ -898,11 +898,12 @@ fn non_empty(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{fs, path::PathBuf, sync::Arc};
 
     use tempfile::tempdir;
 
     use nixsearch_config::app::AppConfig;
+    use nixsearch_config::producer::ProducerConfig;
     use nixsearch_config::source::SourceKind;
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::{DocumentKind, SearchDocument};
@@ -945,6 +946,52 @@ mod tests {
             .into_iter()
             .map(|candidate| (candidate.source, candidate.name, candidate.kind))
             .collect()
+    }
+
+    fn flake_info_only_config(index_dir: &camino::Utf8Path) -> AppConfig {
+        let mut config = app_config(index_dir);
+        config
+            .sources
+            .get_mut(SOURCE_FIXTURES)
+            .expect("fixture source exists")
+            .refs[0]
+            .producer = ProducerConfig::ExistingFile {
+            path: PathBuf::from("unused.json"),
+            artifact: ArtifactKind::FlakeInfoJson,
+        };
+
+        config
+    }
+
+    fn multi_ref_flake_info_only_config(index_dir: &camino::Utf8Path) -> AppConfig {
+        let mut config = multi_ref_app_config(index_dir);
+        for ref_config in &mut config
+            .sources
+            .get_mut(SOURCE_FIXTURES)
+            .expect("fixture source exists")
+            .refs
+        {
+            ref_config.producer = ProducerConfig::ExistingFile {
+                path: PathBuf::from("unused.json"),
+                artifact: ArtifactKind::FlakeInfoJson,
+            };
+        }
+
+        config
+    }
+
+    fn publish_flake_info_only_index(index_dir: &camino::Utf8Path) {
+        publish_documents_with_manifest_targets(
+            index_dir,
+            time::OffsetDateTime::now_utc(),
+            Vec::new(),
+            vec![index_target(
+                SOURCE_FIXTURES,
+                REF_SMALL,
+                ArtifactKind::FlakeInfoJson,
+                0,
+            )],
+        );
     }
 
     fn assert_document_ref_allowed_for_seo(
@@ -1035,6 +1082,79 @@ mod tests {
             .unwrap();
 
         assert!(matches!(result, EntryLookupResult::Found(_)));
+    }
+
+    #[test]
+    fn explicit_search_rejects_flake_info_only_ref_as_unserved() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_flake_info_only_index(&index_dir);
+
+        let config = Arc::new(flake_info_only_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let error = service
+            .search_current(SearchRequest {
+                query: "git".to_owned(),
+                source: Some(SOURCE_FIXTURES.to_owned()),
+                ref_id: Some(REF_SMALL.to_owned()),
+                limit: 10,
+                ..SearchRequest::default()
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
+                if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
+    }
+
+    #[test]
+    fn entry_lookup_rejects_flake_info_only_ref_as_unserved() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_flake_info_only_index(&index_dir);
+
+        let config = Arc::new(flake_info_only_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let error = service
+            .find_entry_current(EntryRequest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: Some(REF_SMALL.to_owned()),
+                name: "programs.git.enable".to_owned(),
+                kind: Some(DocumentKind::Option),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
+                if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
+    }
+
+    #[test]
+    fn flake_info_only_refs_do_not_provide_default_or_ref_set_search_scopes() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_flake_info_only_index(&index_dir);
+
+        let config = Arc::new(multi_ref_flake_info_only_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        for error in [
+            service.search_scopes(None, None, None).unwrap_err(),
+            service
+                .search_scopes(None, None, Some("single"))
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                RequestResolutionError::NoServedSearchScopes
+            ));
+        }
     }
 
     #[test]

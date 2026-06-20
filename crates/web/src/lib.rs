@@ -9,7 +9,7 @@ use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
-use nixsearch_ops::targets::{TargetKey, default_search_target_keys};
+use nixsearch_ops::targets::{TargetKey, default_indexed_search_target_keys};
 use nixsearch_ops::{cleanup, generate, lock, seo};
 use nixsearch_service::SearchService;
 
@@ -326,7 +326,7 @@ fn generation_serves_default_scope(
     config: &AppConfig,
     generation: &PublishedGeneration,
 ) -> Result<bool> {
-    let default_targets = default_search_target_keys(config)?;
+    let default_targets = default_indexed_search_target_keys(config)?;
 
     if default_targets.is_empty() {
         return Ok(false);
@@ -343,7 +343,7 @@ fn generation_serves_default_scope(
 fn format_target_keys<'a>(targets: impl IntoIterator<Item = &'a TargetKey>) -> String {
     targets
         .into_iter()
-        .map(|target| format!("{}/{}", target.source, target.ref_id))
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }

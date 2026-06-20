@@ -19,7 +19,8 @@ use crate::consume::consume_target;
 use crate::produce::{artifact_store_from_config, produce_target, produced_from_existing_artifact};
 use crate::spool::DocumentSpool;
 use crate::targets::{
-    TargetKey, TargetRef, all_targets, default_search_target_keys, latest_artifact_ref_for_target,
+    TargetKey, TargetRef, all_targets, default_indexed_search_target_keys,
+    latest_artifact_ref_for_target,
 };
 
 #[derive(Debug, Clone)]
@@ -176,10 +177,10 @@ async fn build_and_publish_generation_with_policy(
             }
 
             if let Some(required_success_targets) = required_success_targets
-                && (required_success_targets.is_empty()
-                    || !successful_targets
-                        .iter()
-                        .any(|target| required_success_targets.contains(target)))
+                && !required_success_targets.is_empty()
+                && !successful_targets
+                    .iter()
+                    .any(|target| required_success_targets.contains(target))
             {
                 bail!("bootstrap generation produced no default search targets");
             }
@@ -390,7 +391,7 @@ pub async fn bootstrap_all_tolerant(config: &AppConfig) -> Result<GenerationBuil
     }
 
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
-    let required_success_targets = default_search_target_keys(config)?;
+    let required_success_targets = default_indexed_search_target_keys(config)?;
 
     build_and_publish_generation_with_policy(
         &index_store,
@@ -552,6 +553,29 @@ mod tests {
         .await
     }
 
+    async fn build_tolerant_with_empty_required_success_targets(
+        index_store: &IndexStore,
+        artifact_store: &ArtifactStore,
+        target: TargetRef,
+    ) -> Result<GenerationBuildResult> {
+        let refresh_keys = BTreeSet::from([TargetKey::from(&target)]);
+        let required_success_targets = BTreeSet::new();
+        let producer = MockProducer {
+            behavior: MockBehavior::Matching,
+        };
+
+        build_and_publish_generation_with_policy(
+            index_store,
+            artifact_store,
+            vec![target],
+            &refresh_keys,
+            GenerationFailurePolicy::TolerateBootstrapNixFailures,
+            Some(&required_success_targets),
+            &producer,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn generation_publishes_flake_info_artifact_target_with_zero_documents() {
         let tempdir = tempdir().unwrap();
@@ -591,6 +615,25 @@ mod tests {
         let leased = index_store.current_leased_generation().unwrap();
         let (_index, leased_sidecar) = index_store.open_valid_leased_generation(&leased).unwrap();
         assert_eq!(leased_sidecar, sidecar);
+    }
+
+    #[tokio::test]
+    async fn tolerant_bootstrap_allows_artifact_only_targets_without_default_search_targets() {
+        let tempdir = tempdir().unwrap();
+        let (index_store, artifact_store) = stores(&tempdir);
+        let target = flake_info_target();
+
+        let result = build_tolerant_with_empty_required_success_targets(
+            &index_store,
+            &artifact_store,
+            target,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.successful_targets.len(), 1);
+        assert!(result.failed_refresh_targets.is_empty());
+        assert!(result.skipped_targets.is_empty());
     }
 
     #[tokio::test]

@@ -476,22 +476,25 @@ pub(crate) fn clamp_duration(value: Duration, min: Duration, max: Duration) -> D
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::time::Duration;
+    use std::{fs, path::PathBuf};
 
+    use nixsearch_config::producer::ProducerConfig;
+    use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_index::search::SearchIndex;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         publish_canonical_index, publish_canonical_index_with_generated_at,
     };
+    use nixsearch_ops::targets::TargetKey;
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES, app_config, utf8_path_buf};
     use tempfile::tempdir;
     use time::Duration as TimeDuration;
 
     use super::{
         InvalidCurrentAction, MaintenanceOutcome, RegenerationModes, clamp_duration,
-        current_generation_needs_regeneration, duration_until, invalid_current_action, next_due,
-        regeneration_modes, run_recovery_regeneration,
+        current_generation_needs_regeneration, duration_until, invalid_current_action,
+        missing_configured_targets, next_due, regeneration_modes, run_recovery_regeneration,
     };
 
     #[test]
@@ -807,5 +810,36 @@ mod tests {
         .unwrap();
 
         assert!(needs_regeneration);
+    }
+
+    #[test]
+    fn missing_configured_targets_reports_source_ref_with_stale_artifact_kind() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let manifest = store.current_manifest().unwrap();
+        let mut config = app_config(&index_dir);
+        let ref_config = &mut config
+            .sources
+            .get_mut(SOURCE_FIXTURES)
+            .expect("fixture source exists")
+            .refs[0];
+        ref_config.producer = ProducerConfig::ExistingFile {
+            path: PathBuf::from("unused.json"),
+            artifact: ArtifactKind::FlakeInfoJson,
+        };
+
+        let missing = missing_configured_targets(&config, &manifest);
+
+        assert_eq!(
+            missing,
+            [TargetKey::new(
+                SOURCE_FIXTURES,
+                REF_SMALL,
+                ArtifactKind::FlakeInfoJson
+            )]
+            .into()
+        );
     }
 }
