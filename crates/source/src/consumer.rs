@@ -104,6 +104,35 @@ impl Consumer for PackagesJsonConsumer {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct FlakeInfoJsonConsumer;
+
+#[async_trait]
+impl Consumer for FlakeInfoJsonConsumer {
+    async fn consume(
+        &self,
+        store: &ArtifactStore,
+        artifact: &ProducedArtifact,
+    ) -> Result<Vec<SearchDocument>> {
+        if artifact.artifact_ref.kind != ArtifactKind::FlakeInfoJson {
+            anyhow::bail!(
+                "FlakeInfoJsonConsumer cannot consume artifact kind {:?}",
+                artifact.artifact_ref.kind
+            );
+        }
+
+        let bytes = store
+            .get_artifact(&artifact.artifact_ref)
+            .await
+            .context("failed to read flake-info artifact")?;
+
+        serde_json::from_slice::<serde_json::Value>(bytes.as_ref())
+            .context("failed to parse flake-info artifact as JSON")?;
+
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

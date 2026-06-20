@@ -22,6 +22,7 @@ nixsearch-source.workspace = true
 nixsearch-store.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
 nixsearch-index-test-support.workspace = true
 nixsearch-test-support.workspace = true
 tempfile.workspace = true

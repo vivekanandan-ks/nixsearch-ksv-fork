@@ -7,7 +7,6 @@ use nixsearch_config::producer::{
     DownloadCompression as ConfigDownloadCompression, EvalModuleConfig, EvalModuleRefConfig,
     ProducerConfig,
 };
-use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_source::artifact::{ProduceRequest, ProducedArtifact};
 use nixsearch_source::producers::{
     ChannelOptionsJsonProducer, ChannelPackagesJsonProducer,
@@ -15,9 +14,9 @@ use nixsearch_source::producers::{
     EvalModulesProducer, ExistingFileProducer, FlakeFileProducer, NixBuildOptionsJsonProducer,
     Producer,
 };
-use nixsearch_store::{ArtifactRef, ArtifactStore};
+use nixsearch_store::ArtifactStore;
 
-use crate::targets::TargetRef;
+use crate::targets::{TargetRef, latest_artifact_ref_for_target};
 
 pub async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<ProducedArtifact> {
     let request = ProduceRequest {
@@ -167,28 +166,6 @@ pub async fn produced_from_existing_artifact(
         artifact_ref,
         metadata,
     })
-}
-
-pub fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
-    ArtifactRef::latest(
-        target.source_id.clone(),
-        target.ref_config.id.clone(),
-        artifact_kind_for_producer(&target.ref_config.producer),
-    )
-}
-
-pub fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
-    match producer {
-        ProducerConfig::ExistingFile { artifact, .. } => *artifact,
-        ProducerConfig::ChannelPackagesJson { .. } => ArtifactKind::PackagesJson,
-        ProducerConfig::ChannelOptionsJson { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::NixBuildOptionsJson { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::EvalModules { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::Download { artifact, .. } => *artifact,
-        ProducerConfig::CustomCommand { artifact, .. } => *artifact,
-        ProducerConfig::FlakeFile { artifact, .. } => *artifact,
-        ProducerConfig::FlakeInfo { .. } => ArtifactKind::FlakeInfoJson,
-    }
 }
 
 fn source_download_compression(

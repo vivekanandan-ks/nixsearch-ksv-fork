@@ -3,9 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_config::producer::ProducerConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_index::manifest::IndexTargetManifest;
 use nixsearch_index::store::IndexStore;
+use nixsearch_store::ArtifactRef;
 
 #[derive(Debug, Clone)]
 pub struct TargetRef {
@@ -39,6 +42,28 @@ impl From<&TargetRef> for TargetKey {
 impl From<&IndexTargetManifest> for TargetKey {
     fn from(target: &IndexTargetManifest) -> Self {
         Self::new(target.source.clone(), target.ref_id.clone())
+    }
+}
+
+pub fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
+    ArtifactRef::latest(
+        target.source_id.clone(),
+        target.ref_config.id.clone(),
+        artifact_kind_for_producer(&target.ref_config.producer),
+    )
+}
+
+pub fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
+    match producer {
+        ProducerConfig::ExistingFile { artifact, .. } => *artifact,
+        ProducerConfig::ChannelPackagesJson { .. } => ArtifactKind::PackagesJson,
+        ProducerConfig::ChannelOptionsJson { .. } => ArtifactKind::OptionsJson,
+        ProducerConfig::NixBuildOptionsJson { .. } => ArtifactKind::OptionsJson,
+        ProducerConfig::EvalModules { .. } => ArtifactKind::OptionsJson,
+        ProducerConfig::Download { artifact, .. } => *artifact,
+        ProducerConfig::CustomCommand { artifact, .. } => *artifact,
+        ProducerConfig::FlakeFile { artifact, .. } => *artifact,
+        ProducerConfig::FlakeInfo { .. } => ArtifactKind::FlakeInfoJson,
     }
 }
 

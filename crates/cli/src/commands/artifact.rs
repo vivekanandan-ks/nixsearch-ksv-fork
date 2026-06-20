@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, bail};
 
 use nixsearch_ops::lock::acquire_update_lock;
-use nixsearch_ops::produce::{
-    artifact_store_from_config, latest_artifact_ref_for_target, produce_target,
-};
-use nixsearch_ops::targets::select_targets;
+use nixsearch_ops::produce::{artifact_store_from_config, produce_target};
+use nixsearch_ops::targets::{latest_artifact_ref_for_target, select_targets};
 
 use crate::args::SelectionArgs;
 use crate::output::{print_artifact_metadata, print_produced_artifact};

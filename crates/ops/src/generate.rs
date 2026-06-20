@@ -18,7 +18,9 @@ use nixsearch_store::{ArtifactStore, StoreError};
 use crate::consume::consume_target;
 use crate::produce::{artifact_store_from_config, produce_target, produced_from_existing_artifact};
 use crate::spool::DocumentSpool;
-use crate::targets::{TargetKey, TargetRef, all_targets, default_search_target_keys};
+use crate::targets::{
+    TargetKey, TargetRef, all_targets, default_search_target_keys, latest_artifact_ref_for_target,
+};
 
 #[derive(Debug, Clone)]
 pub struct GenerationBuildResult {
@@ -138,6 +140,8 @@ async fn build_and_publish_generation_with_policy(
                 TargetProduceOutcome::Skipped => continue,
             };
 
+            validate_produced_artifact_identity(&target, &produced)?;
+
             let documents = consume_target(artifact_store, &target, &produced).await?;
 
             for document in &documents {
@@ -234,6 +238,42 @@ async fn build_and_publish_generation_with_policy(
     }
 
     result
+}
+
+fn validate_produced_artifact_identity(
+    target: &TargetRef,
+    produced: &ProducedArtifact,
+) -> Result<()> {
+    let expected_ref = latest_artifact_ref_for_target(target);
+
+    if produced.artifact_ref != expected_ref {
+        bail!(
+            "produced artifact ref mismatch for {}/{}: expected {:?}, got {:?}",
+            target.source_id,
+            target.ref_config.id,
+            expected_ref,
+            produced.artifact_ref
+        );
+    }
+
+    if produced.metadata.source != target.source_id
+        || produced.metadata.ref_id != target.ref_config.id
+        || produced.metadata.kind != expected_ref.kind
+    {
+        bail!(
+            "produced artifact metadata mismatch for {}/{}: expected source={:?} ref_id={:?} kind={:?}, got source={:?} ref_id={:?} kind={:?}",
+            target.source_id,
+            target.ref_config.id,
+            target.source_id,
+            target.ref_config.id,
+            expected_ref.kind,
+            produced.metadata.source,
+            produced.metadata.ref_id,
+            produced.metadata.kind
+        );
+    }
+
+    Ok(())
 }
 
 async fn produce_target_with_policy(
@@ -376,4 +416,218 @@ pub async fn regenerate_all(config: &AppConfig) -> Result<Utf8PathBuf> {
 
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
     build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use bytes::Bytes;
+    use camino::Utf8PathBuf;
+    use tempfile::{TempDir, tempdir};
+
+    use nixsearch_config::source::{RefConfig, SourceKind};
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_store::{ArtifactMetadataInput, ArtifactRef};
+
+    use super::*;
+
+    const SOURCE: &str = "apps";
+    const REF: &str = "unstable";
+
+    #[derive(Debug, Clone, Copy)]
+    enum MockBehavior {
+        Matching,
+        MismatchedArtifactRef,
+        MismatchedMetadata,
+    }
+
+    struct MockProducer {
+        behavior: MockBehavior,
+    }
+
+    #[async_trait]
+    impl TargetProducer for MockProducer {
+        async fn produce(
+            &self,
+            store: &ArtifactStore,
+            target: &TargetRef,
+        ) -> Result<ProducedArtifact> {
+            match self.behavior {
+                MockBehavior::Matching => write_flake_info_artifact(store, target).await,
+                MockBehavior::MismatchedArtifactRef => {
+                    let artifact_ref = ArtifactRef::revision(
+                        target.source_id.clone(),
+                        target.ref_config.id.clone(),
+                        ArtifactKind::FlakeInfoJson,
+                        "wrong-revision",
+                    );
+                    let metadata = store
+                        .put_artifact(
+                            &artifact_ref,
+                            Bytes::from_static(br#"{}"#),
+                            ArtifactMetadataInput::new("test-producer"),
+                        )
+                        .await?;
+
+                    Ok(ProducedArtifact {
+                        artifact_ref,
+                        metadata,
+                    })
+                }
+                MockBehavior::MismatchedMetadata => {
+                    let mut produced = write_flake_info_artifact(store, target).await?;
+                    produced.metadata.kind = ArtifactKind::PackagesJson;
+
+                    Ok(produced)
+                }
+            }
+        }
+    }
+
+    async fn write_flake_info_artifact(
+        store: &ArtifactStore,
+        target: &TargetRef,
+    ) -> Result<ProducedArtifact> {
+        let artifact_ref = latest_artifact_ref_for_target(target);
+        let metadata = store
+            .put_artifact(
+                &artifact_ref,
+                Bytes::from_static(br#"{}"#),
+                ArtifactMetadataInput::new("test-producer"),
+            )
+            .await?;
+
+        Ok(ProducedArtifact {
+            artifact_ref,
+            metadata,
+        })
+    }
+
+    fn flake_info_target() -> TargetRef {
+        TargetRef {
+            source_id: SOURCE.to_owned(),
+            source_kind: SourceKind::Apps,
+            strip_prefixes: Vec::new(),
+            ref_config: RefConfig {
+                id: REF.to_owned(),
+                producer: ProducerConfig::ExistingFile {
+                    path: PathBuf::from("unused.json"),
+                    artifact: ArtifactKind::FlakeInfoJson,
+                },
+                source_links: None,
+            },
+        }
+    }
+
+    fn utf8_path(path: PathBuf) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(path).expect("test path must be valid UTF-8")
+    }
+
+    fn stores(tempdir: &TempDir) -> (IndexStore, ArtifactStore) {
+        let index_store = IndexStore::new(utf8_path(tempdir.path().join("index")));
+        let artifact_store = ArtifactStore::local(tempdir.path().join("artifacts")).unwrap();
+
+        (index_store, artifact_store)
+    }
+
+    async fn build_with_mock(
+        index_store: &IndexStore,
+        artifact_store: &ArtifactStore,
+        target: TargetRef,
+        behavior: MockBehavior,
+    ) -> Result<GenerationBuildResult> {
+        let refresh_keys = BTreeSet::from([TargetKey::from(&target)]);
+        let producer = MockProducer { behavior };
+
+        build_and_publish_generation_with_policy(
+            index_store,
+            artifact_store,
+            vec![target],
+            &refresh_keys,
+            GenerationFailurePolicy::Strict,
+            None,
+            &producer,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn generation_publishes_flake_info_artifact_target_with_zero_documents() {
+        let tempdir = tempdir().unwrap();
+        let (index_store, artifact_store) = stores(&tempdir);
+        let target = flake_info_target();
+
+        let result = build_with_mock(
+            &index_store,
+            &artifact_store,
+            target,
+            MockBehavior::Matching,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(index_store.current_path().unwrap(), result.path);
+
+        let manifest = index_store.read_manifest(&result.path).unwrap();
+        assert_eq!(manifest.document_count, 0);
+        assert_eq!(manifest.targets.len(), 1);
+
+        let manifest_target = &manifest.targets[0];
+        assert_eq!(manifest_target.source, SOURCE);
+        assert_eq!(manifest_target.ref_id, REF);
+        assert_eq!(manifest_target.artifact_kind, ArtifactKind::FlakeInfoJson);
+        assert_eq!(manifest_target.document_count, 0);
+
+        let published_generation = PublishedGeneration {
+            path: result.path,
+            manifest: manifest.clone(),
+        };
+        let sidecar = index_store.read_seo_sidecar(&published_generation).unwrap();
+        sidecar.validate_for_manifest(&manifest).unwrap();
+        assert!(sidecar.refs.is_empty());
+        assert!(sidecar.entries.is_empty());
+
+        let leased = index_store.current_leased_generation().unwrap();
+        let (_index, leased_sidecar) = index_store.open_valid_leased_generation(&leased).unwrap();
+        assert_eq!(leased_sidecar, sidecar);
+    }
+
+    #[tokio::test]
+    async fn generation_rejects_mismatched_produced_artifact_ref_before_publish() {
+        let tempdir = tempdir().unwrap();
+        let (index_store, artifact_store) = stores(&tempdir);
+        let target = flake_info_target();
+
+        let error = build_with_mock(
+            &index_store,
+            &artifact_store,
+            target,
+            MockBehavior::MismatchedArtifactRef,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("produced artifact ref mismatch"));
+        assert!(index_store.try_current_manifest().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn generation_rejects_mismatched_produced_metadata_before_publish() {
+        let tempdir = tempdir().unwrap();
+        let (index_store, artifact_store) = stores(&tempdir);
+        let target = flake_info_target();
+
+        let error = build_with_mock(
+            &index_store,
+            &artifact_store,
+            target,
+            MockBehavior::MismatchedMetadata,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("produced artifact metadata mismatch"));
+        assert!(index_store.try_current_manifest().unwrap().is_none());
+    }
 }
