@@ -43,9 +43,9 @@ pub(super) fn inspect(args: ConfigArgs) -> Result<()> {
 
     let generation = index_store.current_leased_generation()?;
     let validation = if config.public_seo_enabled() {
-        SearchService::validate_leased_generation_for_public_seo(&config, &generation)
+        SearchService::validate_leased_generation_seo_complete(&config, &generation)
     } else {
-        SearchService::validate_leased_generation_for_serve(&config, &generation)
+        SearchService::validate_leased_generation_structural(&config, &generation)
     };
     let manifest = generation.manifest();
 

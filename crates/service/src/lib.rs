@@ -228,7 +228,7 @@ impl SearchService {
         })
     }
 
-    pub fn validate_leased_generation_for_serve(
+    pub fn validate_leased_generation_structural(
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
@@ -239,7 +239,7 @@ impl SearchService {
             .map(|_| ())
     }
 
-    pub fn validate_leased_generation_for_public_seo(
+    pub fn validate_leased_generation_seo_complete(
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
@@ -247,20 +247,6 @@ impl SearchService {
         index_store
             .validate_leased_generation(generation)
             .context("failed to validate SEO-complete generation")
-    }
-
-    pub fn validate_leased_generation_seo_facts(
-        config: &AppConfig,
-        generation: &LeasedPublishedGeneration,
-    ) -> Result<()> {
-        let index_store = IndexStore::new(&config.data.index_dir);
-        let index = SearchIndex::open(generation.path())
-            .with_context(|| format!("failed to open search index {}", generation.path()))?;
-        let sidecar = index_store.read_seo_sidecar(generation.published_generation())?;
-
-        sidecar
-            .validate_for_index(generation.manifest(), &index)
-            .context("failed to validate SEO sidecar against index")
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -940,7 +926,8 @@ mod tests {
     };
     use nixsearch_test_support::{
         REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
-        ingest_context_for, multi_ref_app_config, option_doc_for, package_doc_for, utf8_path_buf,
+        app_config_with_public_url, ingest_context_for, multi_ref_app_config,
+        multi_ref_app_config_with_public_url, option_doc_for, package_doc_for, utf8_path_buf,
     };
     use time::Duration as TimeDuration;
 
@@ -982,18 +969,6 @@ mod tests {
         let mut config = multi_ref_app_config(index_dir);
         set_fixture_refs_artifact_kind(&mut config, ArtifactKind::FlakeInfoJson);
 
-        config
-    }
-
-    fn app_config_with_public_url(index_dir: &camino::Utf8Path) -> AppConfig {
-        let mut config = app_config(index_dir);
-        config.server.public_url = Some("https://search.example.com".to_owned());
-        config
-    }
-
-    fn multi_ref_app_config_with_public_url(index_dir: &camino::Utf8Path) -> AppConfig {
-        let mut config = multi_ref_app_config(index_dir);
-        config.server.public_url = Some("https://search.example.com".to_owned());
         config
     }
 
@@ -1394,9 +1369,9 @@ mod tests {
 
         let leased = leased_generation(&index_dir, generation.path, manifest);
         let error =
-            SearchService::validate_leased_generation_seo_facts(&config, &leased).unwrap_err();
+            SearchService::validate_leased_generation_seo_complete(&config, &leased).unwrap_err();
 
-        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
+        assert!(format!("{error:#}").contains("SEO sidecar facts do not match indexed documents"));
     }
 
     #[test]
@@ -2150,9 +2125,9 @@ mod tests {
             next_generation.manifest.clone(),
         );
         let error =
-            SearchService::validate_leased_generation_seo_facts(&config, &leased).unwrap_err();
+            SearchService::validate_leased_generation_seo_complete(&config, &leased).unwrap_err();
 
-        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
+        assert!(format!("{error:#}").contains("SEO sidecar facts do not match indexed documents"));
     }
 
     #[test]

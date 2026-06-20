@@ -284,7 +284,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
         Ok(uri) => uri,
         Err(error) => {
             let page_urls = page_urls(&state.config, &headers, &Uri::from_static("/"));
-            return sse_error_response(&page_urls, &error, None);
+            return sse_error_response(state.config.public_seo_enabled(), &page_urls, &error, None);
         }
     };
     let target_public_url = public_path_and_query(&target_uri);
@@ -304,14 +304,24 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let request = match page_request_from_public_uri(&target_uri) {
         Ok(request) => request,
         Err(error) => {
-            return sse_error_response(&page_urls, &error.to_string(), Some(&target_public_url));
+            return sse_error_response(
+                state.config.public_seo_enabled(),
+                &page_urls,
+                &error.to_string(),
+                Some(&target_public_url),
+            );
         }
     };
 
     let page_state = match resolve_page_state(&state, &snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
-            return sse_error_response(&page_urls, &error.to_string(), Some(&target_public_url));
+            return sse_error_response(
+                state.config.public_seo_enabled(),
+                &page_urls,
+                &error.to_string(),
+                Some(&target_public_url),
+            );
         }
     };
 
@@ -330,7 +340,12 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
         let offset = match search_offset(&request) {
             Ok(offset) => offset,
             Err(error) => {
-                return sse_error_response(&page_urls, &error, Some(&target_public_url));
+                return sse_error_response(
+                    state.config.public_seo_enabled(),
+                    &page_urls,
+                    &error,
+                    Some(&target_public_url),
+                );
             }
         };
 
@@ -346,7 +361,12 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     };
 
     if let Some(Err(ServiceError::Resolution(error))) = &search_result {
-        return sse_error_response(&page_urls, &error.to_string(), Some(&target_public_url));
+        return sse_error_response(
+            state.config.public_seo_enabled(),
+            &page_urls,
+            &error.to_string(),
+            Some(&target_public_url),
+        );
     }
 
     let search_error = search_error_message(&search_result);
@@ -502,7 +522,7 @@ fn generation_change_response(
 ) -> Response {
     let content = match generation_change_content(state, target_uri, page_urls, snapshot) {
         Ok(content) => content,
-        Err(error) => generation_change_error_content(page_urls, error),
+        Err(error) => generation_change_error_content(state, page_urls, error),
     };
 
     generation_change_events_response(snapshot, content, target_public_url)
@@ -600,6 +620,7 @@ fn render_navigation_results_html(
 }
 
 fn generation_change_error_content(
+    state: &AppState,
     page_urls: &PageUrls,
     error: GenerationChangeError,
 ) -> GenerationChangeContent {
@@ -607,7 +628,12 @@ fn generation_change_error_content(
     let results_html =
         templates::results::render_status_error("Request failed", &message).into_string();
     let modal_html = templates::modal::render_empty_container().into_string();
-    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", &message);
+    let metadata = templates::layout::noindex_head_metadata(
+        state.config.public_seo_enabled(),
+        page_urls,
+        "Request failed",
+        &message,
+    );
 
     GenerationChangeContent {
         results_html,
@@ -1035,7 +1061,6 @@ fn initial_return_metadata(
         current_url: page_urls.absolute_url(&close_path),
         image_url: page_urls.image_url.clone(),
         origin: page_urls.origin.clone(),
-        public_seo_enabled: page_urls.public_seo_enabled,
     };
 
     let metadata = templates::layout::page_head_metadata(
@@ -1134,12 +1159,18 @@ fn status_for_resolution_error(error: &RequestResolutionError) -> StatusCode {
 }
 
 fn sse_error_response(
+    public_seo_enabled: bool,
     page_urls: &PageUrls,
     error: &str,
     target_public_url: Option<&str>,
 ) -> Response {
     let html = templates::results::render_status_error("Request failed", error).into_string();
-    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", error);
+    let metadata = templates::layout::noindex_head_metadata(
+        public_seo_enabled,
+        page_urls,
+        "Request failed",
+        error,
+    );
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 

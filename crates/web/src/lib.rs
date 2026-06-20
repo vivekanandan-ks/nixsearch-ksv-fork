@@ -302,7 +302,7 @@ fn validated_current_generation(
     };
     let published = generation.to_published_generation();
 
-    if let Err(error) = SearchService::validate_leased_generation_for_serve(config, &generation) {
+    if let Err(error) = SearchService::validate_leased_generation_structural(config, &generation) {
         return Ok(CurrentGenerationValidation::Invalid {
             generation: published,
             error,
@@ -311,7 +311,7 @@ fn validated_current_generation(
 
     if config.public_seo_enabled()
         && let Err(error) =
-            SearchService::validate_leased_generation_for_public_seo(config, &generation)
+            SearchService::validate_leased_generation_seo_complete(config, &generation)
     {
         return Ok(CurrentGenerationValidation::Invalid {
             generation: published,
@@ -420,8 +420,10 @@ mod tests {
     };
     use nixsearch_service::SearchService;
     use nixsearch_test_support::{
-        REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
-        ingest_context_for, multi_ref_app_config, option_doc_for, package_doc_for, utf8_path_buf,
+        REF_SMALL, REF_STABLE, SOURCE_FIXTURES, TEST_PUBLIC_ORIGIN, app_config,
+        app_config_with_extra_fixture_source, app_config_with_public_url, ingest_context_for,
+        multi_ref_app_config, multi_ref_app_config_with_public_url, option_doc_for,
+        package_doc_for, utf8_path_buf,
     };
     use tempfile::{TempDir, tempdir};
     use tower::ServiceExt;
@@ -429,8 +431,6 @@ mod tests {
     use crate::app_router;
 
     use super::{AppState, ensure_current_generation};
-
-    const TEST_PUBLIC_ORIGIN: &str = "https://search.example.com";
 
     fn test_app(config: AppConfig) -> Router {
         let config = Arc::new(config);
@@ -548,18 +548,6 @@ mod tests {
             "{uri}{separator}generation_id={}",
             urlencoding::encode(generation_id)
         )
-    }
-
-    fn app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
-        let mut config = app_config(index_dir);
-        config.server.public_url = Some(format!("{TEST_PUBLIC_ORIGIN}/"));
-        config
-    }
-
-    fn multi_ref_app_config_with_public_url(index_dir: impl AsRef<camino::Utf8Path>) -> AppConfig {
-        let mut config = multi_ref_app_config(index_dir);
-        config.server.public_url = Some(format!("{TEST_PUBLIC_ORIGIN}/"));
-        config
     }
 
     fn publish_ambiguous_package_option_index(index_dir: &camino::Utf8Path) {
@@ -1621,6 +1609,9 @@ mod tests {
         assert!(body.contains(r#""returnHeadMetadata":{"#));
         assert!(body.contains(r#""returnHeadMetadataUrl":"/?q=git""#));
         assert!(body.contains(r#""openGraph":{"url":"https://search.example.com/?q=git""#));
+        assert!(body.contains(r#""type":"website""#));
+        assert!(body.contains(r#""siteName":"nixsearch""#));
+        assert!(body.contains(r#""imageUrl":"https://search.example.com/apple-touch-icon.png""#));
         assert!(body.contains(" results for git"));
         assert!(body.contains(r#""canonicalUrl":null"#));
         assert!(body.contains(r#""robots":"noindex,follow""#));

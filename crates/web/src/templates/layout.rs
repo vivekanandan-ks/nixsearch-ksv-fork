@@ -53,6 +53,11 @@ pub(crate) struct PageMetadata {
 #[serde(rename_all = "camelCase")]
 struct OpenGraphMetadata {
     url: String,
+    #[serde(rename = "type")]
+    kind: String,
+    site_name: String,
+    title: String,
+    description: String,
     image_url: String,
 }
 
@@ -159,10 +164,10 @@ pub fn render_full_page(page: FullPageRender<'_>) -> Markup {
                 }
                 @if let Some(open_graph) = &metadata.open_graph {
                     meta property="og:url" content=(&open_graph.url);
-                    meta property="og:type" content="website";
-                    meta property="og:site_name" content="nixsearch";
-                    meta property="og:title" content=(&metadata.title);
-                    meta property="og:description" content=(&metadata.description);
+                    meta property="og:type" content=(&open_graph.kind);
+                    meta property="og:site_name" content=(&open_graph.site_name);
+                    meta property="og:title" content=(&open_graph.title);
+                    meta property="og:description" content=(&open_graph.description);
                     meta property="og:image" content=(&open_graph.image_url);
                 }
                 link rel="icon" type="image/x-icon" href="/favicon.ico";
@@ -283,6 +288,7 @@ pub(crate) fn page_head_metadata(
 }
 
 pub(crate) fn noindex_head_metadata(
+    public_seo_enabled: bool,
     page_urls: &PageUrls,
     title: &str,
     description: &str,
@@ -290,7 +296,7 @@ pub(crate) fn noindex_head_metadata(
     PageMetadata {
         title: title.to_owned(),
         description: description.to_owned(),
-        open_graph: open_graph_metadata(page_urls, None),
+        open_graph: open_graph_metadata(public_seo_enabled, page_urls, None, title, description),
         canonical_url: None,
         robots: Some(ROBOTS_NOINDEX_FOLLOW),
     }
@@ -359,22 +365,37 @@ fn page_metadata(
     index_metadata: IndexMetadata,
 ) -> PageMetadata {
     let canonical_url = index_metadata.canonical_url;
+    let title = title_for_entry(config, request, source_filter, entry.document());
+    let description = description_for(config, request, source_filter, search_result, entry);
 
     PageMetadata {
-        title: title_for_entry(config, request, source_filter, entry.document()),
-        description: description_for(config, request, source_filter, search_result, entry),
-        open_graph: open_graph_metadata(page_urls, canonical_url.as_deref()),
+        open_graph: open_graph_metadata(
+            config.public_seo_enabled(),
+            page_urls,
+            canonical_url.as_deref(),
+            &title,
+            &description,
+        ),
+        title,
+        description,
         canonical_url,
         robots: index_metadata.robots,
     }
 }
 
 fn open_graph_metadata(
+    public_seo_enabled: bool,
     page_urls: &PageUrls,
     canonical_url: Option<&str>,
+    title: &str,
+    description: &str,
 ) -> Option<OpenGraphMetadata> {
-    page_urls.public_seo_enabled.then(|| OpenGraphMetadata {
+    public_seo_enabled.then(|| OpenGraphMetadata {
         url: canonical_url.unwrap_or(&page_urls.current_url).to_owned(),
+        kind: "website".to_owned(),
+        site_name: "nixsearch".to_owned(),
+        title: title.to_owned(),
+        description: description.to_owned(),
         image_url: page_urls.image_url.clone(),
     })
 }
@@ -736,7 +757,9 @@ mod tests {
     use nixsearch_core::ingest::IngestContext;
     use nixsearch_index::annotation::SearchHitAnnotation;
     use nixsearch_index::search::SearchResult;
-    use nixsearch_test_support::{SOURCE_FIXTURES, app_config, utf8_path_buf};
+    use nixsearch_test_support::{
+        SOURCE_FIXTURES, app_config, app_config_with_public_url, utf8_path_buf,
+    };
     use tempfile::tempdir;
 
     use crate::origin::PageUrls;
@@ -752,12 +775,16 @@ mod tests {
         app_config(utf8_path_buf(tempdir.path().join("indexes")))
     }
 
+    fn public_config() -> nixsearch_config::app::AppConfig {
+        let tempdir = tempdir().unwrap();
+        app_config_with_public_url(utf8_path_buf(tempdir.path().join("indexes")))
+    }
+
     fn page_urls() -> PageUrls {
         PageUrls {
             current_url: "https://search.example.com/?q=git".to_owned(),
             image_url: "https://search.example.com/apple-touch-icon.png".to_owned(),
             origin: "https://search.example.com".to_owned(),
-            public_seo_enabled: true,
         }
     }
 
@@ -937,7 +964,7 @@ mod tests {
 
     #[test]
     fn metadata_describes_home_page() {
-        let config = config();
+        let config = public_config();
         let request = PageRequest::default();
         let search = SearchResult {
             hits: Vec::new(),
@@ -957,10 +984,36 @@ mod tests {
         assert_eq!(metadata.description, "Search the Nix ecosystem");
         let open_graph = metadata.open_graph.unwrap();
         assert_eq!(open_graph.url, "https://search.example.com/?q=git");
+        assert_eq!(open_graph.kind, "website");
+        assert_eq!(open_graph.site_name, "nixsearch");
+        assert_eq!(open_graph.title, "nixsearch");
+        assert_eq!(open_graph.description, "Search the Nix ecosystem");
         assert_eq!(
             open_graph.image_url,
             "https://search.example.com/apple-touch-icon.png"
         );
+    }
+
+    #[test]
+    fn metadata_omits_open_graph_without_public_url() {
+        let config = config();
+        let request = PageRequest::default();
+        let search = SearchResult {
+            hits: Vec::new(),
+            total: 0,
+        };
+
+        let metadata = page_metadata(
+            &config,
+            &request,
+            &SourceFilter::All,
+            Ok(&search),
+            &EntryData::Empty,
+            &page_urls(),
+            IndexMetadata::default(),
+        );
+
+        assert_eq!(metadata.open_graph, None);
     }
 
     #[test]

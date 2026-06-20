@@ -57,6 +57,10 @@
   function currentHeadMetadata() {
     const canonical = document.head.querySelector('link[rel~="canonical"]');
     const ogUrl = headMetaContent("property", "og:url");
+    const ogType = headMetaContent("property", "og:type");
+    const ogSiteName = headMetaContent("property", "og:site_name");
+    const ogTitle = headMetaContent("property", "og:title");
+    const ogDescription = headMetaContent("property", "og:description");
     const ogImage = headMetaContent("property", "og:image");
 
     return {
@@ -64,9 +68,13 @@
       description: headMetaContent("name", "description"),
       robots: headMetaContent("name", "robots"),
       openGraph:
-        ogUrl && ogImage
+        ogUrl && ogType && ogSiteName && ogTitle && ogDescription && ogImage
           ? {
               url: ogUrl,
+              type: ogType,
+              siteName: ogSiteName,
+              title: ogTitle,
+              description: ogDescription,
               imageUrl: ogImage,
             }
           : null,
@@ -163,12 +171,13 @@
     setMeta("name", "description", metadata.description);
     setMeta("name", "robots", metadata.robots);
     if (metadata.openGraph) {
-      setMeta("property", "og:url", metadata.openGraph.url);
-      setMeta("property", "og:type", "website");
-      setMeta("property", "og:site_name", "nixsearch");
-      setMeta("property", "og:title", metadata.title);
-      setMeta("property", "og:description", metadata.description);
-      setMeta("property", "og:image", metadata.openGraph.imageUrl);
+      const openGraph = metadata.openGraph;
+      setMeta("property", "og:url", openGraph.url);
+      setMeta("property", "og:type", openGraph.type);
+      setMeta("property", "og:site_name", openGraph.siteName);
+      setMeta("property", "og:title", openGraph.title);
+      setMeta("property", "og:description", openGraph.description);
+      setMeta("property", "og:image", openGraph.imageUrl);
     } else {
       removeOpenGraphMetadata();
     }

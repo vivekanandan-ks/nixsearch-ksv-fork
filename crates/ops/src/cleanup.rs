@@ -272,26 +272,9 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
             .as_ref()
             .is_some_and(|current| current == &canonical);
 
-        if is_current {
-            if config.public_seo_enabled() {
-                if valid_seo_complete_generation(&index_store, &canonical)
-                    .map(|manifest| {
-                        current_is_valid = true;
-                        Some(manifest)
-                    })
-                    .is_some()
-                {
-                    continue;
-                }
-            } else if structurally_complete_generation_manifest(&index_store, &canonical)
-                .map(|manifest| {
-                    current_is_valid = true;
-                    Some(manifest)
-                })
-                .is_some()
-            {
-                continue;
-            }
+        if is_current && current_generation_is_valid_for_cleanup(config, &index_store, &canonical) {
+            current_is_valid = true;
+            continue;
         }
 
         if let Some(manifest) = structurally_complete_generation_manifest(&index_store, &canonical)
@@ -352,6 +335,18 @@ fn current_generation_canonical(
             ));
             None
         }
+    }
+}
+
+fn current_generation_is_valid_for_cleanup(
+    config: &AppConfig,
+    index_store: &IndexStore,
+    path: &Utf8Path,
+) -> bool {
+    if config.public_seo_enabled() {
+        valid_seo_complete_generation(index_store, path).is_some()
+    } else {
+        structurally_complete_generation_manifest(index_store, path).is_some()
     }
 }
 
@@ -1141,8 +1136,7 @@ mod tests {
         let store = IndexStore::new(&index_dir);
         fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
 
-        let mut config = nixsearch_test_support::app_config(&index_dir);
-        config.server.public_url = Some("https://search.example.com".to_owned());
+        let mut config = nixsearch_test_support::app_config_with_public_url(&index_dir);
         config.maintenance.index_generations.keep = 1;
 
         let update_lock = crate::lock::acquire_update_lock(&index_dir).unwrap();

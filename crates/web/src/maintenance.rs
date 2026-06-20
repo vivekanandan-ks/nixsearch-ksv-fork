@@ -412,7 +412,7 @@ fn current_generation_status(
         });
     }
 
-    if let Err(error) = SearchService::validate_leased_generation_for_serve(config, &generation) {
+    if let Err(error) = SearchService::validate_leased_generation_structural(config, &generation) {
         return Ok(CurrentGenerationStatus::Invalid {
             generation: published,
             error,
@@ -421,7 +421,7 @@ fn current_generation_status(
 
     if config.public_seo_enabled()
         && let Err(error) =
-            SearchService::validate_leased_generation_for_public_seo(config, &generation)
+            SearchService::validate_leased_generation_seo_complete(config, &generation)
     {
         return Ok(CurrentGenerationStatus::Invalid {
             generation: published,
@@ -492,7 +492,9 @@ mod tests {
         publish_canonical_index, publish_canonical_index_with_generated_at,
     };
     use nixsearch_ops::targets::TargetKey;
-    use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES, app_config, utf8_path_buf};
+    use nixsearch_test_support::{
+        REF_SMALL, SOURCE_FIXTURES, app_config, app_config_with_public_url, utf8_path_buf,
+    };
     use tempfile::tempdir;
     use time::Duration as TimeDuration;
 
@@ -506,8 +508,7 @@ mod tests {
     fn regeneration_modes_enable_recovery_without_scheduling() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let mut config = app_config(&index_dir);
-        config.server.public_url = Some("https://search.example.com".to_owned());
+        let config = app_config_with_public_url(&index_dir);
 
         let modes = regeneration_modes(&config);
 
@@ -783,8 +784,7 @@ mod tests {
         let store = IndexStore::new(&index_dir);
         fs::remove_file(store.seo_sidecar_path(&published_path)).unwrap();
 
-        let mut config = app_config(&index_dir);
-        config.server.public_url = Some("https://search.example.com".to_owned());
+        let config = app_config_with_public_url(&index_dir);
 
         let needs_regeneration = current_generation_needs_regeneration(
             &config,

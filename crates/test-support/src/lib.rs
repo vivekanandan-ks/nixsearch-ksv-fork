@@ -20,6 +20,7 @@ pub const SOURCE_NIXPKGS: &str = "nixpkgs";
 pub const REF_SMALL: &str = "small";
 pub const REF_STABLE: &str = "stable";
 pub const REF_UNSTABLE: &str = "unstable";
+pub const TEST_PUBLIC_ORIGIN: &str = "https://search.example.com";
 
 pub const OPTION_GIT_ENABLE: &str = "programs.git.enable";
 pub const OPTION_NGINX_ENABLE: &str = "services.nginx.enable";
@@ -245,6 +246,18 @@ pub fn multi_ref_app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
     ]
     .into();
 
+    config
+}
+
+pub fn app_config_with_public_url(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
+    let mut config = app_config(index_dir);
+    config.server.public_url = Some(TEST_PUBLIC_ORIGIN.to_owned());
+    config
+}
+
+pub fn multi_ref_app_config_with_public_url(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
+    let mut config = multi_ref_app_config(index_dir);
+    config.server.public_url = Some(TEST_PUBLIC_ORIGIN.to_owned());
     config
 }
 
