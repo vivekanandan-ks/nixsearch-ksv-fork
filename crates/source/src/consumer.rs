@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 
 use nixsearch_core::artifact::ArtifactKind;
@@ -126,28 +126,88 @@ impl Consumer for FlakeInfoJsonConsumer {
             .await
             .context("failed to read flake-info artifact")?;
 
-        serde_json::from_slice::<serde_json::Value>(bytes.as_ref())
+        let value = serde_json::from_slice::<serde_json::Value>(bytes.as_ref())
             .context("failed to parse flake-info artifact as JSON")?;
+
+        validate_flake_info_json(&value).context("invalid flake-info artifact shape")?;
 
         Ok(Vec::new())
     }
+}
+
+fn validate_flake_info_json(value: &serde_json::Value) -> Result<()> {
+    let items = value
+        .as_array()
+        .context("expected top-level array of flake-info exports")?;
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item
+            .as_object()
+            .with_context(|| format!("expected export at index {index} to be an object"))?;
+
+        let item_type = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .with_context(|| {
+                format!("expected export at index {index} to have a non-empty string type")
+            })?;
+
+        let identity_field = match item_type {
+            "package" => "package_attr_name",
+            "app" => "app_attr_name",
+            "option" | "service" | "home-manager-option" => "option_name",
+            other => bail!("unsupported flake-info export type {other:?} at index {index}"),
+        };
+
+        object
+            .get(identity_field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .with_context(|| {
+                format!(
+                    "expected export at index {index} to have a non-empty string {identity_field}"
+                )
+            })?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
+    use bytes::Bytes;
     use tempfile::tempdir;
 
     use nixsearch_core::artifact::ArtifactKind;
-    use nixsearch_store::ArtifactStore;
+    use nixsearch_store::{ArtifactMetadataInput, ArtifactRef, ArtifactStore};
     use nixsearch_test_support::{
         OPTION_GIT_ENABLE, OPTION_NGINX_ENABLE, REF_SMALL, SOURCE_FIXTURES,
     };
 
-    use crate::artifact::ProduceRequest;
-    use crate::consumer::{Consumer, OptionsJsonConsumer};
+    use crate::artifact::{ProduceRequest, ProducedArtifact};
+    use crate::consumer::{Consumer, FlakeInfoJsonConsumer, OptionsJsonConsumer};
     use crate::producers::{ExistingFileProducer, Producer};
+
+    async fn put_flake_info_artifact(store: &ArtifactStore, bytes: Bytes) -> ProducedArtifact {
+        let artifact_ref =
+            ArtifactRef::latest(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::FlakeInfoJson);
+        let metadata = store
+            .put_artifact(
+                &artifact_ref,
+                bytes,
+                ArtifactMetadataInput::new("test-producer"),
+            )
+            .await
+            .unwrap();
+
+        ProducedArtifact {
+            artifact_ref,
+            metadata,
+        }
+    }
 
     #[tokio::test]
     async fn options_json_consumer_reads_produced_artifact() {
@@ -177,5 +237,65 @@ mod tests {
         assert_eq!(docs.len(), 4);
         assert!(docs.iter().any(|doc| doc.name() == OPTION_GIT_ENABLE));
         assert!(docs.iter().any(|doc| doc.name() == OPTION_NGINX_ENABLE));
+    }
+
+    #[tokio::test]
+    async fn flake_info_json_consumer_validates_minimal_exports_to_zero_documents() {
+        let tempdir = tempdir().unwrap();
+        let store = ArtifactStore::local(tempdir.path()).unwrap();
+        let produced = put_flake_info_artifact(
+            &store,
+            Bytes::from_static(
+                br#"[
+                    {"type":"package","package_attr_name":"hello"},
+                    {"type":"app","app_attr_name":"hello"},
+                    {"type":"option","option_name":"programs.git.enable"},
+                    {"type":"service","option_name":"services.example.enable"},
+                    {"type":"home-manager-option","option_name":"programs.git.enable"}
+                ]"#,
+            ),
+        )
+        .await;
+
+        let consumer = FlakeInfoJsonConsumer;
+        let docs = consumer.consume(&store, &produced).await.unwrap();
+
+        assert!(docs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flake_info_json_consumer_rejects_invalid_shapes() {
+        let invalid_shapes: &[(&str, &[u8])] = &[
+            ("null", br#"null"#),
+            ("string", br#""not an export list""#),
+            ("number", br#"42"#),
+            ("object", br#"{}"#),
+            ("items object", br#"{"items":[]}"#),
+            ("scalar item", br#"[null]"#),
+            ("empty item", br#"[{}]"#),
+            ("unknown type", br#"[{"type":"unknown","option_name":"x"}]"#),
+            ("non-string type", br#"[{"type":1,"option_name":"x"}]"#),
+            ("empty type", br#"[{"type":"","option_name":"x"}]"#),
+            ("missing identity", br#"[{"type":"app"}]"#),
+            (
+                "non-string identity",
+                br#"[{"type":"app","app_attr_name":1}]"#,
+            ),
+            ("empty identity", br#"[{"type":"app","app_attr_name":""}]"#),
+        ];
+
+        for &(name, bytes) in invalid_shapes {
+            let tempdir = tempdir().unwrap();
+            let store = ArtifactStore::local(tempdir.path()).unwrap();
+            let produced = put_flake_info_artifact(&store, Bytes::from_static(bytes)).await;
+            let consumer = FlakeInfoJsonConsumer;
+
+            let error = consumer.consume(&store, &produced).await.unwrap_err();
+
+            assert!(
+                format!("{error:#}").contains("invalid flake-info artifact shape"),
+                "expected invalid shape error for {name}"
+            );
+        }
     }
 }

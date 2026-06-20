@@ -145,7 +145,7 @@ mod tests {
             let produced = put_artifact(
                 &store,
                 ArtifactKind::FlakeInfoJson,
-                Bytes::from_static(br#"{"items":[]}"#),
+                Bytes::from_static(br#"[{"type":"app","app_attr_name":"hello"}]"#),
             )
             .await;
 
@@ -175,6 +175,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flake_info_json_invalid_shape_errors_with_target_context() {
+        let tempdir = tempdir().unwrap();
+        let store = ArtifactStore::local(tempdir.path()).unwrap();
+        let target = target(SourceKind::Apps, ArtifactKind::FlakeInfoJson);
+        let produced = put_artifact(
+            &store,
+            ArtifactKind::FlakeInfoJson,
+            Bytes::from_static(br#"{"items":[]}"#),
+        )
+        .await;
+
+        let error = consume_target(&store, &target, &produced)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to consume flake-info artifact for fixtures/small"));
+        assert!(message.contains("invalid flake-info artifact shape"));
+    }
+
+    #[tokio::test]
     async fn flake_info_json_missing_artifact_bytes_errors() {
         let tempdir = tempdir().unwrap();
         let store = ArtifactStore::local(tempdir.path()).unwrap();
@@ -196,7 +217,7 @@ mod tests {
         let produced = put_artifact(
             &store,
             ArtifactKind::FlakeInfoJson,
-            Bytes::from_static(br#"{}"#),
+            Bytes::from_static(br#"[{"type":"app","app_attr_name":"hello"}]"#),
         )
         .await;
 

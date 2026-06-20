@@ -466,7 +466,7 @@ mod tests {
                     let metadata = store
                         .put_artifact(
                             &artifact_ref,
-                            Bytes::from_static(br#"{}"#),
+                            Bytes::from_static(br#"[{"type":"app","app_attr_name":"hello"}]"#),
                             ArtifactMetadataInput::new("test-producer"),
                         )
                         .await?;
@@ -494,7 +494,7 @@ mod tests {
         let metadata = store
             .put_artifact(
                 &artifact_ref,
-                Bytes::from_static(br#"{}"#),
+                Bytes::from_static(br#"[{"type":"app","app_attr_name":"hello"}]"#),
                 ArtifactMetadataInput::new("test-producer"),
             )
             .await?;
