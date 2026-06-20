@@ -378,6 +378,55 @@ fn loads_existing_file_producer() {
 }
 
 #[test]
+fn rejects_source_kind_and_producer_artifact_kind_mismatch() {
+    let error = load_toml_error(
+        r#"
+        [sources.fixtures]
+        kind = "options"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/packages.json"
+        artifact = "packages-json"
+        "#,
+    );
+
+    assert_error_contains(
+        &error,
+        "sources.fixtures.refs.small producer artifact kind packages-json is incompatible with source kind Options",
+    );
+}
+
+#[test]
+fn mixed_source_kind_allows_any_producer_artifact_kind() {
+    let config = load_toml(
+        r#"
+        [sources.fixtures]
+        kind = "mixed"
+        default_ref = "options"
+
+        [sources.fixtures.refs.options.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+
+        [sources.fixtures.refs.packages.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/packages.json"
+        artifact = "packages-json"
+
+        [sources.fixtures.refs.apps.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/flake-info.json"
+        artifact = "flake-info-json"
+        "#,
+    );
+
+    assert_eq!(config.sources[FIXTURES_SOURCE].kind, SourceKind::Mixed);
+    assert_eq!(config.sources[FIXTURES_SOURCE].refs.len(), 3);
+}
+
+#[test]
 fn loads_eval_modules_producer() {
     let config = load_toml(
         r#"

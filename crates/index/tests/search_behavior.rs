@@ -1,6 +1,7 @@
 use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::search::{
@@ -538,14 +539,17 @@ fn all_scope_search_surfaces_relevant_options_among_package_results() {
                 SearchScope {
                     source: SOURCE_NIXPKGS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    artifact_kind: ArtifactKind::PackagesJson,
                 },
                 SearchScope {
                     source: SOURCE_NIXOS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    artifact_kind: ArtifactKind::OptionsJson,
                 },
                 SearchScope {
                     source: SOURCE_HOME_MANAGER.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    artifact_kind: ArtifactKind::OptionsJson,
                 },
             ],
             ..Default::default()
@@ -806,10 +810,12 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
                 SearchScope {
                     source: "nixos".to_owned(),
                     ref_id: "stable".to_owned(),
+                    artifact_kind: ArtifactKind::OptionsJson,
                 },
                 SearchScope {
                     source: "home-manager".to_owned(),
                     ref_id: "unstable".to_owned(),
+                    artifact_kind: ArtifactKind::OptionsJson,
                 },
             ],
             ..Default::default()
@@ -830,6 +836,57 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
     assert_eq!(pairs.len(), 2);
     assert!(pairs.contains(&("nixos", "stable")));
     assert!(pairs.contains(&("home-manager", "unstable")));
+}
+
+#[test]
+fn scope_artifact_kind_filters_matching_source_ref_documents() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![
+        package_doc_for(&context, "git", "Git package."),
+        option_doc_for(&context, "git", "Git option."),
+    ]);
+
+    let result = index
+        .search(SearchOptions {
+            query: "git".to_owned(),
+            limit: 10,
+            scopes: vec![SearchScope {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::PackagesJson,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(!result.hits.is_empty());
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|hit| hit.document.kind() == &DocumentKind::Package)
+    );
+}
+
+#[test]
+fn non_searchable_scope_returns_error_without_widening() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![option_doc_for(&context, "git", "Git option.")]);
+
+    let error = index
+        .search(SearchOptions {
+            query: "git".to_owned(),
+            limit: 10,
+            scopes: vec![SearchScope {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::FlakeInfoJson,
+            }],
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("non-searchable artifact kind"));
 }
 
 #[test]
@@ -875,6 +932,7 @@ fn finds_entry_by_source_ref_name() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::OptionsJson,
             name: OPTION_GIT_ENABLE.to_owned(),
             kind: Some(DocumentKind::Option),
         })
@@ -898,6 +956,7 @@ fn find_entry_returns_not_found() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::OptionsJson,
             name: "missing.entry".to_owned(),
             kind: None,
         })
@@ -921,6 +980,7 @@ fn find_entry_uses_kind_to_disambiguate() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::PackagesJson,
             name: "git".to_owned(),
             kind: Some(DocumentKind::Package),
         })
@@ -935,7 +995,7 @@ fn find_entry_uses_kind_to_disambiguate() {
 }
 
 #[test]
-fn find_entry_returns_ambiguous_without_kind() {
+fn find_entry_without_kind_uses_configured_artifact_kind() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
 
     let docs = vec![
@@ -949,23 +1009,35 @@ fn find_entry_returns_ambiguous_without_kind() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::PackagesJson,
             name: "git".to_owned(),
             kind: None,
         })
         .unwrap();
 
-    let EntryLookupResult::Ambiguous(documents) = result else {
-        panic!("expected ambiguous entry lookup");
+    let EntryLookupResult::Found(document) = result else {
+        panic!("expected package entry lookup");
     };
 
-    let kinds = documents
-        .iter()
-        .map(|document| document.kind())
-        .collect::<Vec<_>>();
+    assert_eq!(document.kind(), &DocumentKind::Package);
+}
 
-    assert_eq!(documents.len(), 2);
-    assert!(kinds.contains(&&DocumentKind::Option));
-    assert!(kinds.contains(&&DocumentKind::Package));
+#[test]
+fn flake_info_entry_lookup_returns_not_found_without_widening() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![option_doc_for(&context, "git", "Git option.")]);
+
+    let result = index
+        .find_entry(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::FlakeInfoJson,
+            name: "git".to_owned(),
+            kind: None,
+        })
+        .unwrap();
+
+    assert!(matches!(result, EntryLookupResult::NotFound));
 }
 
 #[test]
@@ -993,9 +1065,9 @@ fn search_hits_annotate_clean_and_ambiguous_entry_urls() {
         .find(|hit| hit.document.name() == "ripgrep")
         .expect("missing ripgrep hit");
 
-    assert!(package_git.annotation.ambiguous_entry_url);
+    assert!(!package_git.annotation.ambiguous_entry_url);
     assert!(package_git.annotation.unique_within_kind);
-    assert!(option_git.annotation.ambiguous_entry_url);
+    assert!(!option_git.annotation.ambiguous_entry_url);
     assert!(option_git.annotation.unique_within_kind);
     assert!(!ripgrep.annotation.ambiguous_entry_url);
     assert!(ripgrep.annotation.unique_within_kind);
@@ -1030,6 +1102,7 @@ fn entry_facts_count_more_than_ten_exactly() {
         .entry_facts(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::OptionsJson,
             name: "duplicate.entry".to_owned(),
             kind: Some(DocumentKind::Option),
         })
@@ -1055,6 +1128,7 @@ fn find_entry_ambiguity_uses_exact_counts_not_top_docs_limit() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::OptionsJson,
             name: "duplicate.entry".to_owned(),
             kind: Some(DocumentKind::Option),
         })
@@ -1079,6 +1153,7 @@ fn entry_facts_exposes_unique_package_and_option_representatives() {
         .entry_facts(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::OptionsJson,
             name: "programs.git.enable".to_owned(),
             kind: Some(DocumentKind::Option),
         })
@@ -1098,6 +1173,7 @@ fn entry_facts_exposes_unique_package_and_option_representatives() {
         .entry_facts(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            artifact_kind: ArtifactKind::PackagesJson,
             name: "git".to_owned(),
             kind: Some(DocumentKind::Package),
         })
@@ -1140,6 +1216,7 @@ fn internal_and_hidden_options_are_not_seo_eligible() {
             .entry_facts(EntryLookup {
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
                 name: name.to_owned(),
                 kind: Some(DocumentKind::Option),
             })

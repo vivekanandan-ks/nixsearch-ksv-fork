@@ -7,11 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::artifact::ArtifactKind;
 use crate::ingest::IngestContext;
 use crate::name::{NameParts, make_document_id};
 use crate::source_link::{Declaration, Repo};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DocumentKind {
     Option,
@@ -31,7 +32,7 @@ impl DocumentKind {
     }
 
     pub fn is_supported_indexed_entry(&self) -> bool {
-        matches!(self, Self::Package | Self::Option)
+        ArtifactKind::for_indexed_document_kind(self).is_some()
     }
 }
 

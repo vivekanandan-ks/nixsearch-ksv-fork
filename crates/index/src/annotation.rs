@@ -10,7 +10,7 @@ pub struct SearchHitAnnotation {
 
 #[derive(Debug, Default)]
 pub struct EntryAnnotationIndex {
-    entries: HashMap<EntryAnnotationKey, EntryKindCounts>,
+    entries: HashMap<EntryAnnotationKey, u8>,
 }
 
 impl EntryAnnotationIndex {
@@ -30,26 +30,25 @@ impl EntryAnnotationIndex {
             source: common.source.clone(),
             ref_id: common.ref_id.clone(),
             name: common.name.clone(),
+            kind: kind.clone(),
         };
 
-        self.entries.entry(key).or_default().observe(kind);
+        let count = self.entries.entry(key).or_default();
+        *count = capped_increment(*count);
     }
 
     pub fn annotation_for(&self, document: &SearchDocument) -> SearchHitAnnotation {
         let common = document.common();
-        let counts = self.entries.get(&EntryAnnotationKey {
+        let count = self.entries.get(&EntryAnnotationKey {
             source: common.source.clone(),
             ref_id: common.ref_id.clone(),
             name: common.name.clone(),
+            kind: document.kind().clone(),
         });
 
         SearchHitAnnotation {
-            ambiguous_entry_url: counts
-                .map(|counts| counts.package_count > 0 && counts.option_count > 0)
-                .unwrap_or(false),
-            unique_within_kind: counts
-                .map(|counts| counts.count_for_kind(document.kind()) == 1)
-                .unwrap_or(true),
+            ambiguous_entry_url: false,
+            unique_within_kind: count.map(|count| *count == 1).unwrap_or(true),
         }
     }
 }
@@ -59,30 +58,7 @@ struct EntryAnnotationKey {
     source: String,
     ref_id: String,
     name: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct EntryKindCounts {
-    package_count: u8,
-    option_count: u8,
-}
-
-impl EntryKindCounts {
-    fn observe(&mut self, kind: &DocumentKind) {
-        match kind {
-            DocumentKind::Package => self.package_count = capped_increment(self.package_count),
-            DocumentKind::Option => self.option_count = capped_increment(self.option_count),
-            DocumentKind::App | DocumentKind::Service => {}
-        }
-    }
-
-    fn count_for_kind(&self, kind: &DocumentKind) -> u8 {
-        match kind {
-            DocumentKind::Package => self.package_count,
-            DocumentKind::Option => self.option_count,
-            DocumentKind::App | DocumentKind::Service => 0,
-        }
-    }
+    kind: DocumentKind,
 }
 
 fn capped_increment(value: u8) -> u8 {

@@ -8,6 +8,7 @@ use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::annotation::SearchHitAnnotation;
@@ -52,6 +53,7 @@ pub struct IndexedSearchDocument {
 pub struct SearchScope {
     pub source: String,
     pub ref_id: String,
+    pub artifact_kind: ArtifactKind,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,6 +68,7 @@ pub struct SearchOptions {
 pub struct EntryLookup {
     pub source: String,
     pub ref_id: String,
+    pub artifact_kind: ArtifactKind,
     pub name: String,
     pub kind: Option<DocumentKind>,
 }
@@ -152,7 +155,7 @@ impl EntryFacts {
 
     pub fn annotation_for_document(&self, document: &SearchDocument) -> SearchHitAnnotation {
         SearchHitAnnotation {
-            ambiguous_entry_url: self.package_count > 0 && self.option_count > 0,
+            ambiguous_entry_url: false,
             unique_within_kind: self.count_for_kind(document.kind()) == 1,
         }
     }
@@ -470,19 +473,25 @@ impl SearchIndex {
     pub fn entry_facts(&self, lookup: EntryLookup) -> Result<EntryFacts> {
         let searcher = self.reader.searcher();
 
-        let package_count =
-            self.count_exact_entry_kind(&searcher, &lookup, &DocumentKind::Package)?;
-        let option_count =
-            self.count_exact_entry_kind(&searcher, &lookup, &DocumentKind::Option)?;
-
         let mut facts = EntryFacts {
             requested_kind: lookup.kind.clone(),
-            package_count,
-            option_count,
+            package_count: 0,
+            option_count: 0,
             representative: None,
         };
 
-        if let Some(kind) = facts.unique_supported_kind() {
+        let Some(kind) = configured_lookup_document_kind(&lookup) else {
+            return Ok(facts);
+        };
+
+        let count = self.count_exact_entry_kind(&searcher, &lookup, &kind)?;
+        match kind {
+            DocumentKind::Package => facts.package_count = count,
+            DocumentKind::Option => facts.option_count = count,
+            DocumentKind::App | DocumentKind::Service => {}
+        }
+
+        if count == 1 {
             let document = self.exact_entry_representative(&searcher, &lookup, &kind)?;
             let seo_eligible = document.is_seo_eligible_entry();
 
@@ -499,13 +508,9 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
         let mut counts = EntrySeoCounts::default();
 
-        self.add_entry_seo_counts_for_kind(
-            &searcher,
-            &lookup,
-            &DocumentKind::Package,
-            &mut counts,
-        )?;
-        self.add_entry_seo_counts_for_kind(&searcher, &lookup, &DocumentKind::Option, &mut counts)?;
+        if let Some(kind) = configured_lookup_document_kind(&lookup) {
+            self.add_entry_seo_counts_for_kind(&searcher, &lookup, &kind, &mut counts)?;
+        }
 
         Ok(counts)
     }
@@ -937,10 +942,18 @@ fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query
 }
 
 fn supported_lookup_kinds(lookup: &EntryLookup) -> Vec<DocumentKind> {
+    configured_lookup_document_kind(lookup)
+        .into_iter()
+        .collect()
+}
+
+fn configured_lookup_document_kind(lookup: &EntryLookup) -> Option<DocumentKind> {
+    let configured = lookup.artifact_kind.indexed_document_kind()?;
+
     match &lookup.kind {
-        Some(kind) if kind.is_supported_indexed_entry() => vec![kind.clone()],
-        Some(_) => Vec::new(),
-        None => vec![DocumentKind::Package, DocumentKind::Option],
+        Some(kind) if *kind == configured => Some(configured),
+        Some(_) => None,
+        None => Some(configured),
     }
 }
 
@@ -996,6 +1009,7 @@ mod tests {
             .entry_facts(EntryLookup {
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
                 name: "corrupt.entry".to_owned(),
                 kind: Some(DocumentKind::Option),
             })

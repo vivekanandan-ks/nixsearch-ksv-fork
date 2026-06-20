@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use camino::Utf8Path;
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_config::source::{SourceConfig, SourceKind};
+use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
+use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::{
@@ -203,6 +204,13 @@ pub struct EntryRequest {
     pub kind: Option<DocumentKind>,
 }
 
+#[derive(Debug, Clone)]
+struct ConfiguredSearchTarget {
+    source: String,
+    ref_id: String,
+    artifact_kind: ArtifactKind,
+}
+
 impl SearchService {
     pub fn open_current(config: Arc<AppConfig>) -> Result<Self> {
         let index_store = IndexStore::new(&config.data.index_dir);
@@ -389,7 +397,7 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         request: EntryRequest,
     ) -> ServiceResult<EntryLookupResult> {
-        let ref_id = self.resolve_entry_ref_for_snapshot(
+        let target = self.resolve_entry_target_for_snapshot(
             snapshot,
             &request.source,
             request.ref_id.as_deref(),
@@ -399,7 +407,8 @@ impl SearchService {
             .index
             .find_entry(EntryLookup {
                 source: request.source,
-                ref_id,
+                ref_id: target.ref_id,
+                artifact_kind: target.artifact_kind,
                 name: request.name,
                 kind: request.kind,
             })
@@ -412,7 +421,7 @@ impl SearchService {
         request: EntryRequest,
         facts: &EntryFacts,
     ) -> ServiceResult<EntryLookupResult> {
-        let ref_id = self.resolve_entry_ref_for_snapshot(
+        let target = self.resolve_entry_target_for_snapshot(
             snapshot,
             &request.source,
             request.ref_id.as_deref(),
@@ -423,7 +432,8 @@ impl SearchService {
             .find_entry_with_facts(
                 EntryLookup {
                     source: request.source,
-                    ref_id,
+                    ref_id: target.ref_id,
+                    artifact_kind: target.artifact_kind,
                     name: request.name,
                     kind: request.kind,
                 },
@@ -442,7 +452,7 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         request: EntryRequest,
     ) -> ServiceResult<EntryFacts> {
-        let ref_id = self.resolve_entry_ref_for_snapshot(
+        let target = self.resolve_entry_target_for_snapshot(
             snapshot,
             &request.source,
             request.ref_id.as_deref(),
@@ -452,7 +462,8 @@ impl SearchService {
             .index
             .entry_facts(EntryLookup {
                 source: request.source,
-                ref_id,
+                ref_id: target.ref_id,
+                artifact_kind: target.artifact_kind,
                 name: request.name,
                 kind: request.kind,
             })
@@ -489,7 +500,7 @@ impl SearchService {
                 .next()
                 .ok_or(RequestResolutionError::NoServedSearchScopes)?;
 
-            if !Self::served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id) {
+            if !self.served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id) {
                 return Err(RequestResolutionError::UnservedRef {
                     source_id: scope.source,
                     ref_id: scope.ref_id,
@@ -502,7 +513,7 @@ impl SearchService {
         let served_scopes = scopes
             .into_iter()
             .filter(|scope| {
-                Self::served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id)
+                self.served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id)
             })
             .collect::<Vec<_>>();
 
@@ -528,6 +539,17 @@ impl SearchService {
         source_id: &str,
         ref_id: Option<&str>,
     ) -> std::result::Result<String, RequestResolutionError> {
+        Ok(self
+            .resolve_entry_target_for_snapshot(snapshot, source_id, ref_id)?
+            .ref_id)
+    }
+
+    fn resolve_entry_target_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source_id: &str,
+        ref_id: Option<&str>,
+    ) -> std::result::Result<ConfiguredSearchTarget, RequestResolutionError> {
         let ref_id = match ref_id.and_then(non_empty) {
             Some(ref_id) => {
                 self.ensure_configured_ref(source_id, ref_id)?;
@@ -536,14 +558,21 @@ impl SearchService {
             None => self.configured_default_ref(source_id)?.to_owned(),
         };
 
-        if !Self::served_ref_exists_in_snapshot(snapshot, source_id, &ref_id) {
+        let Some(target) = self.configured_search_target(source_id, &ref_id)? else {
+            return Err(RequestResolutionError::UnservedRef {
+                source_id: source_id.to_owned(),
+                ref_id,
+            });
+        };
+
+        if !self.search_target_exists_in_snapshot(snapshot, &target) {
             return Err(RequestResolutionError::UnservedRef {
                 source_id: source_id.to_owned(),
                 ref_id,
             });
         }
 
-        Ok(ref_id)
+        Ok(target)
     }
 
     pub fn configured_source_exists(&self, source_id: &str) -> bool {
@@ -559,18 +588,31 @@ impl SearchService {
 
     pub fn served_ref_exists(&self, source_id: &str, ref_id: &str) -> bool {
         let snapshot = self.snapshot();
-        Self::served_ref_exists_in_snapshot(&snapshot, source_id, ref_id)
+        self.served_ref_exists_in_snapshot(&snapshot, source_id, ref_id)
     }
 
     pub fn served_ref_exists_in_snapshot(
+        &self,
         snapshot: &ServedGenerationSnapshot,
         source_id: &str,
         ref_id: &str,
     ) -> bool {
+        let Ok(Some(target)) = self.configured_search_target(source_id, ref_id) else {
+            return false;
+        };
+
+        self.search_target_exists_in_snapshot(snapshot, &target)
+    }
+
+    fn search_target_exists_in_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        expected: &ConfiguredSearchTarget,
+    ) -> bool {
         snapshot.manifest().targets.iter().any(|target| {
-            target.source == source_id
-                && target.ref_id == ref_id
-                && target.artifact_kind.indexes_search_documents()
+            target.source == expected.source
+                && target.ref_id == expected.ref_id
+                && target.artifact_kind == expected.artifact_kind
         })
     }
 
@@ -585,7 +627,8 @@ impl SearchService {
 
         let common = document.common();
 
-        self.source_ref_allowed_for_seo(snapshot, &common.source, &common.ref_id)
+        self.configured_served_document_kind_for_seo(snapshot, &common.source, &common.ref_id)
+            .is_some_and(|kind| &kind == document.kind())
     }
 
     pub fn source_has_indexable_entries(
@@ -596,14 +639,16 @@ impl SearchService {
     ) -> SeoFactsResult<bool> {
         let seo_facts = snapshot.seo_facts.as_ref().ok_or(SeoFactsUnavailable)?;
 
-        if !self.source_ref_allowed_for_seo(snapshot, source_id, ref_id) {
+        let Some(document_kind) =
+            self.configured_served_document_kind_for_seo(snapshot, source_id, ref_id)
+        else {
             return Ok(false);
-        }
+        };
 
         Ok(seo_facts.entries.iter().any(|entry| {
             entry.source == source_id
                 && entry.ref_id == ref_id
-                && !candidate_kinds_for_entry(entry).is_empty()
+                && !candidate_kinds_for_entry(entry, &document_kind).is_empty()
         }))
     }
 
@@ -615,11 +660,11 @@ impl SearchService {
         let mut candidates = Vec::new();
 
         for entry in &seo_facts.entries {
-            if !self.entry_can_contribute_to_sitemap(snapshot, entry) {
+            let Some(document_kind) = self.entry_sitemap_document_kind(snapshot, entry) else {
                 continue;
-            }
+            };
 
-            for kind in candidate_kinds_for_entry(entry) {
+            for kind in candidate_kinds_for_entry(entry, &document_kind) {
                 candidates.push(SitemapCandidate {
                     source: entry.source.clone(),
                     name: entry.name.clone(),
@@ -635,27 +680,40 @@ impl SearchService {
         source.default_ref.as_deref() == Some(ref_id)
     }
 
-    fn source_ref_allowed_for_seo(
+    fn entry_sitemap_document_kind(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        entry: &SeoEntryFacts,
+    ) -> Option<DocumentKind> {
+        self.configured_served_document_kind_for_seo(snapshot, &entry.source, &entry.ref_id)
+    }
+
+    fn configured_served_document_kind_for_seo(
         &self,
         snapshot: &ServedGenerationSnapshot,
         source_id: &str,
         ref_id: &str,
-    ) -> bool {
-        let Some(source) = self.config.sources.get(source_id) else {
-            return false;
-        };
+    ) -> Option<DocumentKind> {
+        if !self.config.public_seo_enabled() || snapshot.seo_facts.is_none() {
+            return None;
+        }
 
-        !matches!(source.kind, SourceKind::Apps | SourceKind::Services)
-            && self.ref_allowed_to_be_indexed(source, ref_id)
-            && Self::served_ref_exists_in_snapshot(snapshot, source_id, ref_id)
-    }
+        let source = self.config.sources.get(source_id)?;
+        if matches!(source.kind, SourceKind::Apps | SourceKind::Services)
+            || !self.ref_allowed_to_be_indexed(source, ref_id)
+        {
+            return None;
+        }
 
-    fn entry_can_contribute_to_sitemap(
-        &self,
-        snapshot: &ServedGenerationSnapshot,
-        entry: &SeoEntryFacts,
-    ) -> bool {
-        self.source_ref_allowed_for_seo(snapshot, &entry.source, &entry.ref_id)
+        let target = self
+            .configured_search_target(source_id, ref_id)
+            .ok()
+            .flatten()?;
+        if !self.search_target_exists_in_snapshot(snapshot, &target) {
+            return None;
+        }
+
+        target.artifact_kind.indexed_document_kind()
     }
 
     fn resolve_configured_search_scopes(
@@ -669,20 +727,12 @@ impl SearchService {
                 self.resolve_source_ref_set_scope(source_id, ref_id, ref_set_id)
             }
             (Some(source_id), Some(ref_id), None) => {
-                self.ensure_configured_ref(source_id, ref_id)?;
-
-                Ok(vec![SearchScope {
-                    source: source_id.to_owned(),
-                    ref_id: ref_id.to_owned(),
-                }])
+                Ok(vec![self.configured_search_scope(source_id, ref_id)?])
             }
             (Some(source_id), None, None) => {
                 let default_ref = self.configured_default_ref(source_id)?;
 
-                Ok(vec![SearchScope {
-                    source: source_id.to_owned(),
-                    ref_id: default_ref.to_owned(),
-                }])
+                Ok(vec![self.configured_search_scope(source_id, default_ref)?])
             }
             (None, Some(_), _) => Err(RequestResolutionError::RefRequiresSource),
             (None, None, Some(ref_set_id)) => self.resolve_all_ref_set_scopes(ref_set_id),
@@ -697,17 +747,16 @@ impl SearchService {
             return self.resolve_all_ref_set_scopes(default_ref_set);
         }
 
-        Ok(self
-            .config
+        self.config
             .sources
             .iter()
             .filter_map(|(source_id, source)| {
-                source.default_ref.as_ref().map(|default_ref| SearchScope {
-                    source: source_id.clone(),
-                    ref_id: default_ref.clone(),
-                })
+                source
+                    .default_ref
+                    .as_ref()
+                    .map(|default_ref| self.configured_search_scope(source_id, default_ref))
             })
-            .collect())
+            .collect()
     }
 
     fn resolve_all_ref_set_scopes(
@@ -720,16 +769,15 @@ impl SearchService {
             }
         })?;
 
-        Ok(ref_set
+        ref_set
             .refs
             .iter()
             .flat_map(|(source_id, ref_ids)| {
-                ref_ids.iter().map(|ref_id| SearchScope {
-                    source: source_id.clone(),
-                    ref_id: ref_id.clone(),
-                })
+                ref_ids
+                    .iter()
+                    .map(|ref_id| self.configured_search_scope(source_id, ref_id))
             })
-            .collect())
+            .collect()
     }
 
     fn resolve_source_ref_set_scope(
@@ -791,10 +839,7 @@ impl SearchService {
             ref_id
         };
 
-        Ok(vec![SearchScope {
-            source: source_id.to_owned(),
-            ref_id: selected_ref.to_owned(),
-        }])
+        Ok(vec![self.configured_search_scope(source_id, selected_ref)?])
     }
 
     fn configured_source(
@@ -839,6 +884,56 @@ impl SearchService {
 
         Ok(())
     }
+
+    fn configured_ref(
+        &self,
+        source_id: &str,
+        ref_id: &str,
+    ) -> std::result::Result<&RefConfig, RequestResolutionError> {
+        let source = self.configured_source(source_id)?;
+
+        source
+            .refs
+            .iter()
+            .find(|candidate| candidate.id == ref_id)
+            .ok_or_else(|| RequestResolutionError::UnknownRef {
+                source_id: source_id.to_owned(),
+                ref_id: ref_id.to_owned(),
+            })
+    }
+
+    fn configured_search_target(
+        &self,
+        source_id: &str,
+        ref_id: &str,
+    ) -> std::result::Result<Option<ConfiguredSearchTarget>, RequestResolutionError> {
+        let ref_config = self.configured_ref(source_id, ref_id)?;
+        let artifact_kind = ref_config.producer.artifact_kind();
+
+        if !artifact_kind.indexes_search_documents() {
+            return Ok(None);
+        }
+
+        Ok(Some(ConfiguredSearchTarget {
+            source: source_id.to_owned(),
+            ref_id: ref_id.to_owned(),
+            artifact_kind,
+        }))
+    }
+
+    fn configured_search_scope(
+        &self,
+        source_id: &str,
+        ref_id: &str,
+    ) -> std::result::Result<SearchScope, RequestResolutionError> {
+        let ref_config = self.configured_ref(source_id, ref_id)?;
+
+        Ok(SearchScope {
+            source: source_id.to_owned(),
+            ref_id: ref_id.to_owned(),
+            artifact_kind: ref_config.producer.artifact_kind(),
+        })
+    }
 }
 
 fn load_servable_generation(
@@ -865,28 +960,21 @@ fn load_servable_generation(
     })
 }
 
-fn candidate_kinds_for_entry(entry: &SeoEntryFacts) -> Vec<Option<DocumentKind>> {
-    let eligible_count = entry.package_eligible_count + entry.option_eligible_count;
+fn candidate_kinds_for_entry(
+    entry: &SeoEntryFacts,
+    configured_kind: &DocumentKind,
+) -> Vec<Option<DocumentKind>> {
+    let (supported_count, eligible_count) = match configured_kind {
+        DocumentKind::Package => (entry.package_supported_count, entry.package_eligible_count),
+        DocumentKind::Option => (entry.option_supported_count, entry.option_eligible_count),
+        DocumentKind::App | DocumentKind::Service => return Vec::new(),
+    };
 
-    if entry.total_supported_indexed_count == 1 && eligible_count == 1 {
-        return vec![None];
+    if supported_count == 1 && eligible_count == 1 {
+        vec![None]
+    } else {
+        Vec::new()
     }
-
-    if entry.total_supported_indexed_count <= 1 {
-        return Vec::new();
-    }
-
-    let mut kinds = Vec::new();
-
-    if entry.package_supported_count == 1 && entry.package_eligible_count == 1 {
-        kinds.push(Some(DocumentKind::Package));
-    }
-
-    if entry.option_supported_count == 1 && entry.option_eligible_count == 1 {
-        kinds.push(Some(DocumentKind::Option));
-    }
-
-    kinds
 }
 
 fn published_generation_is_current(
@@ -1131,6 +1219,45 @@ mod tests {
                 ref_id: Some(REF_SMALL.to_owned()),
                 name: "programs.git.enable".to_owned(),
                 kind: Some(DocumentKind::Option),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
+                if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
+    }
+
+    #[test]
+    fn stale_searchable_artifact_kind_does_not_serve_configured_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![package_doc_for(&context, "git", "Git package.")],
+            vec![index_target(
+                SOURCE_FIXTURES,
+                REF_SMALL,
+                ArtifactKind::PackagesJson,
+                1,
+            )],
+        );
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        assert!(!service.served_ref_exists(SOURCE_FIXTURES, REF_SMALL));
+
+        let error = service
+            .search_current(SearchRequest {
+                query: "git".to_owned(),
+                source: Some(SOURCE_FIXTURES.to_owned()),
+                ref_id: Some(REF_SMALL.to_owned()),
+                limit: 10,
+                ..SearchRequest::default()
             })
             .unwrap_err();
 
@@ -1494,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn sitemap_candidates_include_kind_for_cross_kind_ambiguous_entries() {
+    fn sitemap_candidates_ignore_stale_cross_kind_facts() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
@@ -1518,18 +1645,7 @@ mod tests {
 
         assert_eq!(
             candidate_tuples(&service, &snapshot),
-            vec![
-                (
-                    SOURCE_FIXTURES.to_owned(),
-                    "git".to_owned(),
-                    Some(DocumentKind::Package),
-                ),
-                (
-                    SOURCE_FIXTURES.to_owned(),
-                    "git".to_owned(),
-                    Some(DocumentKind::Option),
-                ),
-            ]
+            vec![(SOURCE_FIXTURES.to_owned(), "git".to_owned(), None)]
         );
     }
 

@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 
 use nixsearch_core::artifact::ArtifactKind;
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::SearchDocument;
 
-use crate::annotation::SearchHitAnnotation;
+use crate::annotation::EntryAnnotationIndex;
 use crate::manifest::{IndexGenerationManifest, validate_generation_id};
 use crate::search::{IndexedSearchDocument, SearchIndex};
 use crate::seo::{SeoSidecar, SeoSidecarAccumulator};
@@ -123,7 +123,7 @@ fn scan_generation(
 
     let expected = manifest_target_counts(manifest);
     let mut actual = BTreeMap::<TargetCountKey, usize>::new();
-    let mut annotations = EntryAnnotationCounts::default();
+    let mut annotations = EntryAnnotationIndex::new();
     let mut seo = SeoSidecarAccumulator::new();
 
     for document in &documents {
@@ -132,7 +132,7 @@ fn scan_generation(
 
     for indexed in &documents {
         validate_annotation(indexed, &annotations)?;
-        let key = target_key_for_document(&indexed.document);
+        let key = target_key_for_document(&indexed.document)?;
         if !expected.contains_key(&key) {
             let common = indexed.document.common();
             bail!(
@@ -195,22 +195,29 @@ fn manifest_target_counts(manifest: &IndexGenerationManifest) -> BTreeMap<Target
         .collect()
 }
 
-fn target_key_for_document(document: &SearchDocument) -> TargetCountKey {
+fn target_key_for_document(document: &SearchDocument) -> Result<TargetCountKey> {
     let common = document.common();
-    TargetCountKey {
+    let artifact_kind =
+        ArtifactKind::for_indexed_document_kind(document.kind()).with_context(|| {
+            format!(
+                "indexed document {}/{}/{} has unsupported document kind {}",
+                common.source,
+                common.ref_id,
+                common.name,
+                document.kind().as_str()
+            )
+        })?;
+
+    Ok(TargetCountKey {
         source: common.source.clone(),
         ref_id: common.ref_id.clone(),
-        artifact_kind: match document.kind() {
-            DocumentKind::Option => ArtifactKind::OptionsJson,
-            DocumentKind::Package => ArtifactKind::PackagesJson,
-            DocumentKind::App | DocumentKind::Service => ArtifactKind::FlakeInfoJson,
-        },
-    }
+        artifact_kind,
+    })
 }
 
 fn validate_annotation(
     indexed: &IndexedSearchDocument,
-    annotations: &EntryAnnotationCounts,
+    annotations: &EntryAnnotationIndex,
 ) -> Result<()> {
     let expected = annotations.annotation_for(&indexed.document);
     if indexed.annotation != expected {
@@ -231,82 +238,6 @@ struct TargetCountKey {
     source: String,
     ref_id: String,
     artifact_kind: ArtifactKind,
-}
-
-#[derive(Debug, Default)]
-struct EntryAnnotationCounts {
-    entries: BTreeMap<EntryAnnotationKey, EntryKindCounts>,
-}
-
-impl EntryAnnotationCounts {
-    fn observe(&mut self, document: &SearchDocument) {
-        if !document.kind().is_supported_indexed_entry() {
-            return;
-        }
-
-        let common = document.common();
-        self.entries
-            .entry(EntryAnnotationKey {
-                source: common.source.clone(),
-                ref_id: common.ref_id.clone(),
-                name: common.name.clone(),
-            })
-            .or_default()
-            .observe(document.kind());
-    }
-
-    fn annotation_for(&self, document: &SearchDocument) -> SearchHitAnnotation {
-        let common = document.common();
-        let counts = self.entries.get(&EntryAnnotationKey {
-            source: common.source.clone(),
-            ref_id: common.ref_id.clone(),
-            name: common.name.clone(),
-        });
-
-        SearchHitAnnotation {
-            ambiguous_entry_url: counts
-                .map(|counts| counts.package_count > 0 && counts.option_count > 0)
-                .unwrap_or(false),
-            unique_within_kind: counts
-                .map(|counts| counts.count_for_kind(document.kind()) == 1)
-                .unwrap_or(true),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct EntryAnnotationKey {
-    source: String,
-    ref_id: String,
-    name: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct EntryKindCounts {
-    package_count: u8,
-    option_count: u8,
-}
-
-impl EntryKindCounts {
-    fn observe(&mut self, kind: &DocumentKind) {
-        match kind {
-            DocumentKind::Package => self.package_count = capped_increment(self.package_count),
-            DocumentKind::Option => self.option_count = capped_increment(self.option_count),
-            DocumentKind::App | DocumentKind::Service => {}
-        }
-    }
-
-    fn count_for_kind(&self, kind: &DocumentKind) -> u8 {
-        match kind {
-            DocumentKind::Package => self.package_count,
-            DocumentKind::Option => self.option_count,
-            DocumentKind::App | DocumentKind::Service => 0,
-        }
-    }
-}
-
-fn capped_increment(value: u8) -> u8 {
-    value.saturating_add(1).min(2)
 }
 
 #[cfg(test)]

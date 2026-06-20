@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sitemap_includes_kind_urls_for_cross_kind_ambiguous_candidates() {
+    async fn sitemap_ignores_stale_cross_kind_candidates() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_ambiguous_package_option_index(&index_dir);
@@ -977,9 +977,9 @@ mod tests {
         let app = test_app(app_config_with_public_url(&index_dir));
         let body = request_sitemap(app).await;
 
-        assert_sitemap_has_path(&body, "/fixtures/git?kind=package");
-        assert_sitemap_has_path(&body, "/fixtures/git?kind=option");
-        assert_sitemap_missing_path(&body, "/fixtures/git");
+        assert_sitemap_has_path(&body, "/fixtures/git");
+        assert_sitemap_missing_path(&body, "/fixtures/git?kind=package");
+        assert_sitemap_missing_path(&body, "/fixtures/git?kind=option");
     }
 
     #[tokio::test]
@@ -1590,6 +1590,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn home_count_ignores_stale_cross_kind_manifest_targets() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_ambiguous_package_option_index(&index_dir);
+
+        let app = test_app(app_config(&index_dir));
+        let (status, body) = request_body(app, "/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<strong>1</strong> packages and options"));
+        assert!(!body.contains("<strong>2</strong> packages and options"));
+    }
+
+    #[tokio::test]
     async fn contextual_entry_page_seeds_return_head_metadata_for_modal_close() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
@@ -1817,7 +1831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_ambiguous_entry_page_renders_in_results_with_empty_modal() {
+    async fn direct_cross_kind_entry_page_uses_configured_kind() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_ambiguous_package_option_index(&index_dir);
@@ -1827,11 +1841,12 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("entry-page"));
-        assert!(body.contains("Multiple entries found"));
+        assert!(body.contains("Git option."));
+        assert!(!body.contains("Multiple entries found"));
         assert_h1_count(&body, 1);
         assert_empty_modal_container(&body);
-        assert_no_canonical(&body);
-        assert_has_robots(&body);
+        assert_has_canonical(&body, "https://search.example.com/fixtures/git");
+        assert_no_robots(&body);
     }
 
     #[tokio::test]
@@ -1945,7 +1960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_package_option_entries_canonicalize_with_kind() {
+    async fn cross_kind_stale_entries_do_not_force_kind_canonicals() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_ambiguous_package_option_index(&index_dir);
@@ -1953,22 +1968,19 @@ mod tests {
         let app = test_app(app_config_with_public_url(&index_dir));
 
         let (status, body) = request_body(app.clone(), "/fixtures/git?kind=package").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_has_canonical(
-            &body,
-            "https://search.example.com/fixtures/git?kind=package",
-        );
-        assert_no_robots(&body);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_no_canonical(&body);
+        assert_has_robots(&body);
 
         let (status, body) = request_body(app.clone(), "/fixtures/git?kind=option").await;
         assert_eq!(status, StatusCode::OK);
-        assert_has_canonical(&body, "https://search.example.com/fixtures/git?kind=option");
+        assert_has_canonical(&body, "https://search.example.com/fixtures/git");
         assert_no_robots(&body);
 
         let (status, body) = request_body(app, "/fixtures/git").await;
         assert_eq!(status, StatusCode::OK);
-        assert_no_canonical(&body);
-        assert_has_robots(&body);
+        assert_has_canonical(&body, "https://search.example.com/fixtures/git");
+        assert_no_robots(&body);
     }
 
     #[tokio::test]
@@ -1986,7 +1998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn result_links_use_kind_only_for_ambiguous_entry_urls() {
+    async fn result_links_ignore_stale_cross_kind_ambiguity() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_ambiguous_package_option_search_index(&index_dir);
@@ -1996,8 +2008,9 @@ mod tests {
         let (status, body) = request_body(app.clone(), "/?q=git&kind=option").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;kind=package&amp;source=all""#));
-        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;kind=option&amp;source=all""#));
+        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;source=all""#));
+        assert!(!body.contains(r#"href="/fixtures/git?q=git&amp;kind=package&amp;source=all""#));
+        assert!(!body.contains(r#"href="/fixtures/git?q=git&amp;kind=option&amp;source=all""#));
         assert!(!body.contains(r#"/fixtures/ripgrep?q=git&amp;kind=option"#));
 
         let uri = with_generation(
@@ -2007,8 +2020,9 @@ mod tests {
         let (status, body) = request_body(app, &uri).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("/fixtures/git?q=git&amp;kind=package&amp;source=all"));
-        assert!(body.contains("/fixtures/git?q=git&amp;kind=option&amp;source=all"));
+        assert!(body.contains("/fixtures/git?q=git&amp;source=all"));
+        assert!(!body.contains("/fixtures/git?q=git&amp;kind=package&amp;source=all"));
+        assert!(!body.contains("/fixtures/git?q=git&amp;kind=option&amp;source=all"));
         assert!(!body.contains("/fixtures/ripgrep?q=git&amp;kind=option"));
     }
 

@@ -88,17 +88,7 @@ pub fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
 }
 
 pub fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
-    match producer {
-        ProducerConfig::ExistingFile { artifact, .. } => *artifact,
-        ProducerConfig::ChannelPackagesJson { .. } => ArtifactKind::PackagesJson,
-        ProducerConfig::ChannelOptionsJson { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::NixBuildOptionsJson { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::EvalModules { .. } => ArtifactKind::OptionsJson,
-        ProducerConfig::Download { artifact, .. } => *artifact,
-        ProducerConfig::CustomCommand { artifact, .. } => *artifact,
-        ProducerConfig::FlakeFile { artifact, .. } => *artifact,
-        ProducerConfig::FlakeInfo { .. } => ArtifactKind::FlakeInfoJson,
-    }
+    producer.artifact_kind()
 }
 
 /// Collect all targets from all configured sources (no filtering).

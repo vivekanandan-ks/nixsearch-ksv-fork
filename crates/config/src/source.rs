@@ -471,6 +471,7 @@ impl SourceConfig {
 
         for ref_config in &self.refs {
             ref_config.validate(source_id)?;
+            validate_source_ref_artifact_kind(source_id, self.kind, ref_config)?;
         }
 
         if let Some(default_ref) = &self.default_ref {
@@ -489,6 +490,31 @@ impl SourceConfig {
 
         Ok(())
     }
+}
+
+fn validate_source_ref_artifact_kind(
+    source_id: &str,
+    source_kind: SourceKind,
+    ref_config: &RefConfig,
+) -> Result<()> {
+    let artifact_kind = ref_config.producer.artifact_kind();
+    let valid = match source_kind {
+        SourceKind::Options => artifact_kind == ArtifactKind::OptionsJson,
+        SourceKind::Packages => artifact_kind == ArtifactKind::PackagesJson,
+        SourceKind::Apps | SourceKind::Services => artifact_kind == ArtifactKind::FlakeInfoJson,
+        SourceKind::Mixed => true,
+    };
+
+    if !valid {
+        return Err(ConfigError::Validation(format!(
+            "sources.{source_id}.refs.{} producer artifact kind {} is incompatible with source kind {:?}",
+            ref_config.id,
+            artifact_kind.as_str(),
+            source_kind
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

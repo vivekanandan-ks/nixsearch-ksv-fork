@@ -131,6 +131,20 @@ pub(crate) fn default_flake_file_fallback_inputs() -> BTreeMap<String, String> {
 }
 
 impl ProducerConfig {
+    pub fn artifact_kind(&self) -> ArtifactKind {
+        match self {
+            Self::ExistingFile { artifact, .. } => *artifact,
+            Self::ChannelPackagesJson { .. } => ArtifactKind::PackagesJson,
+            Self::ChannelOptionsJson { .. } => ArtifactKind::OptionsJson,
+            Self::NixBuildOptionsJson { .. } => ArtifactKind::OptionsJson,
+            Self::EvalModules { .. } => ArtifactKind::OptionsJson,
+            Self::Download { artifact, .. } => *artifact,
+            Self::CustomCommand { artifact, .. } => *artifact,
+            Self::FlakeFile { artifact, .. } => *artifact,
+            Self::FlakeInfo { .. } => ArtifactKind::FlakeInfoJson,
+        }
+    }
+
     pub(crate) fn validate(&self, source_id: &str, ref_id: &str) -> Result<()> {
         match self {
             Self::ExistingFile { path, .. } => {

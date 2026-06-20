@@ -110,7 +110,11 @@ fn count_for(
                 .manifest()
                 .targets
                 .iter()
-                .filter(|target| target.source == scope.source && target.ref_id == scope.ref_id)
+                .filter(|target| {
+                    target.source == scope.source
+                        && target.ref_id == scope.ref_id
+                        && target.artifact_kind == scope.artifact_kind
+                })
                 .map(|target| target.document_count)
                 .sum::<usize>()
         })

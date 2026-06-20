@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
 use crate::manifest::IndexGenerationManifest;
@@ -459,16 +458,16 @@ fn manifest_supported_counts(
             })
             .or_default();
 
-        match target.artifact_kind {
-            ArtifactKind::PackagesJson => {
+        match target.artifact_kind.indexed_document_kind() {
+            Some(DocumentKind::Package) => {
                 expected.has_package_target = true;
                 expected.package_supported_count += target.document_count;
             }
-            ArtifactKind::OptionsJson => {
+            Some(DocumentKind::Option) => {
                 expected.has_option_target = true;
                 expected.option_supported_count += target.document_count;
             }
-            ArtifactKind::FlakeInfoJson => {}
+            Some(DocumentKind::App | DocumentKind::Service) | None => {}
         }
     }
 
