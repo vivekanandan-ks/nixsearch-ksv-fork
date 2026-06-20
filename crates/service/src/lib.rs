@@ -950,47 +950,43 @@ mod tests {
 
     fn flake_info_only_config(index_dir: &camino::Utf8Path) -> AppConfig {
         let mut config = app_config(index_dir);
-        config
-            .sources
-            .get_mut(SOURCE_FIXTURES)
-            .expect("fixture source exists")
-            .refs[0]
-            .producer = ProducerConfig::ExistingFile {
-            path: PathBuf::from("unused.json"),
-            artifact: ArtifactKind::FlakeInfoJson,
-        };
+        set_fixture_refs_artifact_kind(&mut config, ArtifactKind::FlakeInfoJson);
 
         config
     }
 
     fn multi_ref_flake_info_only_config(index_dir: &camino::Utf8Path) -> AppConfig {
         let mut config = multi_ref_app_config(index_dir);
-        for ref_config in &mut config
-            .sources
-            .get_mut(SOURCE_FIXTURES)
-            .expect("fixture source exists")
-            .refs
-        {
-            ref_config.producer = ProducerConfig::ExistingFile {
-                path: PathBuf::from("unused.json"),
-                artifact: ArtifactKind::FlakeInfoJson,
-            };
-        }
+        set_fixture_refs_artifact_kind(&mut config, ArtifactKind::FlakeInfoJson);
 
         config
     }
 
-    fn publish_flake_info_only_index(index_dir: &camino::Utf8Path) {
+    fn set_fixture_refs_artifact_kind(config: &mut AppConfig, artifact_kind: ArtifactKind) {
+        let source = config
+            .sources
+            .get_mut(SOURCE_FIXTURES)
+            .expect("fixture source exists");
+
+        for ref_config in &mut source.refs {
+            ref_config.producer = ProducerConfig::ExistingFile {
+                path: PathBuf::from("unused.json"),
+                artifact: artifact_kind,
+            };
+        }
+    }
+
+    fn publish_flake_info_only_index(index_dir: &camino::Utf8Path, ref_ids: &[&str]) {
         publish_documents_with_manifest_targets(
             index_dir,
             time::OffsetDateTime::now_utc(),
             Vec::new(),
-            vec![index_target(
-                SOURCE_FIXTURES,
-                REF_SMALL,
-                ArtifactKind::FlakeInfoJson,
-                0,
-            )],
+            ref_ids
+                .iter()
+                .map(|ref_id| {
+                    index_target(SOURCE_FIXTURES, *ref_id, ArtifactKind::FlakeInfoJson, 0)
+                })
+                .collect(),
         );
     }
 
@@ -1088,7 +1084,7 @@ mod tests {
     fn explicit_search_rejects_flake_info_only_ref_as_unserved() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        publish_flake_info_only_index(&index_dir);
+        publish_flake_info_only_index(&index_dir, &[REF_SMALL]);
 
         let config = Arc::new(flake_info_only_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
@@ -1114,7 +1110,7 @@ mod tests {
     fn entry_lookup_rejects_flake_info_only_ref_as_unserved() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        publish_flake_info_only_index(&index_dir);
+        publish_flake_info_only_index(&index_dir, &[REF_SMALL]);
 
         let config = Arc::new(flake_info_only_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
@@ -1139,7 +1135,7 @@ mod tests {
     fn flake_info_only_refs_do_not_provide_default_or_ref_set_search_scopes() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        publish_flake_info_only_index(&index_dir);
+        publish_flake_info_only_index(&index_dir, &[REF_SMALL, REF_STABLE]);
 
         let config = Arc::new(multi_ref_flake_info_only_config(&index_dir));
         let service = SearchService::open_current(config).unwrap();
@@ -1148,6 +1144,9 @@ mod tests {
             service.search_scopes(None, None, None).unwrap_err(),
             service
                 .search_scopes(None, None, Some("single"))
+                .unwrap_err(),
+            service
+                .search_scopes(None, None, Some("multi"))
                 .unwrap_err(),
         ] {
             assert!(matches!(

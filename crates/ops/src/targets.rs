@@ -39,10 +39,14 @@ impl TargetKey {
     }
 
     pub fn from_target_ref(target: &TargetRef) -> Self {
+        Self::from_ref_config(target.source_id.as_str(), &target.ref_config)
+    }
+
+    pub fn from_ref_config(source_id: impl Into<String>, ref_config: &RefConfig) -> Self {
         Self::new(
-            target.source_id.clone(),
-            target.ref_config.id.clone(),
-            artifact_kind_for_producer(&target.ref_config.producer),
+            source_id,
+            ref_config.id.clone(),
+            artifact_kind_for_producer(&ref_config.producer),
         )
     }
 }
@@ -133,16 +137,14 @@ pub fn select_targets(
     Ok(targets)
 }
 
-pub fn default_search_target_keys(config: &AppConfig) -> Result<BTreeSet<TargetKey>> {
-    Ok(config
+pub fn default_indexed_search_target_keys(config: &AppConfig) -> Result<BTreeSet<TargetKey>> {
+    let target_keys = config
         .resolve_search_scopes(None, None, None)?
         .into_iter()
         .map(|scope| target_key_for_scope(config, &scope))
-        .collect::<Result<BTreeSet<_>>>()?)
-}
+        .collect::<Result<Vec<_>>>()?;
 
-pub fn default_indexed_search_target_keys(config: &AppConfig) -> Result<BTreeSet<TargetKey>> {
-    Ok(default_search_target_keys(config)?
+    Ok(target_keys
         .into_iter()
         .filter(|target| target.artifact_kind.indexes_search_documents())
         .collect())
@@ -165,10 +167,9 @@ pub fn target_key_for_scope(config: &AppConfig, scope: &ResolvedSearchScope) -> 
             )
         })?;
 
-    Ok(TargetKey::new(
-        scope.source.clone(),
-        scope.ref_id.clone(),
-        artifact_kind_for_producer(&ref_config.producer),
+    Ok(TargetKey::from_ref_config(
+        scope.source.as_str(),
+        ref_config,
     ))
 }
 

@@ -553,29 +553,6 @@ mod tests {
         .await
     }
 
-    async fn build_tolerant_with_empty_required_success_targets(
-        index_store: &IndexStore,
-        artifact_store: &ArtifactStore,
-        target: TargetRef,
-    ) -> Result<GenerationBuildResult> {
-        let refresh_keys = BTreeSet::from([TargetKey::from(&target)]);
-        let required_success_targets = BTreeSet::new();
-        let producer = MockProducer {
-            behavior: MockBehavior::Matching,
-        };
-
-        build_and_publish_generation_with_policy(
-            index_store,
-            artifact_store,
-            vec![target],
-            &refresh_keys,
-            GenerationFailurePolicy::TolerateBootstrapNixFailures,
-            Some(&required_success_targets),
-            &producer,
-        )
-        .await
-    }
-
     #[tokio::test]
     async fn generation_publishes_flake_info_artifact_target_with_zero_documents() {
         let tempdir = tempdir().unwrap();
@@ -622,11 +599,20 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let (index_store, artifact_store) = stores(&tempdir);
         let target = flake_info_target();
+        let refresh_keys = BTreeSet::from([TargetKey::from(&target)]);
+        let required_success_targets = BTreeSet::new();
+        let producer = MockProducer {
+            behavior: MockBehavior::Matching,
+        };
 
-        let result = build_tolerant_with_empty_required_success_targets(
+        let result = build_and_publish_generation_with_policy(
             &index_store,
             &artifact_store,
-            target,
+            vec![target],
+            &refresh_keys,
+            GenerationFailurePolicy::TolerateBootstrapNixFailures,
+            Some(&required_success_targets),
+            &producer,
         )
         .await
         .unwrap();
