@@ -25,7 +25,7 @@ impl ArtifactKind {
         }
     }
 
-    pub fn indexes_search_documents(&self) -> bool {
+    pub fn indexes_search_documents(self) -> bool {
         match self {
             Self::OptionsJson | Self::PackagesJson => true,
             Self::FlakeInfoJson => false,

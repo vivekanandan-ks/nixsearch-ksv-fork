@@ -409,9 +409,9 @@ impl IndexStore {
         let path = self.manifest_path(&generation_path);
 
         validate_generation_id(manifest)
-            .context("failed to validate supplied index generation manifest")?;
+            .context("failed to validate supplied index generation manifest id")?;
         validate_manifest_invariants(manifest)
-            .context("failed to validate supplied index generation manifest")?;
+            .context("failed to validate supplied index generation manifest invariants")?;
 
         let bytes = serde_json::to_vec_pretty(manifest)
             .context("failed to serialize index generation manifest")?;

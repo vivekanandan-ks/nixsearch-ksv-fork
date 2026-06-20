@@ -1278,8 +1278,10 @@ mod tests {
 
         let config = Arc::new(app_config(&index_dir));
         let error = SearchService::open_current(config).unwrap_err();
+        let message = format!("{error:#}");
 
-        assert!(format!("{error:#}").contains("artifact-only"));
+        assert!(message.contains("artifact-only"));
+        assert!(message.contains("flake-info-json"));
     }
 
     #[test]
