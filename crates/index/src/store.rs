@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use crate::generation::{
     StructurallyCompleteGeneration, open_seo_complete_generation,
-    open_structurally_complete_generation,
+    open_structurally_complete_generation, validate_manifest_invariants,
 };
 use crate::manifest::{IndexGenerationManifest, validate_generation_id};
 use crate::search::SearchIndex;
@@ -409,6 +409,8 @@ impl IndexStore {
         let path = self.manifest_path(&generation_path);
 
         validate_generation_id(manifest)
+            .context("failed to validate supplied index generation manifest")?;
+        validate_manifest_invariants(manifest)
             .context("failed to validate supplied index generation manifest")?;
 
         let bytes = serde_json::to_vec_pretty(manifest)
@@ -1550,6 +1552,31 @@ mod tests {
         let error = store.write_manifest(&generation, &manifest).unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn index_store_write_manifest_rejects_artifact_only_document_counts() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::FlakeInfoJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let error = store.write_manifest(&generation, &manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("artifact-only"));
     }
 
     #[test]

@@ -906,13 +906,13 @@ mod tests {
     use nixsearch_config::source::SourceKind;
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::{DocumentKind, SearchDocument};
-    use nixsearch_index::manifest::canonical_generation_id;
+    use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
     use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult};
     use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
     use nixsearch_index_test_support::{
         index_target, options_target, publish_canonical_index,
         publish_canonical_index_with_generated_at, publish_documents_with_manifest_targets,
-        publish_fixture_options_index_for_refs, write_raw_seo_sidecar,
+        publish_fixture_options_index_for_refs, write_raw_manifest, write_raw_seo_sidecar,
     };
     use nixsearch_test_support::{
         REF_SMALL, REF_STABLE, SOURCE_FIXTURES, app_config, app_config_with_extra_fixture_source,
@@ -1243,6 +1243,43 @@ mod tests {
             SearchService::validate_leased_generation_seo_facts(&config, &leased).unwrap_err();
 
         assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
+    }
+
+    #[test]
+    fn open_current_rejects_forged_artifact_only_manifest_document_count() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let manifest = store.read_manifest(&path).unwrap();
+        let generation = PublishedGeneration {
+            path,
+            manifest: manifest.clone(),
+        };
+        let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
+        let mut forged_manifest = manifest;
+
+        forged_manifest.document_count += 1;
+        forged_manifest.targets.push(index_target(
+            SOURCE_FIXTURES,
+            REF_SMALL,
+            ArtifactKind::FlakeInfoJson,
+            1,
+        ));
+        refresh_generation_id(&mut forged_manifest).unwrap();
+        sidecar.generation_id = forged_manifest.generation_id.clone();
+
+        let forged_generation = PublishedGeneration {
+            path: generation.path,
+            manifest: forged_manifest.clone(),
+        };
+        write_raw_manifest(&store, &forged_generation, &forged_manifest);
+        write_raw_seo_sidecar(&store, &forged_generation, &sidecar);
+
+        let config = Arc::new(app_config(&index_dir));
+        let error = SearchService::open_current(config).unwrap_err();
+
+        assert!(format!("{error:#}").contains("artifact-only"));
     }
 
     #[test]

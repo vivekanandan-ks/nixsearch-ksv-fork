@@ -82,6 +82,16 @@ pub fn validate_manifest_invariants(manifest: &IndexGenerationManifest) -> Resul
             );
         }
 
+        if !target.artifact_kind.indexes_search_documents() && target.document_count != 0 {
+            bail!(
+                "artifact-only index generation target {}/{}/{} cannot report indexed document_count {}",
+                target.source,
+                target.ref_id,
+                target.artifact_kind.as_str(),
+                target.document_count
+            );
+        }
+
         target_sum = target_sum
             .checked_add(target.document_count)
             .context("index generation target document counts overflowed")?;
@@ -313,10 +323,24 @@ mod tests {
     const REF: &str = "small";
 
     #[test]
-    fn manifest_invariants_accept_nonzero_flake_info_targets() {
+    fn manifest_invariants_reject_nonzero_artifact_only_targets() {
         let manifest = IndexGenerationManifest::with_generated_at(
             2,
             vec![target(ArtifactKind::FlakeInfoJson, 2)],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let error = validate_manifest_invariants(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("artifact-only"));
+    }
+
+    #[test]
+    fn manifest_invariants_accept_zero_count_artifact_only_targets() {
+        let manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![target(ArtifactKind::FlakeInfoJson, 0)],
             OffsetDateTime::UNIX_EPOCH,
         )
         .unwrap();
@@ -325,10 +349,10 @@ mod tests {
     }
 
     #[test]
-    fn manifest_invariants_still_reject_flake_info_count_mismatch() {
+    fn manifest_invariants_still_reject_document_count_mismatch() {
         let manifest = IndexGenerationManifest::with_generated_at(
             1,
-            vec![target(ArtifactKind::FlakeInfoJson, 2)],
+            vec![target(ArtifactKind::OptionsJson, 2)],
             OffsetDateTime::UNIX_EPOCH,
         )
         .unwrap();

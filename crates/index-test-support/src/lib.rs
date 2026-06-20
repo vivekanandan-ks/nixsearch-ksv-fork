@@ -182,6 +182,23 @@ pub fn write_raw_seo_sidecar(
     .unwrap();
 }
 
+/// Writes a manifest directly, bypassing production validation.
+///
+/// Use only in tests that intentionally simulate corrupt on-disk manifests. Call
+/// `refresh_generation_id` before using this helper when the test needs a valid
+/// generation id.
+pub fn write_raw_manifest(
+    store: &IndexStore,
+    generation: &PublishedGeneration,
+    manifest: &IndexGenerationManifest,
+) {
+    std::fs::write(
+        store.manifest_path(&generation.path),
+        serde_json::to_vec_pretty(manifest).unwrap(),
+    )
+    .unwrap();
+}
+
 pub fn index_target(
     source: &str,
     ref_id: &str,

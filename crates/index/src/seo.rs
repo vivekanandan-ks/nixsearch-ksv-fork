@@ -764,8 +764,8 @@ mod tests {
     #[test]
     fn validation_accepts_flake_info_target_without_sidecar_refs() {
         let manifest = IndexGenerationManifest::with_generated_at(
-            1,
-            vec![target(ArtifactKind::FlakeInfoJson, 1)],
+            0,
+            vec![target(ArtifactKind::FlakeInfoJson, 0)],
             time::OffsetDateTime::UNIX_EPOCH,
         )
         .unwrap();

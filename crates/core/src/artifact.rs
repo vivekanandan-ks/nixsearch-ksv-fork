@@ -24,4 +24,11 @@ impl ArtifactKind {
             Self::FlakeInfoJson => "flake-info-json",
         }
     }
+
+    pub fn indexes_search_documents(&self) -> bool {
+        match self {
+            Self::OptionsJson | Self::PackagesJson => true,
+            Self::FlakeInfoJson => false,
+        }
+    }
 }
