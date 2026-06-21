@@ -8,8 +8,7 @@ use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
 
-use nixsearch_core::artifact::ArtifactKind;
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
 
 use crate::annotation::SearchHitAnnotation;
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
@@ -53,7 +52,7 @@ pub struct IndexedSearchDocument {
 pub struct SearchScope {
     pub source: String,
     pub ref_id: String,
-    pub artifact_kind: ArtifactKind,
+    pub entry_kind: IndexedEntryKind,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,36 +69,6 @@ pub struct EntryLookup {
     pub ref_id: String,
     pub entry_kind: IndexedEntryKind,
     pub name: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IndexedEntryKind {
-    Package,
-    Option,
-}
-
-impl IndexedEntryKind {
-    pub fn from_document_kind(kind: &DocumentKind) -> Option<Self> {
-        match kind {
-            DocumentKind::Package => Some(Self::Package),
-            DocumentKind::Option => Some(Self::Option),
-            DocumentKind::App | DocumentKind::Service => None,
-        }
-    }
-
-    pub fn document_kind(self) -> DocumentKind {
-        match self {
-            Self::Package => DocumentKind::Package,
-            Self::Option => DocumentKind::Option,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Package => DocumentKind::Package.as_str(),
-            Self::Option => DocumentKind::Option.as_str(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,14 +101,6 @@ pub struct EntryFacts {
     pub representative: Option<EntryRepresentative>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EntrySeoCounts {
-    pub package_supported_count: usize,
-    pub option_supported_count: usize,
-    pub package_eligible_count: usize,
-    pub option_eligible_count: usize,
-}
-
 impl EntryFacts {
     pub fn not_found_for_lookup(lookup: &EntryLookup) -> Self {
         Self {
@@ -160,23 +121,11 @@ impl EntryFacts {
         }
     }
 
-    pub fn supported_count(&self) -> usize {
-        self.count
-    }
-
     pub fn status(&self) -> EntryFactsStatus {
-        match self.supported_count() {
+        match self.count {
             0 => EntryFactsStatus::NotFound,
             1 => EntryFactsStatus::Unique,
             _ => EntryFactsStatus::Ambiguous,
-        }
-    }
-
-    pub fn unique_supported_kind(&self) -> Option<DocumentKind> {
-        if self.count == 1 {
-            Some(self.entry_kind.document_kind())
-        } else {
-            None
         }
     }
 
@@ -505,8 +454,7 @@ impl SearchIndex {
             }
             EntryFactsStatus::Ambiguous => {
                 let searcher = self.reader.searcher();
-                let documents =
-                    self.ambiguous_entry_documents(&searcher, &lookup, facts.supported_count())?;
+                let documents = self.ambiguous_entry_documents(&searcher, &lookup, facts.count)?;
 
                 Ok(EntryLookupResult::Ambiguous(documents))
             }
@@ -517,13 +465,11 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
 
         let mut facts = EntryFacts::not_found_for_lookup(&lookup);
-        let kind = lookup.entry_kind.document_kind();
-
-        let count = self.count_exact_entry_kind(&searcher, &lookup, &kind)?;
+        let count = self.count_exact_entry_kind(&searcher, &lookup)?;
         facts.count = count;
 
         if count == 1 {
-            let document = self.exact_entry_representative(&searcher, &lookup, &kind)?;
+            let document = self.exact_entry_representative(&searcher, &lookup)?;
             let seo_eligible = document.is_seo_eligible_entry();
 
             facts.representative = Some(EntryRepresentative {
@@ -533,16 +479,6 @@ impl SearchIndex {
         }
 
         Ok(facts)
-    }
-
-    pub fn entry_seo_counts(&self, lookup: EntryLookup) -> Result<EntrySeoCounts> {
-        let searcher = self.reader.searcher();
-        let mut counts = EntrySeoCounts::default();
-
-        let kind = lookup.entry_kind.document_kind();
-        self.add_entry_seo_counts_for_kind(&searcher, &lookup, &kind, &mut counts)?;
-
-        Ok(counts)
     }
 
     pub fn try_for_each_supported_indexed_entry_document(
@@ -617,67 +553,9 @@ impl SearchIndex {
         Ok(documents)
     }
 
-    fn add_entry_seo_counts_for_kind(
-        &self,
-        searcher: &Searcher,
-        lookup: &EntryLookup,
-        kind: &DocumentKind,
-        counts: &mut EntrySeoCounts,
-    ) -> Result<()> {
-        let query = self.exact_entry_kind_query(lookup, kind);
-        let count = searcher
-            .search(&*query, &Count)
-            .with_context(|| format!("failed to count exact {} SEO entry facts", kind.as_str()))?;
-
-        match kind {
-            DocumentKind::Package => counts.package_supported_count = count,
-            DocumentKind::Option => counts.option_supported_count = count,
-            DocumentKind::App | DocumentKind::Service => {}
-        }
-
-        if count == 0 {
-            return Ok(());
-        }
-
-        let top_docs = searcher
-            .search(&*query, &TopDocs::with_limit(count).order_by_score())
-            .with_context(|| {
-                format!(
-                    "failed to retrieve exact {} SEO entry documents",
-                    kind.as_str()
-                )
-            })?;
-
-        for (_, address) in top_docs {
-            let document = self.document_at_with_searcher(searcher, address)?;
-
-            if !document_deserialized_as_kind(&document, kind) {
-                bail!(
-                    "exact {} SEO entry document deserialized as {}",
-                    kind.as_str(),
-                    document_variant_name(&document)
-                );
-            }
-
-            if document.is_seo_eligible_entry() {
-                match kind {
-                    DocumentKind::Package => counts.package_eligible_count += 1,
-                    DocumentKind::Option => counts.option_eligible_count += 1,
-                    DocumentKind::App | DocumentKind::Service => {}
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn count_exact_entry_kind(
-        &self,
-        searcher: &Searcher,
-        lookup: &EntryLookup,
-        kind: &DocumentKind,
-    ) -> Result<usize> {
-        let query = self.exact_entry_kind_query(lookup, kind);
+    fn count_exact_entry_kind(&self, searcher: &Searcher, lookup: &EntryLookup) -> Result<usize> {
+        let kind = lookup.entry_kind.document_kind();
+        let query = self.exact_entry_kind_query(lookup);
 
         searcher
             .search(&*query, &Count)
@@ -688,9 +566,9 @@ impl SearchIndex {
         &self,
         searcher: &Searcher,
         lookup: &EntryLookup,
-        kind: &DocumentKind,
     ) -> Result<SearchDocument> {
-        let query = self.exact_entry_kind_query(lookup, kind);
+        let kind = lookup.entry_kind.document_kind();
+        let query = self.exact_entry_kind_query(lookup);
         let top_docs = searcher
             .search(&*query, &TopDocs::with_limit(1).order_by_score())
             .with_context(|| {
@@ -709,7 +587,7 @@ impl SearchIndex {
 
         let document = self.document_at_with_searcher(searcher, address)?;
 
-        if !document_deserialized_as_kind(&document, kind) {
+        if !document_deserialized_as_kind(&document, &kind) {
             bail!(
                 "unique exact {} entry representative deserialized as {}",
                 kind.as_str(),
@@ -726,9 +604,7 @@ impl SearchIndex {
         lookup: &EntryLookup,
         count: usize,
     ) -> Result<Vec<SearchDocument>> {
-        let Some(query) = self.supported_entry_query(lookup) else {
-            return Ok(Vec::new());
-        };
+        let query = self.exact_entry_kind_query(lookup);
 
         let top_docs = searcher
             .search(&*query, &TopDocs::with_limit(count).order_by_score())
@@ -743,17 +619,10 @@ impl SearchIndex {
         Ok(documents)
     }
 
-    fn supported_entry_query(&self, lookup: &EntryLookup) -> Option<Box<dyn Query>> {
+    fn exact_entry_kind_query(&self, lookup: &EntryLookup) -> Box<dyn Query> {
         let mut clauses = self.exact_entry_identity_clauses(lookup);
         let kind = lookup.entry_kind.document_kind();
         clauses.push((Occur::Must, self.entry_kind_query(&kind)));
-
-        Some(Box::new(BooleanQuery::new(clauses)))
-    }
-
-    fn exact_entry_kind_query(&self, lookup: &EntryLookup, kind: &DocumentKind) -> Box<dyn Query> {
-        let mut clauses = self.exact_entry_identity_clauses(lookup);
-        clauses.push((Occur::Must, self.entry_kind_query(kind)));
 
         Box::new(BooleanQuery::new(clauses))
     }

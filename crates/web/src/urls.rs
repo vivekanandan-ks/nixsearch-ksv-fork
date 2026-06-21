@@ -1,5 +1,5 @@
 use nixsearch_config::app::AppConfig;
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::SearchDocument;
 use nixsearch_index::search::SearchHit;
 use nixsearch_service::SitemapCandidate;
 
@@ -46,12 +46,7 @@ pub fn canonical_source_path(config: &AppConfig, source: &str, ref_id: &str) -> 
 }
 
 pub fn sitemap_candidate_path(candidate: &SitemapCandidate) -> String {
-    entry_url_for(
-        &candidate.source,
-        &candidate.name,
-        candidate.kind.as_ref().map(DocumentKind::as_str),
-        &PageQuery::default(),
-    )
+    entry_url_for(&candidate.source, &candidate.name, &PageQuery::default())
 }
 
 #[cfg(test)]
@@ -59,7 +54,6 @@ fn canonical_entry_path(config: &AppConfig, source: &str, entry: &str, ref_id: &
     entry_url_for(
         source,
         entry,
-        None,
         &PageQuery {
             ref_id: ref_id_for_link(config, source, ref_id),
             ..PageQuery::default()
@@ -75,7 +69,7 @@ pub fn paginated_search_url(source: Option<&str>, query: &PageQuery, page: usize
     search_url_for(source, &paged_query)
 }
 
-fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuery) -> String {
+fn entry_url_for(source: &str, entry: &str, query: &PageQuery) -> String {
     let path = format!("{}/{}", source_path(source), encode_path(entry));
     let page_str = query.page.filter(|&p| p > 1).map(|p| p.to_string());
 
@@ -83,7 +77,6 @@ fn entry_url_for(source: &str, entry: &str, kind: Option<&str>, query: &PageQuer
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
         ("ref_set", query.ref_set.as_deref()),
-        ("kind", kind),
         ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
     ]);
@@ -203,7 +196,7 @@ pub fn entry_url_for_hit(
     hit: &SearchHit,
     page: Option<usize>,
 ) -> String {
-    entry_url_for_document(config, state, &hit.document, None, page)
+    entry_url_for_document(config, state, &hit.document, page)
 }
 
 pub fn entry_url_for_annotated_document(
@@ -212,7 +205,7 @@ pub fn entry_url_for_annotated_document(
     entry: &AnnotatedEntryDocument,
     page: Option<usize>,
 ) -> String {
-    entry_url_for_document(config, state, &entry.document, None, page)
+    entry_url_for_document(config, state, &entry.document, page)
 }
 
 pub fn canonical_entry_path_for_document(config: &AppConfig, document: &SearchDocument) -> String {
@@ -221,7 +214,6 @@ pub fn canonical_entry_path_for_document(config: &AppConfig, document: &SearchDo
     entry_url_for(
         &common.source,
         &common.name,
-        None,
         &PageQuery {
             ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
             ..PageQuery::default()
@@ -233,7 +225,6 @@ fn entry_url_for_document(
     config: &AppConfig,
     state: &PageState,
     document: &SearchDocument,
-    kind: Option<&str>,
     page: Option<usize>,
 ) -> String {
     let common = document.common();
@@ -255,14 +246,13 @@ fn entry_url_for_document(
     entry_url_for(
         &common.source,
         &common.name,
-        kind,
         &PageQuery {
             q: state.q.clone(),
             ref_id,
             ref_set: ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set)),
-            kind: None,
             source: from_scope,
             page,
+            ..PageQuery::default()
         },
     )
 }
@@ -446,29 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn entry_url_for_includes_kind() {
-        let url = entry_url_for(
-            "fixtures",
-            "programs.git.enable",
-            Some("option"),
-            &PageQuery {
-                q: Some("git".to_owned()),
-                ref_id: Some("small".to_owned()),
-                ..PageQuery::default()
-            },
-        );
-        assert_eq!(
-            url,
-            "/fixtures/programs.git.enable?q=git&ref=small&kind=option"
-        );
-    }
-
-    #[test]
     fn entry_url_for_does_not_inherit_stale_query_kind() {
         let url = entry_url_for(
             "fixtures",
             "ripgrep",
-            None,
             &PageQuery {
                 q: Some("ripgrep".to_owned()),
                 kind: Some("option".to_owned()),
@@ -504,12 +475,13 @@ mod tests {
     }
 
     #[test]
-    fn entry_url_for_hit_uses_clean_path_for_cross_kind_names() {
+    fn entry_url_for_hit_omits_request_kind() {
         let config = app_config("./data/indexes");
         let request = PageRequest {
             query: PageQuery {
                 q: Some("git".to_owned()),
                 ref_set: Some("unused".to_owned()),
+                kind: Some("option".to_owned()),
                 source: Some(LinkOrigin::All),
                 page: Some(2),
                 ..PageQuery::default()
@@ -538,7 +510,7 @@ mod tests {
             "ripgrep",
             "Ripgrep package.",
         );
-        let ambiguous_document = package_doc_for(
+        let git_document = package_doc_for(
             &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
             "git",
             "Git package.",
@@ -549,7 +521,7 @@ mod tests {
             "/fixtures/ripgrep"
         );
         assert_eq!(
-            canonical_entry_path_for_document(&config, &ambiguous_document),
+            canonical_entry_path_for_document(&config, &git_document),
             "/fixtures/git"
         );
     }
@@ -592,7 +564,6 @@ mod tests {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ref_set: Some("25.11".to_owned()),
-                kind: None,
                 source: Some(LinkOrigin::All),
                 ..PageQuery::default()
             },

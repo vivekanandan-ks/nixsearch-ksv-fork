@@ -22,16 +22,7 @@ impl SearchIndex {
             let mut scope_clauses = Vec::with_capacity(scopes.len());
 
             for scope in scopes {
-                let document_kind =
-                    scope.artifact_kind.indexed_document_kind().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "search scope {}/{} has non-searchable artifact kind {}",
-                            scope.source,
-                            scope.ref_id,
-                            scope.artifact_kind.as_str()
-                        )
-                    })?;
-
+                let document_kind = scope.entry_kind.document_kind();
                 let source_query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
                     Term::from_field_text(self.fields.source, &scope.source),
                     tantivy::schema::IndexRecordOption::Basic,

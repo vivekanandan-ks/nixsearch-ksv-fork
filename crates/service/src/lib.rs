@@ -7,11 +7,11 @@ use camino::Utf8Path;
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_core::artifact::ArtifactKind;
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::{
-    EntryFacts, EntryLookup, EntryLookupResult, IndexedEntryKind, SearchIndex, SearchOptions,
-    SearchResult, SearchScope,
+    EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
+    SearchScope,
 };
 use nixsearch_index::seo::{SeoEntryFacts, SeoSidecar};
 use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
@@ -135,7 +135,6 @@ pub struct SeoFactsUnavailable;
 pub struct SitemapCandidate {
     pub source: String,
     pub name: String,
-    pub kind: Option<DocumentKind>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -210,6 +209,11 @@ struct ConfiguredSearchTarget {
     ref_id: String,
     artifact_kind: ArtifactKind,
     entry_kind: IndexedEntryKind,
+}
+
+struct ResolvedEntryLookup {
+    lookup: EntryLookup,
+    kind_mismatch: bool,
 }
 
 impl SearchService {
@@ -398,30 +402,15 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         request: EntryRequest,
     ) -> ServiceResult<EntryLookupResult> {
-        let target = self.resolve_entry_target_for_snapshot(
-            snapshot,
-            &request.source,
-            request.ref_id.as_deref(),
-        )?;
+        let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
-            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
-        });
-
-        let lookup = EntryLookup {
-            source: request.source,
-            ref_id: target.ref_id,
-            entry_kind: target.entry_kind,
-            name: request.name,
-        };
-
-        if kind_mismatch {
+        if resolved.kind_mismatch {
             return Ok(EntryLookupResult::NotFound);
         }
 
         snapshot
             .index
-            .find_entry(lookup)
+            .find_entry(resolved.lookup)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -431,30 +420,15 @@ impl SearchService {
         request: EntryRequest,
         facts: &EntryFacts,
     ) -> ServiceResult<EntryLookupResult> {
-        let target = self.resolve_entry_target_for_snapshot(
-            snapshot,
-            &request.source,
-            request.ref_id.as_deref(),
-        )?;
+        let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
-            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
-        });
-
-        let lookup = EntryLookup {
-            source: request.source,
-            ref_id: target.ref_id,
-            entry_kind: target.entry_kind,
-            name: request.name,
-        };
-
-        if kind_mismatch {
+        if resolved.kind_mismatch {
             return Ok(EntryLookupResult::NotFound);
         }
 
         snapshot
             .index
-            .find_entry_with_facts(lookup, facts)
+            .find_entry_with_facts(resolved.lookup, facts)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -468,30 +442,15 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         request: EntryRequest,
     ) -> ServiceResult<EntryFacts> {
-        let target = self.resolve_entry_target_for_snapshot(
-            snapshot,
-            &request.source,
-            request.ref_id.as_deref(),
-        )?;
+        let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
-            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
-        });
-
-        let lookup = EntryLookup {
-            source: request.source,
-            ref_id: target.ref_id,
-            entry_kind: target.entry_kind,
-            name: request.name,
-        };
-
-        if kind_mismatch {
-            return Ok(EntryFacts::not_found_for_lookup(&lookup));
+        if resolved.kind_mismatch {
+            return Ok(EntryFacts::not_found_for_lookup(&resolved.lookup));
         }
 
         snapshot
             .index
-            .entry_facts(lookup)
+            .entry_facts(resolved.lookup)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -512,41 +471,35 @@ impl SearchService {
         ref_id: Option<&str>,
         ref_set: Option<&str>,
     ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
-        let source = source.and_then(non_empty);
-        let ref_id = ref_id.and_then(non_empty);
-        let ref_set = ref_set.and_then(non_empty);
-        let source_specific = source.is_some();
+        self.resolve_served_search_targets(snapshot, source, ref_id, ref_set)
+            .map(|targets| targets.into_iter().map(search_scope_for_target).collect())
+    }
 
-        let scopes = self.resolve_configured_search_scopes(source, ref_id, ref_set)?;
+    pub fn served_search_document_count_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source: Option<&str>,
+        ref_id: Option<&str>,
+        ref_set: Option<&str>,
+    ) -> std::result::Result<usize, RequestResolutionError> {
+        let targets = self.resolve_served_search_targets(snapshot, source, ref_id, ref_set)?;
 
-        if source_specific {
-            let scope = scopes
-                .into_iter()
-                .next()
-                .ok_or(RequestResolutionError::NoServedSearchScopes)?;
-
-            if !self.served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id) {
-                return Err(RequestResolutionError::UnservedRef {
-                    source_id: scope.source,
-                    ref_id: scope.ref_id,
-                });
-            }
-
-            return Ok(vec![scope]);
-        }
-
-        let served_scopes = scopes
-            .into_iter()
-            .filter(|scope| {
-                self.served_ref_exists_in_snapshot(snapshot, &scope.source, &scope.ref_id)
+        Ok(targets
+            .iter()
+            .map(|expected| {
+                snapshot
+                    .manifest()
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        target.source == expected.source
+                            && target.ref_id == expected.ref_id
+                            && target.artifact_kind == expected.artifact_kind
+                    })
+                    .map(|target| target.document_count)
+                    .sum::<usize>()
             })
-            .collect::<Vec<_>>();
-
-        if served_scopes.is_empty() {
-            return Err(RequestResolutionError::NoServedSearchScopes);
-        }
-
-        Ok(served_scopes)
+            .sum())
     }
 
     pub fn resolve_entry_ref(
@@ -598,6 +551,31 @@ impl SearchService {
         }
 
         Ok(target)
+    }
+
+    fn resolve_entry_lookup_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        request: EntryRequest,
+    ) -> std::result::Result<ResolvedEntryLookup, RequestResolutionError> {
+        let target = self.resolve_entry_target_for_snapshot(
+            snapshot,
+            &request.source,
+            request.ref_id.as_deref(),
+        )?;
+        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
+            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
+        });
+
+        Ok(ResolvedEntryLookup {
+            lookup: EntryLookup {
+                source: request.source,
+                ref_id: target.ref_id,
+                entry_kind: target.entry_kind,
+                name: request.name,
+            },
+            kind_mismatch,
+        })
     }
 
     pub fn configured_source_exists(&self, source_id: &str) -> bool {
@@ -673,7 +651,7 @@ impl SearchService {
         Ok(seo_facts.entries.iter().any(|entry| {
             entry.source == source_id
                 && entry.ref_id == ref_id
-                && candidate_kind_for_entry(entry, &document_kind).is_some()
+                && entry_is_unique_eligible_for_configured_kind(entry, &document_kind)
         }))
     }
 
@@ -693,11 +671,10 @@ impl SearchService {
                 continue;
             };
 
-            if let Some(kind) = candidate_kind_for_entry(entry, &document_kind) {
+            if entry_is_unique_eligible_for_configured_kind(entry, &document_kind) {
                 candidates.push(SitemapCandidate {
                     source: entry.source.clone(),
                     name: entry.name.clone(),
-                    kind,
                 });
             }
         }
@@ -734,26 +711,82 @@ impl SearchService {
             return None;
         }
 
-        target.artifact_kind.indexed_document_kind()
+        Some(target.entry_kind.document_kind())
     }
 
-    fn resolve_configured_search_scopes(
+    fn resolve_served_search_targets(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        source: Option<&str>,
+        ref_id: Option<&str>,
+        ref_set: Option<&str>,
+    ) -> std::result::Result<Vec<ConfiguredSearchTarget>, RequestResolutionError> {
+        let source = source.and_then(non_empty);
+        let ref_id = ref_id.and_then(non_empty);
+        let ref_set = ref_set.and_then(non_empty);
+        let source_specific = source.is_some();
+
+        let refs = self.resolve_configured_search_refs(source, ref_id, ref_set)?;
+
+        if source_specific {
+            let (source, ref_id) = refs
+                .into_iter()
+                .next()
+                .ok_or(RequestResolutionError::NoServedSearchScopes)?;
+            let Some(target) = self.configured_search_target(&source, &ref_id)? else {
+                return Err(RequestResolutionError::UnservedRef {
+                    source_id: source,
+                    ref_id,
+                });
+            };
+
+            if !self.search_target_exists_in_snapshot(snapshot, &target) {
+                return Err(RequestResolutionError::UnservedRef {
+                    source_id: target.source,
+                    ref_id: target.ref_id,
+                });
+            }
+
+            return Ok(vec![target]);
+        }
+
+        let served_targets = refs
+            .into_iter()
+            .filter_map(|(source, ref_id)| {
+                let target = self
+                    .configured_search_target(&source, &ref_id)
+                    .ok()
+                    .flatten()?;
+                self.search_target_exists_in_snapshot(snapshot, &target)
+                    .then_some(target)
+            })
+            .collect::<Vec<_>>();
+
+        if served_targets.is_empty() {
+            return Err(RequestResolutionError::NoServedSearchScopes);
+        }
+
+        Ok(served_targets)
+    }
+
+    fn resolve_configured_search_refs(
         &self,
         source: Option<&str>,
         ref_id: Option<&str>,
         ref_set: Option<&str>,
-    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+    ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         match (source, ref_id, ref_set) {
             (Some(source_id), _, Some(ref_set_id)) => {
                 self.resolve_source_ref_set_scope(source_id, ref_id, ref_set_id)
             }
             (Some(source_id), Some(ref_id), None) => {
-                Ok(vec![self.configured_search_scope(source_id, ref_id)?])
+                self.ensure_configured_ref(source_id, ref_id)?;
+                Ok(vec![(source_id.to_owned(), ref_id.to_owned())])
             }
             (Some(source_id), None, None) => {
                 let default_ref = self.configured_default_ref(source_id)?;
 
-                Ok(vec![self.configured_search_scope(source_id, default_ref)?])
+                Ok(vec![(source_id.to_owned(), default_ref.to_owned())])
             }
             (None, Some(_), _) => Err(RequestResolutionError::RefRequiresSource),
             (None, None, Some(ref_set_id)) => self.resolve_all_ref_set_scopes(ref_set_id),
@@ -763,7 +796,7 @@ impl SearchService {
 
     fn resolve_default_all_scopes(
         &self,
-    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+    ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         if let Some(default_ref_set) = self.config.default_ref_set() {
             return self.resolve_all_ref_set_scopes(default_ref_set);
         }
@@ -775,7 +808,7 @@ impl SearchService {
                 source
                     .default_ref
                     .as_ref()
-                    .map(|default_ref| self.configured_search_scope(source_id, default_ref))
+                    .map(|default_ref| Ok((source_id.clone(), default_ref.clone())))
             })
             .collect()
     }
@@ -783,7 +816,7 @@ impl SearchService {
     fn resolve_all_ref_set_scopes(
         &self,
         ref_set_id: &str,
-    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+    ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         let ref_set = self.config.ref_sets.get(ref_set_id).ok_or_else(|| {
             RequestResolutionError::UnknownRefSet {
                 ref_set: ref_set_id.to_owned(),
@@ -794,9 +827,10 @@ impl SearchService {
             .refs
             .iter()
             .flat_map(|(source_id, ref_ids)| {
-                ref_ids
-                    .iter()
-                    .map(|ref_id| self.configured_search_scope(source_id, ref_id))
+                ref_ids.iter().map(|ref_id| {
+                    self.ensure_configured_ref(source_id, ref_id)?;
+                    Ok((source_id.clone(), ref_id.clone()))
+                })
             })
             .collect()
     }
@@ -806,7 +840,7 @@ impl SearchService {
         source_id: &str,
         ref_id: Option<&str>,
         ref_set_id: &str,
-    ) -> std::result::Result<Vec<SearchScope>, RequestResolutionError> {
+    ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         self.configured_source(source_id)?;
 
         let ref_set = self.config.ref_sets.get(ref_set_id).ok_or_else(|| {
@@ -860,7 +894,7 @@ impl SearchService {
             ref_id
         };
 
-        Ok(vec![self.configured_search_scope(source_id, selected_ref)?])
+        Ok(vec![(source_id.to_owned(), selected_ref.to_owned())])
     }
 
     fn configured_source(
@@ -930,11 +964,9 @@ impl SearchService {
     ) -> std::result::Result<Option<ConfiguredSearchTarget>, RequestResolutionError> {
         let ref_config = self.configured_ref(source_id, ref_id)?;
         let artifact_kind = ref_config.producer.artifact_kind();
-        let Some(document_kind) = artifact_kind.indexed_document_kind() else {
+        let Some(entry_kind) = artifact_kind.indexed_entry_kind() else {
             return Ok(None);
         };
-        let entry_kind = IndexedEntryKind::from_document_kind(&document_kind)
-            .expect("searchable artifact kinds map to supported entry kinds");
 
         Ok(Some(ConfiguredSearchTarget {
             source: source_id.to_owned(),
@@ -943,19 +975,13 @@ impl SearchService {
             entry_kind,
         }))
     }
+}
 
-    fn configured_search_scope(
-        &self,
-        source_id: &str,
-        ref_id: &str,
-    ) -> std::result::Result<SearchScope, RequestResolutionError> {
-        let ref_config = self.configured_ref(source_id, ref_id)?;
-
-        Ok(SearchScope {
-            source: source_id.to_owned(),
-            ref_id: ref_id.to_owned(),
-            artifact_kind: ref_config.producer.artifact_kind(),
-        })
+fn search_scope_for_target(target: ConfiguredSearchTarget) -> SearchScope {
+    SearchScope {
+        source: target.source,
+        ref_id: target.ref_id,
+        entry_kind: target.entry_kind,
     }
 }
 
@@ -983,21 +1009,17 @@ fn load_servable_generation(
     })
 }
 
-fn candidate_kind_for_entry(
+fn entry_is_unique_eligible_for_configured_kind(
     entry: &SeoEntryFacts,
     configured_kind: &DocumentKind,
-) -> Option<Option<DocumentKind>> {
+) -> bool {
     let (supported_count, eligible_count) = match configured_kind {
         DocumentKind::Package => (entry.package_supported_count, entry.package_eligible_count),
         DocumentKind::Option => (entry.option_supported_count, entry.option_eligible_count),
-        DocumentKind::App | DocumentKind::Service => return None,
+        DocumentKind::App | DocumentKind::Service => return false,
     };
 
-    if supported_count == 1 && eligible_count == 1 {
-        Some(None)
-    } else {
-        None
-    }
+    supported_count == 1 && eligible_count == 1
 }
 
 fn published_generation_is_current(
@@ -1060,12 +1082,12 @@ mod tests {
     fn candidate_tuples(
         service: &SearchService,
         snapshot: &super::ServedGenerationSnapshot,
-    ) -> Vec<(String, String, Option<DocumentKind>)> {
+    ) -> Vec<(String, String)> {
         service
             .sitemap_candidates(snapshot)
             .unwrap()
             .into_iter()
-            .map(|candidate| (candidate.source, candidate.name, candidate.kind))
+            .map(|candidate| (candidate.source, candidate.name))
             .collect()
     }
 
@@ -1224,6 +1246,76 @@ mod tests {
             error,
             ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
                 if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
+    }
+
+    #[test]
+    fn served_search_document_count_uses_exact_searchable_targets() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![
+                package_doc_for(&context, "git", "Git package."),
+                package_doc_for(&context, "git", "Duplicate Git package."),
+                option_doc_for(&context, "git", "Git option."),
+            ],
+            vec![
+                index_target(SOURCE_FIXTURES, REF_SMALL, ArtifactKind::PackagesJson, 2),
+                options_target(SOURCE_FIXTURES, REF_SMALL, 1),
+            ],
+        );
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+
+        assert_eq!(
+            service.served_search_document_count_for_snapshot(
+                &snapshot,
+                Some(SOURCE_FIXTURES),
+                Some(REF_SMALL),
+                None,
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            service.served_search_document_count_for_snapshot(&snapshot, None, None, None),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn served_search_document_count_handles_zero_and_artifact_only_refs() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            Vec::new(),
+            vec![options_target(SOURCE_FIXTURES, REF_SMALL, 0)],
+        );
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+
+        assert_eq!(
+            service.served_search_document_count_for_snapshot(&snapshot, None, None, None),
+            Ok(0)
+        );
+
+        let index_dir = utf8_path_buf(tempdir.path().join("flake-info-indexes"));
+        publish_flake_info_only_index(&index_dir, &[REF_SMALL]);
+        let config = Arc::new(flake_info_only_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+
+        assert!(matches!(
+            service.served_search_document_count_for_snapshot(&snapshot, None, None, None),
+            Err(RequestResolutionError::NoServedSearchScopes)
         ));
     }
 
@@ -1691,11 +1783,7 @@ mod tests {
         );
         assert_eq!(
             candidate_tuples(&service, &snapshot),
-            vec![(
-                SOURCE_FIXTURES.to_owned(),
-                "programs.git.enable".to_owned(),
-                None,
-            )]
+            vec![(SOURCE_FIXTURES.to_owned(), "programs.git.enable".to_owned())]
         );
     }
 
@@ -1724,7 +1812,7 @@ mod tests {
 
         assert_eq!(
             candidate_tuples(&service, &snapshot),
-            vec![(SOURCE_FIXTURES.to_owned(), "git".to_owned(), None)]
+            vec![(SOURCE_FIXTURES.to_owned(), "git".to_owned())]
         );
     }
 
@@ -1806,7 +1894,7 @@ mod tests {
         assert!(
             candidate_tuples(&service, &snapshot)
                 .iter()
-                .all(|(_, name, _)| !name.contains(REF_STABLE))
+                .all(|(_, name)| !name.contains(REF_STABLE))
         );
     }
 

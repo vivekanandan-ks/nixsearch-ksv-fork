@@ -5,7 +5,6 @@ use serde::Serialize;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_config::server::{AnalyticsScriptConfig, ScriptAttributeValue};
-use nixsearch_config::source::SourceKind;
 use nixsearch_index::search::SearchResult;
 use nixsearch_service::{SeoFactsResult, ServedGenerationSnapshot};
 
@@ -478,12 +477,6 @@ fn page_index_metadata(
                     .as_deref()
                     .and_then(non_empty)
                     .is_none()
-                && request
-                    .query
-                    .ref_set
-                    .as_deref()
-                    .and_then(non_empty)
-                    .is_none()
                 && request.query.kind.as_deref().and_then(non_empty).is_none()
                 && request.query.source.is_none()
             {
@@ -606,21 +599,11 @@ fn default_description_for(config: &AppConfig, source_filter: &SourceFilter) -> 
                 .and_then(|source| source.name.as_deref())
                 .unwrap_or(source);
             let kind = source_config
-                .map(|source| kind_noun(source.kind))
+                .map(|source| home::kind_noun(source.kind))
                 .unwrap_or("entries");
 
             format!("Search {source_name} {kind}")
         }
-    }
-}
-
-fn kind_noun(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::Packages => "packages",
-        SourceKind::Options => "options",
-        SourceKind::Apps => "apps",
-        SourceKind::Services => "services",
-        SourceKind::Mixed => "packages and options",
     }
 }
 

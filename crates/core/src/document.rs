@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::artifact::ArtifactKind;
 use crate::ingest::IngestContext;
 use crate::name::{NameParts, make_document_id};
 use crate::source_link::{Declaration, Repo};
@@ -32,7 +31,30 @@ impl DocumentKind {
     }
 
     pub fn is_supported_indexed_entry(&self) -> bool {
-        ArtifactKind::for_indexed_document_kind(self).is_some()
+        IndexedEntryKind::from_document_kind(self).is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedEntryKind {
+    Package,
+    Option,
+}
+
+impl IndexedEntryKind {
+    pub fn from_document_kind(kind: &DocumentKind) -> Option<Self> {
+        match kind {
+            DocumentKind::Package => Some(Self::Package),
+            DocumentKind::Option => Some(Self::Option),
+            DocumentKind::App | DocumentKind::Service => None,
+        }
+    }
+
+    pub fn document_kind(self) -> DocumentKind {
+        match self {
+            Self::Package => DocumentKind::Package,
+            Self::Option => DocumentKind::Option,
+        }
     }
 }
 
@@ -811,7 +833,9 @@ impl SearchDocument {
 mod tests {
     use crate::ingest::IngestContext;
 
-    use super::{CommonDoc, DocText, DocumentKind, OptionDoc, PackageDoc, SearchDocument};
+    use super::{
+        CommonDoc, DocText, DocumentKind, IndexedEntryKind, OptionDoc, PackageDoc, SearchDocument,
+    };
 
     #[test]
     fn common_doc_uses_context_identity() {
@@ -1011,6 +1035,30 @@ mod tests {
         assert!(DocumentKind::Option.is_supported_indexed_entry());
         assert!(!DocumentKind::App.is_supported_indexed_entry());
         assert!(!DocumentKind::Service.is_supported_indexed_entry());
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Package),
+            Some(IndexedEntryKind::Package)
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Option),
+            Some(IndexedEntryKind::Option)
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::App),
+            None
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Service),
+            None
+        );
+        assert_eq!(
+            IndexedEntryKind::Package.document_kind(),
+            DocumentKind::Package
+        );
+        assert_eq!(
+            IndexedEntryKind::Option.document_kind(),
+            DocumentKind::Option
+        );
     }
 
     #[test]

@@ -1,12 +1,11 @@
 use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
-use nixsearch_core::artifact::ArtifactKind;
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::search::{
-    EntryFactsStatus, EntryLookup, EntryLookupResult, IndexedEntryKind, SearchHit, SearchIndex,
-    SearchOptions, SearchScope,
+    EntryFactsStatus, EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions,
+    SearchScope,
 };
 
 use nixsearch_test_support::{
@@ -539,17 +538,17 @@ fn all_scope_search_surfaces_relevant_options_among_package_results() {
                 SearchScope {
                     source: SOURCE_NIXPKGS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
-                    artifact_kind: ArtifactKind::PackagesJson,
+                    entry_kind: IndexedEntryKind::Package,
                 },
                 SearchScope {
                     source: SOURCE_NIXOS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
-                    artifact_kind: ArtifactKind::OptionsJson,
+                    entry_kind: IndexedEntryKind::Option,
                 },
                 SearchScope {
                     source: SOURCE_HOME_MANAGER.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
-                    artifact_kind: ArtifactKind::OptionsJson,
+                    entry_kind: IndexedEntryKind::Option,
                 },
             ],
             ..Default::default()
@@ -810,12 +809,12 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
                 SearchScope {
                     source: "nixos".to_owned(),
                     ref_id: "stable".to_owned(),
-                    artifact_kind: ArtifactKind::OptionsJson,
+                    entry_kind: IndexedEntryKind::Option,
                 },
                 SearchScope {
                     source: "home-manager".to_owned(),
                     ref_id: "unstable".to_owned(),
-                    artifact_kind: ArtifactKind::OptionsJson,
+                    entry_kind: IndexedEntryKind::Option,
                 },
             ],
             ..Default::default()
@@ -839,7 +838,7 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
 }
 
 #[test]
-fn scope_artifact_kind_filters_matching_source_ref_documents() {
+fn scope_entry_kind_filters_matching_source_ref_documents() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
     let (_tempdir, index) = build_index(vec![
         package_doc_for(&context, "git", "Git package."),
@@ -853,7 +852,7 @@ fn scope_artifact_kind_filters_matching_source_ref_documents() {
             scopes: vec![SearchScope {
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::PackagesJson,
+                entry_kind: IndexedEntryKind::Package,
             }],
             ..Default::default()
         })
@@ -866,27 +865,6 @@ fn scope_artifact_kind_filters_matching_source_ref_documents() {
             .iter()
             .all(|hit| hit.document.kind() == &DocumentKind::Package)
     );
-}
-
-#[test]
-fn non_searchable_scope_returns_error_without_widening() {
-    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-    let (_tempdir, index) = build_index(vec![option_doc_for(&context, "git", "Git option.")]);
-
-    let error = index
-        .search(SearchOptions {
-            query: "git".to_owned(),
-            limit: 10,
-            scopes: vec![SearchScope {
-                source: SOURCE_FIXTURES.to_owned(),
-                ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::FlakeInfoJson,
-            }],
-            ..Default::default()
-        })
-        .unwrap_err();
-
-    assert!(format!("{error:#}").contains("non-searchable artifact kind"));
 }
 
 #[test]
@@ -964,7 +942,7 @@ fn find_entry_returns_not_found() {
 }
 
 #[test]
-fn find_entry_uses_kind_to_disambiguate() {
+fn find_entry_uses_exact_entry_kind_to_disambiguate() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
 
     let docs = vec![
@@ -989,53 +967,6 @@ fn find_entry_uses_kind_to_disambiguate() {
 
     assert_eq!(document.name(), "git");
     assert_eq!(document.kind(), &DocumentKind::Package);
-}
-
-#[test]
-fn find_entry_uses_exact_entry_kind() {
-    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
-    let docs = vec![
-        option_doc_for(&context, "git", "Git option."),
-        package_doc_for(&context, "git", "Git package."),
-    ];
-
-    let (_tempdir, index) = build_index(docs);
-
-    let result = index
-        .find_entry(EntryLookup {
-            source: SOURCE_FIXTURES.to_owned(),
-            ref_id: REF_SMALL.to_owned(),
-            entry_kind: IndexedEntryKind::Package,
-            name: "git".to_owned(),
-        })
-        .unwrap();
-
-    let EntryLookupResult::Found(document) = result else {
-        panic!("expected package entry lookup");
-    };
-
-    assert_eq!(document.kind(), &DocumentKind::Package);
-}
-
-#[test]
-fn indexed_entry_kind_rejects_unsupported_document_kinds() {
-    assert_eq!(
-        IndexedEntryKind::from_document_kind(&DocumentKind::Package),
-        Some(IndexedEntryKind::Package)
-    );
-    assert_eq!(
-        IndexedEntryKind::from_document_kind(&DocumentKind::Option),
-        Some(IndexedEntryKind::Option)
-    );
-    assert_eq!(
-        IndexedEntryKind::from_document_kind(&DocumentKind::App),
-        None
-    );
-    assert_eq!(
-        IndexedEntryKind::from_document_kind(&DocumentKind::Service),
-        None
-    );
 }
 
 #[test]
@@ -1102,7 +1033,6 @@ fn entry_facts_count_more_than_ten_exactly() {
         .unwrap();
 
     assert_eq!(facts.count, 11);
-    assert_eq!(facts.supported_count(), 11);
     assert_eq!(facts.status(), EntryFactsStatus::Ambiguous);
     assert!(facts.representative.is_none());
 }

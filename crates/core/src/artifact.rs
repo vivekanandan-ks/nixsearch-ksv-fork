@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::document::DocumentKind;
+use crate::document::{DocumentKind, IndexedEntryKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -12,7 +12,7 @@ pub enum ArtifactKind {
 
 #[cfg(test)]
 mod tests {
-    use crate::document::DocumentKind;
+    use crate::document::{DocumentKind, IndexedEntryKind};
 
     use super::ArtifactKind;
 
@@ -27,6 +27,19 @@ mod tests {
             Some(DocumentKind::Package)
         );
         assert_eq!(ArtifactKind::FlakeInfoJson.indexed_document_kind(), None);
+    }
+
+    #[test]
+    fn artifact_kind_maps_to_indexed_entry_kind() {
+        assert_eq!(
+            ArtifactKind::OptionsJson.indexed_entry_kind(),
+            Some(IndexedEntryKind::Option)
+        );
+        assert_eq!(
+            ArtifactKind::PackagesJson.indexed_entry_kind(),
+            Some(IndexedEntryKind::Package)
+        );
+        assert_eq!(ArtifactKind::FlakeInfoJson.indexed_entry_kind(), None);
     }
 
     #[test]
@@ -77,6 +90,12 @@ impl ArtifactKind {
             Self::PackagesJson => Some(DocumentKind::Package),
             Self::FlakeInfoJson => None,
         }
+    }
+
+    pub fn indexed_entry_kind(self) -> Option<IndexedEntryKind> {
+        self.indexed_document_kind()
+            .as_ref()
+            .and_then(IndexedEntryKind::from_document_kind)
     }
 
     pub fn for_indexed_document_kind(kind: &DocumentKind) -> Option<Self> {

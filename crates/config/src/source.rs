@@ -498,12 +498,7 @@ fn validate_source_ref_artifact_kind(
     ref_config: &RefConfig,
 ) -> Result<()> {
     let artifact_kind = ref_config.producer.artifact_kind();
-    let valid = match source_kind {
-        SourceKind::Options => artifact_kind == ArtifactKind::OptionsJson,
-        SourceKind::Packages => artifact_kind == ArtifactKind::PackagesJson,
-        SourceKind::Apps | SourceKind::Services => artifact_kind == ArtifactKind::FlakeInfoJson,
-        SourceKind::Mixed => true,
-    };
+    let valid = source_kind.accepts_artifact_kind(artifact_kind);
 
     if !valid {
         return Err(ConfigError::Validation(format!(
@@ -536,6 +531,15 @@ impl SourceKind {
             Self::Apps => "apps",
             Self::Services => "services",
             Self::Mixed => "mixed",
+        }
+    }
+
+    pub fn accepts_artifact_kind(self, artifact_kind: ArtifactKind) -> bool {
+        match self {
+            Self::Options => artifact_kind == ArtifactKind::OptionsJson,
+            Self::Packages => artifact_kind == ArtifactKind::PackagesJson,
+            Self::Apps | Self::Services => artifact_kind == ArtifactKind::FlakeInfoJson,
+            Self::Mixed => true,
         }
     }
 }

@@ -378,6 +378,19 @@ fn loads_existing_file_producer() {
 }
 
 #[test]
+fn source_kind_accepts_expected_artifact_kinds() {
+    assert!(SourceKind::Options.accepts_artifact_kind(ArtifactKind::OptionsJson));
+    assert!(!SourceKind::Options.accepts_artifact_kind(ArtifactKind::PackagesJson));
+    assert!(SourceKind::Packages.accepts_artifact_kind(ArtifactKind::PackagesJson));
+    assert!(!SourceKind::Packages.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
+    assert!(SourceKind::Apps.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
+    assert!(SourceKind::Services.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
+    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::OptionsJson));
+    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::PackagesJson));
+    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
+}
+
+#[test]
 fn rejects_source_kind_and_producer_artifact_kind_mismatch() {
     let error = load_toml_error(
         r#"

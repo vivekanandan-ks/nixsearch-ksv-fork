@@ -98,27 +98,10 @@ fn count_for(
         ),
     };
 
-    let scopes = state
+    let count = state
         .search
-        .search_scopes_for_snapshot(served_generation, source, ref_id, ref_set)
+        .served_search_document_count_for_snapshot(served_generation, source, ref_id, ref_set)
         .ok()?;
-
-    let count: usize = scopes
-        .iter()
-        .map(|scope| {
-            served_generation
-                .manifest()
-                .targets
-                .iter()
-                .filter(|target| {
-                    target.source == scope.source
-                        && target.ref_id == scope.ref_id
-                        && target.artifact_kind == scope.artifact_kind
-                })
-                .map(|target| target.document_count)
-                .sum::<usize>()
-        })
-        .sum();
 
     if count == 0 {
         return None;
@@ -138,7 +121,7 @@ fn kind_noun_for(config: &AppConfig, source_filter: &SourceFilter) -> &'static s
     }
 }
 
-fn kind_noun(kind: SourceKind) -> &'static str {
+pub(crate) fn kind_noun(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Packages => "packages",
         SourceKind::Options => "options",
