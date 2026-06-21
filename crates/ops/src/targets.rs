@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use nixsearch_config::app::{AppConfig, ResolvedSearchScope};
-use nixsearch_config::producer::ProducerConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_index::manifest::IndexTargetManifest;
@@ -46,7 +45,7 @@ impl TargetKey {
         Self::new(
             source_id,
             ref_config.id.clone(),
-            artifact_kind_for_producer(&ref_config.producer),
+            ref_config.producer.artifact_kind(),
         )
     }
 }
@@ -83,12 +82,8 @@ pub fn latest_artifact_ref_for_target(target: &TargetRef) -> ArtifactRef {
     ArtifactRef::latest(
         target.source_id.clone(),
         target.ref_config.id.clone(),
-        artifact_kind_for_producer(&target.ref_config.producer),
+        target.ref_config.producer.artifact_kind(),
     )
-}
-
-pub fn artifact_kind_for_producer(producer: &ProducerConfig) -> ArtifactKind {
-    producer.artifact_kind()
 }
 
 /// Collect all targets from all configured sources (no filtering).
@@ -226,7 +221,7 @@ fn resolve_manifest_target(
             )
         })?;
 
-    let expected_artifact_kind = artifact_kind_for_producer(&ref_config.producer);
+    let expected_artifact_kind = ref_config.producer.artifact_kind();
     if manifest_target.artifact_kind != expected_artifact_kind {
         bail!(
             "current index manifest target {}/{}/{} no longer matches configured producer kind {}; run unfiltered `nixsearch update` to refresh all configured refs",
@@ -252,6 +247,7 @@ mod tests {
     use tempfile::tempdir;
 
     use nixsearch_config::producer::ProducerConfig;
+    use nixsearch_config::source::SourceKind;
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::publish_canonical_options_index;
@@ -266,15 +262,17 @@ mod tests {
         publish_canonical_options_index(&index_dir);
         let index_store = IndexStore::new(&index_dir);
         let mut config = app_config(&index_dir);
-        let ref_config = &mut config
+        let source = config
             .sources
             .get_mut(SOURCE_FIXTURES)
-            .expect("fixture source exists")
-            .refs[0];
+            .expect("fixture source exists");
+        source.kind = SourceKind::Mixed;
+        let ref_config = &mut source.refs[0];
         ref_config.producer = ProducerConfig::ExistingFile {
             path: PathBuf::from("unused.json"),
             artifact: ArtifactKind::PackagesJson,
         };
+        config.validate().unwrap();
 
         let error = current_manifest_targets(&config, &index_store).unwrap_err();
         let message = format!("{error:#}");

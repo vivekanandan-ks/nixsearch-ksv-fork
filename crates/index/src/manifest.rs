@@ -80,6 +80,18 @@ pub fn validate_generation_id(manifest: &IndexGenerationManifest) -> Result<()> 
     Ok(())
 }
 
+pub fn validate_index_schema_version(manifest: &IndexGenerationManifest) -> Result<()> {
+    if manifest.schema_version != INDEX_SCHEMA_VERSION {
+        bail!(
+            "unsupported index schema version {} (current {})",
+            manifest.schema_version,
+            INDEX_SCHEMA_VERSION
+        );
+    }
+
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct CanonicalGenerationManifest {
     generation_id_version: u32,
@@ -189,7 +201,7 @@ mod tests {
 
         assert_eq!(
             id,
-            "sha256:f565ff6882339d6a1d7008df9a529d3fca88ef64f06f7b6ffeaf1575989f5c2c"
+            "sha256:d8c5480c0a07d5f45c5ce4edae6544c67f3798b8184d5e13c0894f3b2451b066"
         );
     }
 
@@ -262,7 +274,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"generation_id_version":1,"schema_version":2,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","document_count":1,"artifact_hash":null,"revision":null}]}"#
+            r#"{"generation_id_version":1,"schema_version":3,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","document_count":1,"artifact_hash":null,"revision":null}]}"#
         );
     }
 
@@ -275,7 +287,7 @@ mod tests {
 
         assert_eq!(
             manifest.generation_id,
-            "sha256:f565ff6882339d6a1d7008df9a529d3fca88ef64f06f7b6ffeaf1575989f5c2c"
+            "sha256:d8c5480c0a07d5f45c5ce4edae6544c67f3798b8184d5e13c0894f3b2451b066"
         );
     }
 

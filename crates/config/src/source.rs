@@ -507,10 +507,10 @@ fn validate_source_ref_artifact_kind(
 
     if !valid {
         return Err(ConfigError::Validation(format!(
-            "sources.{source_id}.refs.{} producer artifact kind {} is incompatible with source kind {:?}",
+            "sources.{source_id}.refs.{} producer artifact kind {} is incompatible with source kind {}",
             ref_config.id,
             artifact_kind.as_str(),
-            source_kind
+            source_kind.as_str()
         )));
     }
 
@@ -526,6 +526,18 @@ pub enum SourceKind {
     Apps,
     Services,
     Mixed,
+}
+
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Options => "options",
+            Self::Packages => "packages",
+            Self::Apps => "apps",
+            Self::Services => "services",
+            Self::Mixed => "mixed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

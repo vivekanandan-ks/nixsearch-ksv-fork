@@ -68,9 +68,38 @@ pub struct SearchOptions {
 pub struct EntryLookup {
     pub source: String,
     pub ref_id: String,
-    pub artifact_kind: ArtifactKind,
+    pub entry_kind: IndexedEntryKind,
     pub name: String,
-    pub kind: Option<DocumentKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedEntryKind {
+    Package,
+    Option,
+}
+
+impl IndexedEntryKind {
+    pub fn from_document_kind(kind: &DocumentKind) -> Option<Self> {
+        match kind {
+            DocumentKind::Package => Some(Self::Package),
+            DocumentKind::Option => Some(Self::Option),
+            DocumentKind::App | DocumentKind::Service => None,
+        }
+    }
+
+    pub fn document_kind(self) -> DocumentKind {
+        match self {
+            Self::Package => DocumentKind::Package,
+            Self::Option => DocumentKind::Option,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Package => DocumentKind::Package.as_str(),
+            Self::Option => DocumentKind::Option.as_str(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,9 +124,11 @@ pub enum EntryFactsStatus {
 
 #[derive(Debug, Clone)]
 pub struct EntryFacts {
-    pub requested_kind: Option<DocumentKind>,
-    pub package_count: usize,
-    pub option_count: usize,
+    pub source: String,
+    pub ref_id: String,
+    pub name: String,
+    pub entry_kind: IndexedEntryKind,
+    pub count: usize,
     pub representative: Option<EntryRepresentative>,
 }
 
@@ -110,19 +141,27 @@ pub struct EntrySeoCounts {
 }
 
 impl EntryFacts {
+    pub fn not_found_for_lookup(lookup: &EntryLookup) -> Self {
+        Self {
+            source: lookup.source.clone(),
+            ref_id: lookup.ref_id.clone(),
+            name: lookup.name.clone(),
+            entry_kind: lookup.entry_kind,
+            count: 0,
+            representative: None,
+        }
+    }
+
     pub fn count_for_kind(&self, kind: &DocumentKind) -> usize {
-        match kind {
-            DocumentKind::Package => self.package_count,
-            DocumentKind::Option => self.option_count,
-            DocumentKind::App | DocumentKind::Service => 0,
+        if IndexedEntryKind::from_document_kind(kind) == Some(self.entry_kind) {
+            self.count
+        } else {
+            0
         }
     }
 
     pub fn supported_count(&self) -> usize {
-        match &self.requested_kind {
-            Some(kind) => self.count_for_kind(kind),
-            None => self.package_count + self.option_count,
-        }
+        self.count
     }
 
     pub fn status(&self) -> EntryFactsStatus {
@@ -134,16 +173,10 @@ impl EntryFacts {
     }
 
     pub fn unique_supported_kind(&self) -> Option<DocumentKind> {
-        match self.requested_kind.as_ref() {
-            Some(kind) if kind.is_supported_indexed_entry() && self.count_for_kind(kind) == 1 => {
-                Some(kind.clone())
-            }
-            Some(_) => None,
-            None if self.package_count == 1 && self.option_count == 0 => {
-                Some(DocumentKind::Package)
-            }
-            None if self.option_count == 1 && self.package_count == 0 => Some(DocumentKind::Option),
-            None => None,
+        if self.count == 1 {
+            Some(self.entry_kind.document_kind())
+        } else {
+            None
         }
     }
 
@@ -155,9 +188,15 @@ impl EntryFacts {
 
     pub fn annotation_for_document(&self, document: &SearchDocument) -> SearchHitAnnotation {
         SearchHitAnnotation {
-            ambiguous_entry_url: false,
             unique_within_kind: self.count_for_kind(document.kind()) == 1,
         }
+    }
+
+    fn matches_lookup(&self, lookup: &EntryLookup) -> bool {
+        self.source == lookup.source
+            && self.ref_id == lookup.ref_id
+            && self.name == lookup.name
+            && self.entry_kind == lookup.entry_kind
     }
 }
 
@@ -448,6 +487,10 @@ impl SearchIndex {
         lookup: EntryLookup,
         facts: &EntryFacts,
     ) -> Result<EntryLookupResult> {
+        if !facts.matches_lookup(&lookup) {
+            bail!("entry facts identity does not match entry lookup");
+        }
+
         match facts.status() {
             EntryFactsStatus::NotFound => Ok(EntryLookupResult::NotFound),
             EntryFactsStatus::Unique => {
@@ -473,23 +516,11 @@ impl SearchIndex {
     pub fn entry_facts(&self, lookup: EntryLookup) -> Result<EntryFacts> {
         let searcher = self.reader.searcher();
 
-        let mut facts = EntryFacts {
-            requested_kind: lookup.kind.clone(),
-            package_count: 0,
-            option_count: 0,
-            representative: None,
-        };
-
-        let Some(kind) = configured_lookup_document_kind(&lookup) else {
-            return Ok(facts);
-        };
+        let mut facts = EntryFacts::not_found_for_lookup(&lookup);
+        let kind = lookup.entry_kind.document_kind();
 
         let count = self.count_exact_entry_kind(&searcher, &lookup, &kind)?;
-        match kind {
-            DocumentKind::Package => facts.package_count = count,
-            DocumentKind::Option => facts.option_count = count,
-            DocumentKind::App | DocumentKind::Service => {}
-        }
+        facts.count = count;
 
         if count == 1 {
             let document = self.exact_entry_representative(&searcher, &lookup, &kind)?;
@@ -508,9 +539,8 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
         let mut counts = EntrySeoCounts::default();
 
-        if let Some(kind) = configured_lookup_document_kind(&lookup) {
-            self.add_entry_seo_counts_for_kind(&searcher, &lookup, &kind, &mut counts)?;
-        }
+        let kind = lookup.entry_kind.document_kind();
+        self.add_entry_seo_counts_for_kind(&searcher, &lookup, &kind, &mut counts)?;
 
         Ok(counts)
     }
@@ -714,24 +744,9 @@ impl SearchIndex {
     }
 
     fn supported_entry_query(&self, lookup: &EntryLookup) -> Option<Box<dyn Query>> {
-        let kinds = supported_lookup_kinds(lookup);
-
-        if kinds.is_empty() {
-            return None;
-        }
-
         let mut clauses = self.exact_entry_identity_clauses(lookup);
-
-        if kinds.len() == 1 {
-            clauses.push((Occur::Must, self.entry_kind_query(&kinds[0])));
-        } else {
-            let kind_clauses = kinds
-                .iter()
-                .map(|kind| (Occur::Should, self.entry_kind_query(kind)))
-                .collect::<Vec<_>>();
-
-            clauses.push((Occur::Must, Box::new(BooleanQuery::new(kind_clauses))));
-        }
+        let kind = lookup.entry_kind.document_kind();
+        clauses.push((Occur::Must, self.entry_kind_query(&kind)));
 
         Some(Box::new(BooleanQuery::new(clauses)))
     }
@@ -786,11 +801,6 @@ impl SearchIndex {
     ) -> Result<StoredSearchDocument> {
         let retrieved = tantivy_document_at(searcher, address)?;
         let document = search_document_from_tantivy(&self.fields, &retrieved)?;
-        let ambiguous_entry_url = stored_bool(
-            &retrieved,
-            self.fields.entry_ambiguous_entry_url,
-            "entry_ambiguous_entry_url",
-        )?;
         let unique_within_kind = stored_bool(
             &retrieved,
             self.fields.entry_unique_within_kind,
@@ -798,10 +808,7 @@ impl SearchIndex {
         )?;
 
         Ok(StoredSearchDocument {
-            annotation: SearchHitAnnotation {
-                ambiguous_entry_url,
-                unique_within_kind,
-            },
+            annotation: SearchHitAnnotation { unique_within_kind },
             document,
         })
     }
@@ -813,11 +820,6 @@ impl SearchIndex {
     ) -> Result<IndexedSearchDocument> {
         let retrieved = tantivy_document_at(searcher, address)?;
         let document = search_document_from_tantivy_strict(&self.fields, &retrieved)?;
-        let ambiguous_entry_url = stored_single_bool(
-            &retrieved,
-            self.fields.entry_ambiguous_entry_url,
-            "entry_ambiguous_entry_url",
-        )?;
         let unique_within_kind = stored_single_bool(
             &retrieved,
             self.fields.entry_unique_within_kind,
@@ -826,10 +828,7 @@ impl SearchIndex {
         validate_stored_identity_fields(&self.fields, &retrieved, &document)?;
 
         Ok(IndexedSearchDocument {
-            annotation: SearchHitAnnotation {
-                ambiguous_entry_url,
-                unique_within_kind,
-            },
+            annotation: SearchHitAnnotation { unique_within_kind },
             document,
         })
     }
@@ -941,22 +940,6 @@ fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query
     ))
 }
 
-fn supported_lookup_kinds(lookup: &EntryLookup) -> Vec<DocumentKind> {
-    configured_lookup_document_kind(lookup)
-        .into_iter()
-        .collect()
-}
-
-fn configured_lookup_document_kind(lookup: &EntryLookup) -> Option<DocumentKind> {
-    let configured = lookup.artifact_kind.indexed_document_kind()?;
-
-    match &lookup.kind {
-        Some(kind) if *kind == configured => Some(configured),
-        Some(_) => None,
-        None => Some(configured),
-    }
-}
-
 fn document_deserialized_as_kind(document: &SearchDocument, kind: &DocumentKind) -> bool {
     matches!(
         (document, kind),
@@ -1009,9 +992,8 @@ mod tests {
             .entry_facts(EntryLookup {
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
-                artifact_kind: ArtifactKind::OptionsJson,
+                entry_kind: IndexedEntryKind::Option,
                 name: "corrupt.entry".to_owned(),
-                kind: Some(DocumentKind::Option),
             })
             .unwrap_err();
 

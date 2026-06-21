@@ -10,7 +10,9 @@ use crate::generation::{
     StructurallyCompleteGeneration, open_seo_complete_generation,
     open_structurally_complete_generation, validate_manifest_invariants,
 };
-use crate::manifest::{IndexGenerationManifest, validate_generation_id};
+use crate::manifest::{
+    IndexGenerationManifest, validate_generation_id, validate_index_schema_version,
+};
 use crate::search::SearchIndex;
 use crate::seo::SeoSidecar;
 
@@ -441,6 +443,8 @@ impl IndexStore {
 
         validate_generation_id(&manifest)
             .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
+        validate_index_schema_version(&manifest)
+            .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
 
         Ok(manifest)
     }
@@ -454,6 +458,8 @@ impl IndexStore {
         let path = self.seo_sidecar_path(&generation_path);
 
         validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+        validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
         let index = SearchIndex::open(&generation_path)
@@ -490,6 +496,8 @@ impl IndexStore {
 
         validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
+        validate_index_schema_version(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
         sidecar
             .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
@@ -512,6 +520,9 @@ impl IndexStore {
     }
 
     pub fn read_seo_sidecar(&self, generation: &PublishedGeneration) -> Result<SeoSidecar> {
+        validate_index_schema_version(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
         let path = self.seo_sidecar_path(&generation.path);
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read SEO sidecar {}", path.as_str()))?;
@@ -530,6 +541,9 @@ impl IndexStore {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<(SearchIndex, SeoSidecar)> {
+        validate_index_schema_version(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
         let sidecar = self.read_seo_sidecar(generation)?;
         let complete =
             open_seo_complete_generation(&generation.path, &generation.manifest, sidecar)
@@ -712,7 +726,10 @@ mod tests {
     use nixsearch_core::ingest::IngestContext;
 
     use crate::annotation::EntryAnnotationIndex;
-    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, canonical_generation_id};
+    use crate::manifest::{
+        IndexGenerationManifest, IndexTargetManifest, canonical_generation_id,
+        refresh_generation_id,
+    };
     use crate::search::SearchIndex;
     use crate::seo::SeoSidecarAccumulator;
     use crate::store::{IndexStore, PublishedGeneration};
@@ -750,6 +767,25 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    fn old_schema_manifest(document_count: usize) -> IndexGenerationManifest {
+        let mut manifest = options_manifest(document_count);
+        manifest.schema_version = 2;
+        refresh_generation_id(&mut manifest).unwrap();
+        manifest
+    }
+
+    fn write_raw_manifest(
+        store: &IndexStore,
+        generation: &Utf8PathBuf,
+        manifest: &IndexGenerationManifest,
+    ) {
+        fs::write(
+            store.manifest_path(generation),
+            serde_json::to_vec_pretty(manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
@@ -1202,6 +1238,81 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(temporary_manifest_files.is_empty());
+    }
+
+    #[test]
+    fn index_store_read_manifest_rejects_unsupported_schema_version() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = old_schema_manifest(1);
+
+        write_raw_manifest(&store, &generation, &manifest);
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn index_store_current_manifest_rejects_unsupported_schema_version() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = old_schema_manifest(1);
+
+        write_raw_manifest(&store, &generation, &manifest);
+        store.publish(&generation).unwrap();
+
+        let error = store.current_manifest().unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn index_store_read_seo_sidecar_rejects_unsupported_schema_before_file_read() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(1),
+        };
+
+        let error = store.read_seo_sidecar(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn index_store_write_seo_sidecar_rejects_unsupported_schema_before_index_open() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(0),
+        };
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
+
+        let error = store.write_seo_sidecar(&generation, &sidecar).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn index_store_write_validated_seo_sidecar_rejects_unsupported_schema_before_write() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(0),
+        };
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
+
+        let error = store
+            .write_validated_seo_sidecar_unchecked(&generation, &sidecar)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
 
     #[test]

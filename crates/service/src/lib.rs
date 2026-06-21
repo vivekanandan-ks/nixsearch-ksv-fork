@@ -10,8 +10,8 @@ use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::search::{
-    EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
-    SearchScope,
+    EntryFacts, EntryLookup, EntryLookupResult, IndexedEntryKind, SearchIndex, SearchOptions,
+    SearchResult, SearchScope,
 };
 use nixsearch_index::seo::{SeoEntryFacts, SeoSidecar};
 use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
@@ -209,6 +209,7 @@ struct ConfiguredSearchTarget {
     source: String,
     ref_id: String,
     artifact_kind: ArtifactKind,
+    entry_kind: IndexedEntryKind,
 }
 
 impl SearchService {
@@ -403,15 +404,24 @@ impl SearchService {
             request.ref_id.as_deref(),
         )?;
 
+        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
+            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
+        });
+
+        let lookup = EntryLookup {
+            source: request.source,
+            ref_id: target.ref_id,
+            entry_kind: target.entry_kind,
+            name: request.name,
+        };
+
+        if kind_mismatch {
+            return Ok(EntryLookupResult::NotFound);
+        }
+
         snapshot
             .index
-            .find_entry(EntryLookup {
-                source: request.source,
-                ref_id: target.ref_id,
-                artifact_kind: target.artifact_kind,
-                name: request.name,
-                kind: request.kind,
-            })
+            .find_entry(lookup)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -427,18 +437,24 @@ impl SearchService {
             request.ref_id.as_deref(),
         )?;
 
+        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
+            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
+        });
+
+        let lookup = EntryLookup {
+            source: request.source,
+            ref_id: target.ref_id,
+            entry_kind: target.entry_kind,
+            name: request.name,
+        };
+
+        if kind_mismatch {
+            return Ok(EntryLookupResult::NotFound);
+        }
+
         snapshot
             .index
-            .find_entry_with_facts(
-                EntryLookup {
-                    source: request.source,
-                    ref_id: target.ref_id,
-                    artifact_kind: target.artifact_kind,
-                    name: request.name,
-                    kind: request.kind,
-                },
-                facts,
-            )
+            .find_entry_with_facts(lookup, facts)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -458,15 +474,24 @@ impl SearchService {
             request.ref_id.as_deref(),
         )?;
 
+        let kind_mismatch = request.kind.as_ref().is_some_and(|kind| {
+            IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
+        });
+
+        let lookup = EntryLookup {
+            source: request.source,
+            ref_id: target.ref_id,
+            entry_kind: target.entry_kind,
+            name: request.name,
+        };
+
+        if kind_mismatch {
+            return Ok(EntryFacts::not_found_for_lookup(&lookup));
+        }
+
         snapshot
             .index
-            .entry_facts(EntryLookup {
-                source: request.source,
-                ref_id: target.ref_id,
-                artifact_kind: target.artifact_kind,
-                name: request.name,
-                kind: request.kind,
-            })
+            .entry_facts(lookup)
             .map_err(ServiceError::EntryLookup)
     }
 
@@ -648,7 +673,7 @@ impl SearchService {
         Ok(seo_facts.entries.iter().any(|entry| {
             entry.source == source_id
                 && entry.ref_id == ref_id
-                && !candidate_kinds_for_entry(entry, &document_kind).is_empty()
+                && candidate_kind_for_entry(entry, &document_kind).is_some()
         }))
     }
 
@@ -660,11 +685,15 @@ impl SearchService {
         let mut candidates = Vec::new();
 
         for entry in &seo_facts.entries {
-            let Some(document_kind) = self.entry_sitemap_document_kind(snapshot, entry) else {
+            let Some(document_kind) = self.configured_served_document_kind_for_seo(
+                snapshot,
+                &entry.source,
+                &entry.ref_id,
+            ) else {
                 continue;
             };
 
-            for kind in candidate_kinds_for_entry(entry, &document_kind) {
+            if let Some(kind) = candidate_kind_for_entry(entry, &document_kind) {
                 candidates.push(SitemapCandidate {
                     source: entry.source.clone(),
                     name: entry.name.clone(),
@@ -678,14 +707,6 @@ impl SearchService {
 
     fn ref_allowed_to_be_indexed(&self, source: &SourceConfig, ref_id: &str) -> bool {
         source.default_ref.as_deref() == Some(ref_id)
-    }
-
-    fn entry_sitemap_document_kind(
-        &self,
-        snapshot: &ServedGenerationSnapshot,
-        entry: &SeoEntryFacts,
-    ) -> Option<DocumentKind> {
-        self.configured_served_document_kind_for_seo(snapshot, &entry.source, &entry.ref_id)
     }
 
     fn configured_served_document_kind_for_seo(
@@ -909,15 +930,17 @@ impl SearchService {
     ) -> std::result::Result<Option<ConfiguredSearchTarget>, RequestResolutionError> {
         let ref_config = self.configured_ref(source_id, ref_id)?;
         let artifact_kind = ref_config.producer.artifact_kind();
-
-        if !artifact_kind.indexes_search_documents() {
+        let Some(document_kind) = artifact_kind.indexed_document_kind() else {
             return Ok(None);
-        }
+        };
+        let entry_kind = IndexedEntryKind::from_document_kind(&document_kind)
+            .expect("searchable artifact kinds map to supported entry kinds");
 
         Ok(Some(ConfiguredSearchTarget {
             source: source_id.to_owned(),
             ref_id: ref_id.to_owned(),
             artifact_kind,
+            entry_kind,
         }))
     }
 
@@ -960,20 +983,20 @@ fn load_servable_generation(
     })
 }
 
-fn candidate_kinds_for_entry(
+fn candidate_kind_for_entry(
     entry: &SeoEntryFacts,
     configured_kind: &DocumentKind,
-) -> Vec<Option<DocumentKind>> {
+) -> Option<Option<DocumentKind>> {
     let (supported_count, eligible_count) = match configured_kind {
         DocumentKind::Package => (entry.package_supported_count, entry.package_eligible_count),
         DocumentKind::Option => (entry.option_supported_count, entry.option_eligible_count),
-        DocumentKind::App | DocumentKind::Service => return Vec::new(),
+        DocumentKind::App | DocumentKind::Service => return None,
     };
 
     if supported_count == 1 && eligible_count == 1 {
-        vec![None]
+        Some(None)
     } else {
-        Vec::new()
+        None
     }
 }
 
@@ -1312,9 +1335,65 @@ mod tests {
             .unwrap();
 
         assert_eq!(facts.status(), EntryFactsStatus::Unique);
-        assert_eq!(facts.option_count, 1);
-        assert_eq!(facts.package_count, 0);
+        assert_eq!(facts.count, 1);
         assert_eq!(facts.seo_eligible(), Some(true));
+    }
+
+    #[test]
+    fn entry_requested_kind_mismatch_returns_not_found_after_served_target_resolution() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(app_config_with_public_url(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+        let snapshot = service.snapshot();
+        let request = EntryRequest {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: Some(REF_SMALL.to_owned()),
+            name: "programs.git.enable".to_owned(),
+            kind: Some(DocumentKind::Package),
+        };
+
+        let lookup = service
+            .find_entry_with_snapshot(&snapshot, request.clone())
+            .unwrap();
+        let facts = service
+            .entry_facts_with_snapshot(&snapshot, request.clone())
+            .unwrap();
+        let lookup_with_facts = service
+            .find_entry_with_facts_with_snapshot(&snapshot, request, &facts)
+            .unwrap();
+
+        assert!(matches!(lookup, EntryLookupResult::NotFound));
+        assert_eq!(facts.status(), EntryFactsStatus::NotFound);
+        assert_eq!(facts.count, 0);
+        assert!(matches!(lookup_with_facts, EntryLookupResult::NotFound));
+    }
+
+    #[test]
+    fn entry_requested_kind_mismatch_does_not_hide_unserved_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let error = service
+            .find_entry_current(EntryRequest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: Some(REF_STABLE.to_owned()),
+                name: "programs.git.enable".to_owned(),
+                kind: Some(DocumentKind::Package),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
+                if source_id == SOURCE_FIXTURES && ref_id == REF_STABLE
+        ));
     }
 
     #[test]
@@ -1844,6 +1923,22 @@ mod tests {
     }
 
     #[test]
+    fn search_scope_ref_without_source_rejects_even_with_ref_set() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+
+        let config = Arc::new(multi_ref_app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let error = service
+            .search_scopes(None, Some(REF_SMALL), Some("single"))
+            .unwrap_err();
+
+        assert!(matches!(error, RequestResolutionError::RefRequiresSource));
+    }
+
+    #[test]
     fn default_served_ref_resolves() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
@@ -1900,6 +1995,26 @@ mod tests {
         assert_eq!(scopes.len(), 1);
         assert_eq!(scopes[0].source, SOURCE_FIXTURES);
         assert_eq!(scopes[0].ref_id, REF_SMALL);
+    }
+
+    #[test]
+    fn source_ref_set_selected_non_searchable_ref_returns_unserved_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_flake_info_only_index(&index_dir, &[REF_SMALL]);
+
+        let config = Arc::new(multi_ref_flake_info_only_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        let error = service
+            .search_scopes(Some(SOURCE_FIXTURES), None, Some("single"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RequestResolutionError::UnservedRef { source_id, ref_id }
+                if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
     }
 
     #[test]

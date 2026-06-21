@@ -450,11 +450,9 @@ fn page_index_metadata(
                 return noindex_metadata();
             }
 
-            return canonical_metadata(page_urls.absolute_url(&canonical_entry_path_for_document(
-                &state.config,
-                document,
-                &entry.annotation,
-            )));
+            return canonical_metadata(
+                page_urls.absolute_url(&canonical_entry_path_for_document(&state.config, document)),
+            );
         }
         EntryData::NotFound { .. } | EntryData::Ambiguous(_) | EntryData::Error(_) => {
             return noindex_metadata();
@@ -800,7 +798,6 @@ mod tests {
     fn found_entry(document: SearchDocument) -> EntryData {
         EntryData::Found(crate::entry::AnnotatedEntryDocument {
             annotation: SearchHitAnnotation {
-                ambiguous_entry_url: false,
                 unique_within_kind: true,
             },
             document: Box::new(document),

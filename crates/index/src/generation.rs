@@ -7,7 +7,9 @@ use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::SearchDocument;
 
 use crate::annotation::EntryAnnotationIndex;
-use crate::manifest::{IndexGenerationManifest, validate_generation_id};
+use crate::manifest::{
+    IndexGenerationManifest, validate_generation_id, validate_index_schema_version,
+};
 use crate::search::{IndexedSearchDocument, SearchIndex};
 use crate::seo::{SeoSidecar, SeoSidecarAccumulator};
 
@@ -32,6 +34,7 @@ pub fn open_structurally_complete_generation(
     path: &Utf8Path,
     manifest: &IndexGenerationManifest,
 ) -> Result<StructurallyCompleteGeneration> {
+    validate_index_schema_version(manifest).context("failed to validate index schema version")?;
     validate_manifest_invariants(manifest)?;
     validate_generation_id(manifest).context("failed to validate index generation manifest id")?;
 
@@ -242,13 +245,15 @@ struct TargetCountKey {
 
 #[cfg(test)]
 mod tests {
+    use camino::Utf8PathBuf;
+    use tempfile::tempdir;
     use time::OffsetDateTime;
 
     use nixsearch_core::artifact::ArtifactKind;
 
-    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, refresh_generation_id};
 
-    use super::validate_manifest_invariants;
+    use super::{open_structurally_complete_generation, validate_manifest_invariants};
 
     const SOURCE: &str = "fixtures";
     const REF: &str = "small";
@@ -291,6 +296,27 @@ mod tests {
         let error = validate_manifest_invariants(&manifest).unwrap_err();
 
         assert!(format!("{error:#}").contains("document_count mismatch"));
+    }
+
+    #[test]
+    fn structurally_opening_generation_rejects_unsupported_schema_before_index_scan() {
+        let tempdir = tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf()).unwrap();
+        let mut manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![target(ArtifactKind::OptionsJson, 1)],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        manifest.schema_version = 2;
+        refresh_generation_id(&mut manifest).unwrap();
+
+        let error = match open_structurally_complete_generation(&path, &manifest) {
+            Ok(_) => panic!("expected unsupported schema error"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
 
     fn target(artifact_kind: ArtifactKind, document_count: usize) -> IndexTargetManifest {

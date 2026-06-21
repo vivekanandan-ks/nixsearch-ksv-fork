@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use nixsearch_core::document::{DocumentKind, SearchDocument};
 
-use crate::manifest::IndexGenerationManifest;
+use crate::manifest::{IndexGenerationManifest, validate_index_schema_version};
 use crate::search::SearchIndex;
 
 pub const SEO_SIDECAR_SCHEMA_VERSION: u32 = 1;
@@ -132,6 +132,9 @@ impl SeoSidecarAccumulator {
 
 impl SeoSidecar {
     pub fn validate_for_manifest(&self, manifest: &IndexGenerationManifest) -> Result<()> {
+        validate_index_schema_version(manifest)
+            .context("failed to validate index schema version")?;
+
         if self.schema_version != SEO_SIDECAR_SCHEMA_VERSION {
             bail!(
                 "unsupported SEO sidecar schema version {}",
@@ -518,7 +521,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::annotation::SearchHitAnnotation;
-    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, refresh_generation_id};
     use crate::search::SearchIndex;
     use crate::seo::{SEO_SIDECAR_SCHEMA_VERSION, SeoSidecar, SeoSidecarAccumulator};
 
@@ -595,7 +598,6 @@ mod tests {
         let index = SearchIndex::create_or_replace(&index_path).unwrap();
         let mut writer = index.writer().unwrap();
         let annotation = SearchHitAnnotation {
-            ambiguous_entry_url: false,
             unique_within_kind: true,
         };
 
@@ -684,6 +686,18 @@ mod tests {
         let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn validation_rejects_unsupported_index_schema_version() {
+        let mut manifest = manifest(0, 1);
+        manifest.schema_version = 2;
+        refresh_generation_id(&mut manifest).unwrap();
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&manifest);
+
+        let error = sidecar.validate_for_manifest(&manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
 
     #[test]

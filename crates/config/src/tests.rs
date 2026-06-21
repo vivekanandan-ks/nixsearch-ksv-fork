@@ -393,7 +393,7 @@ fn rejects_source_kind_and_producer_artifact_kind_mismatch() {
 
     assert_error_contains(
         &error,
-        "sources.fixtures.refs.small producer artifact kind packages-json is incompatible with source kind Options",
+        "sources.fixtures.refs.small producer artifact kind packages-json is incompatible with source kind options",
     );
 }
 

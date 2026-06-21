@@ -1,6 +1,5 @@
 use nixsearch_config::app::AppConfig;
 use nixsearch_core::document::{DocumentKind, SearchDocument};
-use nixsearch_index::annotation::SearchHitAnnotation;
 use nixsearch_index::search::SearchHit;
 use nixsearch_service::SitemapCandidate;
 
@@ -204,13 +203,7 @@ pub fn entry_url_for_hit(
     hit: &SearchHit,
     page: Option<usize>,
 ) -> String {
-    entry_url_for_document(
-        config,
-        state,
-        &hit.document,
-        entry_url_kind(&hit.document, &hit.annotation),
-        page,
-    )
+    entry_url_for_document(config, state, &hit.document, None, page)
 }
 
 pub fn entry_url_for_annotated_document(
@@ -219,45 +212,21 @@ pub fn entry_url_for_annotated_document(
     entry: &AnnotatedEntryDocument,
     page: Option<usize>,
 ) -> String {
-    entry_url_for_document(
-        config,
-        state,
-        &entry.document,
-        entry_url_kind(&entry.document, &entry.annotation),
-        page,
-    )
+    entry_url_for_document(config, state, &entry.document, None, page)
 }
 
-pub fn canonical_entry_path_for_document(
-    config: &AppConfig,
-    document: &SearchDocument,
-    annotation: &SearchHitAnnotation,
-) -> String {
+pub fn canonical_entry_path_for_document(config: &AppConfig, document: &SearchDocument) -> String {
     let common = document.common();
 
     entry_url_for(
         &common.source,
         &common.name,
-        entry_url_kind(document, annotation),
+        None,
         &PageQuery {
             ref_id: ref_id_for_link(config, &common.source, &common.ref_id),
             ..PageQuery::default()
         },
     )
-}
-
-fn entry_url_kind(
-    document: &SearchDocument,
-    annotation: &SearchHitAnnotation,
-) -> Option<&'static str> {
-    if !annotation.ambiguous_entry_url {
-        return None;
-    }
-
-    match document.kind() {
-        DocumentKind::Package | DocumentKind::Option => Some(document.kind().as_str()),
-        DocumentKind::App | DocumentKind::Service => None,
-    }
 }
 
 fn entry_url_for_document(
@@ -428,10 +397,9 @@ mod tests {
         }
     }
 
-    fn hit(document: SearchDocument, ambiguous_entry_url: bool) -> SearchHit {
+    fn hit(document: SearchDocument) -> SearchHit {
         SearchHit {
             annotation: SearchHitAnnotation {
-                ambiguous_entry_url,
                 unique_within_kind: true,
             },
             score: 1.0,
@@ -530,13 +498,13 @@ mod tests {
         );
 
         assert_eq!(
-            entry_url_for_hit(&config, &state, &hit(document, false), Some(3)),
+            entry_url_for_hit(&config, &state, &hit(document), Some(3)),
             "/fixtures/ripgrep?q=ripgrep&source=all&page=3"
         );
     }
 
     #[test]
-    fn entry_url_for_hit_includes_kind_when_entry_url_is_ambiguous() {
+    fn entry_url_for_hit_uses_clean_path_for_cross_kind_names() {
         let config = app_config("./data/indexes");
         let request = PageRequest {
             query: PageQuery {
@@ -557,13 +525,13 @@ mod tests {
         );
 
         assert_eq!(
-            entry_url_for_hit(&config, &state, &hit(document, true), Some(2)),
-            "/fixtures/git?q=git&kind=package&source=all&page=2"
+            entry_url_for_hit(&config, &state, &hit(document), Some(2)),
+            "/fixtures/git?q=git&source=all&page=2"
         );
     }
 
     #[test]
-    fn canonical_entry_path_for_document_includes_only_required_kind() {
+    fn canonical_entry_path_for_document_uses_clean_path() {
         let config = app_config("./data/indexes");
         let clean_document = package_doc_for(
             &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
@@ -575,22 +543,14 @@ mod tests {
             "git",
             "Git package.",
         );
-        let clean = SearchHitAnnotation {
-            ambiguous_entry_url: false,
-            unique_within_kind: true,
-        };
-        let ambiguous = SearchHitAnnotation {
-            ambiguous_entry_url: true,
-            unique_within_kind: true,
-        };
 
         assert_eq!(
-            canonical_entry_path_for_document(&config, &clean_document, &clean),
+            canonical_entry_path_for_document(&config, &clean_document),
             "/fixtures/ripgrep"
         );
         assert_eq!(
-            canonical_entry_path_for_document(&config, &ambiguous_document, &ambiguous),
-            "/fixtures/git?kind=package"
+            canonical_entry_path_for_document(&config, &ambiguous_document),
+            "/fixtures/git"
         );
     }
 
