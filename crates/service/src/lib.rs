@@ -8,7 +8,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
-use nixsearch_index::manifest::IndexGenerationManifest;
+use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::{
     EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
     SearchScope,
@@ -211,9 +211,9 @@ struct ConfiguredSearchTarget {
     entry_kind: IndexedEntryKind,
 }
 
-struct ResolvedEntryLookup {
-    lookup: EntryLookup,
-    kind_mismatch: bool,
+enum ResolvedEntryLookup {
+    Lookup(EntryLookup),
+    KindMismatch(EntryLookup),
 }
 
 impl SearchService {
@@ -404,14 +404,13 @@ impl SearchService {
     ) -> ServiceResult<EntryLookupResult> {
         let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        if resolved.kind_mismatch {
-            return Ok(EntryLookupResult::NotFound);
+        match resolved {
+            ResolvedEntryLookup::Lookup(lookup) => snapshot
+                .index
+                .find_entry(lookup)
+                .map_err(ServiceError::EntryLookup),
+            ResolvedEntryLookup::KindMismatch(_) => Ok(EntryLookupResult::NotFound),
         }
-
-        snapshot
-            .index
-            .find_entry(resolved.lookup)
-            .map_err(ServiceError::EntryLookup)
     }
 
     pub fn find_entry_with_facts_with_snapshot(
@@ -422,14 +421,13 @@ impl SearchService {
     ) -> ServiceResult<EntryLookupResult> {
         let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        if resolved.kind_mismatch {
-            return Ok(EntryLookupResult::NotFound);
+        match resolved {
+            ResolvedEntryLookup::Lookup(lookup) => snapshot
+                .index
+                .find_entry_with_facts(lookup, facts)
+                .map_err(ServiceError::EntryLookup),
+            ResolvedEntryLookup::KindMismatch(_) => Ok(EntryLookupResult::NotFound),
         }
-
-        snapshot
-            .index
-            .find_entry_with_facts(resolved.lookup, facts)
-            .map_err(ServiceError::EntryLookup)
     }
 
     pub fn entry_facts_current(&self, request: EntryRequest) -> ServiceResult<EntryFacts> {
@@ -444,14 +442,15 @@ impl SearchService {
     ) -> ServiceResult<EntryFacts> {
         let resolved = self.resolve_entry_lookup_for_snapshot(snapshot, request)?;
 
-        if resolved.kind_mismatch {
-            return Ok(EntryFacts::not_found_for_lookup(&resolved.lookup));
+        match resolved {
+            ResolvedEntryLookup::Lookup(lookup) => snapshot
+                .index
+                .entry_facts(lookup)
+                .map_err(ServiceError::EntryLookup),
+            ResolvedEntryLookup::KindMismatch(lookup) => {
+                Ok(EntryFacts::not_found_for_lookup(&lookup))
+            }
         }
-
-        snapshot
-            .index
-            .entry_facts(resolved.lookup)
-            .map_err(ServiceError::EntryLookup)
     }
 
     pub fn search_scopes(
@@ -487,15 +486,7 @@ impl SearchService {
         Ok(targets
             .iter()
             .map(|expected| {
-                snapshot
-                    .manifest()
-                    .targets
-                    .iter()
-                    .filter(|target| {
-                        target.source == expected.source
-                            && target.ref_id == expected.ref_id
-                            && target.artifact_kind == expected.artifact_kind
-                    })
+                Self::matching_manifest_targets(snapshot, expected)
                     .map(|target| target.document_count)
                     .sum::<usize>()
             })
@@ -567,15 +558,18 @@ impl SearchService {
             IndexedEntryKind::from_document_kind(kind) != Some(target.entry_kind)
         });
 
-        Ok(ResolvedEntryLookup {
-            lookup: EntryLookup {
-                source: request.source,
-                ref_id: target.ref_id,
-                entry_kind: target.entry_kind,
-                name: request.name,
-            },
-            kind_mismatch,
-        })
+        let lookup = EntryLookup {
+            source: request.source,
+            ref_id: target.ref_id,
+            entry_kind: target.entry_kind,
+            name: request.name,
+        };
+
+        if kind_mismatch {
+            Ok(ResolvedEntryLookup::KindMismatch(lookup))
+        } else {
+            Ok(ResolvedEntryLookup::Lookup(lookup))
+        }
     }
 
     pub fn configured_source_exists(&self, source_id: &str) -> bool {
@@ -612,7 +606,16 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         expected: &ConfiguredSearchTarget,
     ) -> bool {
-        snapshot.manifest().targets.iter().any(|target| {
+        Self::matching_manifest_targets(snapshot, expected)
+            .next()
+            .is_some()
+    }
+
+    fn matching_manifest_targets<'a>(
+        snapshot: &'a ServedGenerationSnapshot,
+        expected: &'a ConfiguredSearchTarget,
+    ) -> impl Iterator<Item = &'a IndexTargetManifest> + 'a {
+        snapshot.manifest().targets.iter().filter(|target| {
             target.source == expected.source
                 && target.ref_id == expected.ref_id
                 && target.artifact_kind == expected.artifact_kind
@@ -777,7 +780,7 @@ impl SearchService {
     ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         match (source, ref_id, ref_set) {
             (Some(source_id), _, Some(ref_set_id)) => {
-                self.resolve_source_ref_set_scope(source_id, ref_id, ref_set_id)
+                self.resolve_source_ref_set_ref(source_id, ref_id, ref_set_id)
             }
             (Some(source_id), Some(ref_id), None) => {
                 self.ensure_configured_ref(source_id, ref_id)?;
@@ -789,16 +792,16 @@ impl SearchService {
                 Ok(vec![(source_id.to_owned(), default_ref.to_owned())])
             }
             (None, Some(_), _) => Err(RequestResolutionError::RefRequiresSource),
-            (None, None, Some(ref_set_id)) => self.resolve_all_ref_set_scopes(ref_set_id),
-            (None, None, None) => self.resolve_default_all_scopes(),
+            (None, None, Some(ref_set_id)) => self.resolve_all_ref_set_refs(ref_set_id),
+            (None, None, None) => self.resolve_default_all_refs(),
         }
     }
 
-    fn resolve_default_all_scopes(
+    fn resolve_default_all_refs(
         &self,
     ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
         if let Some(default_ref_set) = self.config.default_ref_set() {
-            return self.resolve_all_ref_set_scopes(default_ref_set);
+            return self.resolve_all_ref_set_refs(default_ref_set);
         }
 
         self.config
@@ -813,7 +816,7 @@ impl SearchService {
             .collect()
     }
 
-    fn resolve_all_ref_set_scopes(
+    fn resolve_all_ref_set_refs(
         &self,
         ref_set_id: &str,
     ) -> std::result::Result<Vec<(String, String)>, RequestResolutionError> {
@@ -835,7 +838,7 @@ impl SearchService {
             .collect()
     }
 
-    fn resolve_source_ref_set_scope(
+    fn resolve_source_ref_set_ref(
         &self,
         source_id: &str,
         ref_id: Option<&str>,

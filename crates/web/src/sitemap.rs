@@ -631,13 +631,10 @@ mod tests {
 
     #[test]
     fn xml_escapes_url_and_index_locations() {
-        let url_entry =
-            render_url_entry("https://example.com&x=<tag>", "/fixtures/git?kind=package");
+        let url_entry = render_url_entry("https://example.com&x=<tag>", "/fixtures/git?ref=small");
         let index_entry = render_index_entry("https://example.com&x=<tag>", 1).unwrap();
 
-        assert!(
-            url_entry.contains("https://example.com&amp;x=&lt;tag&gt;/fixtures/git?kind=package")
-        );
+        assert!(url_entry.contains("https://example.com&amp;x=&lt;tag&gt;/fixtures/git?ref=small"));
         assert!(
             index_entry.contains("https://example.com&amp;x=&lt;tag&gt;/sitemap.xml?shard=00001")
         );

@@ -379,15 +379,31 @@ fn loads_existing_file_producer() {
 
 #[test]
 fn source_kind_accepts_expected_artifact_kinds() {
-    assert!(SourceKind::Options.accepts_artifact_kind(ArtifactKind::OptionsJson));
-    assert!(!SourceKind::Options.accepts_artifact_kind(ArtifactKind::PackagesJson));
-    assert!(SourceKind::Packages.accepts_artifact_kind(ArtifactKind::PackagesJson));
-    assert!(!SourceKind::Packages.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
-    assert!(SourceKind::Apps.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
-    assert!(SourceKind::Services.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
-    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::OptionsJson));
-    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::PackagesJson));
-    assert!(SourceKind::Mixed.accepts_artifact_kind(ArtifactKind::FlakeInfoJson));
+    let cases = [
+        (SourceKind::Options, ArtifactKind::OptionsJson, true),
+        (SourceKind::Options, ArtifactKind::PackagesJson, false),
+        (SourceKind::Options, ArtifactKind::FlakeInfoJson, false),
+        (SourceKind::Packages, ArtifactKind::OptionsJson, false),
+        (SourceKind::Packages, ArtifactKind::PackagesJson, true),
+        (SourceKind::Packages, ArtifactKind::FlakeInfoJson, false),
+        (SourceKind::Apps, ArtifactKind::OptionsJson, false),
+        (SourceKind::Apps, ArtifactKind::PackagesJson, false),
+        (SourceKind::Apps, ArtifactKind::FlakeInfoJson, true),
+        (SourceKind::Services, ArtifactKind::OptionsJson, false),
+        (SourceKind::Services, ArtifactKind::PackagesJson, false),
+        (SourceKind::Services, ArtifactKind::FlakeInfoJson, true),
+        (SourceKind::Mixed, ArtifactKind::OptionsJson, true),
+        (SourceKind::Mixed, ArtifactKind::PackagesJson, true),
+        (SourceKind::Mixed, ArtifactKind::FlakeInfoJson, true),
+    ];
+
+    for (source_kind, artifact_kind, expected) in cases {
+        assert_eq!(
+            source_kind.accepts_artifact_kind(artifact_kind),
+            expected,
+            "unexpected compatibility for {source_kind:?} and {artifact_kind:?}"
+        );
+    }
 }
 
 #[test]

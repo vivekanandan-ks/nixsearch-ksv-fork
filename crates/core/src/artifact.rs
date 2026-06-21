@@ -93,9 +93,11 @@ impl ArtifactKind {
     }
 
     pub fn indexed_entry_kind(self) -> Option<IndexedEntryKind> {
-        self.indexed_document_kind()
-            .as_ref()
-            .and_then(IndexedEntryKind::from_document_kind)
+        match self {
+            Self::OptionsJson => Some(IndexedEntryKind::Option),
+            Self::PackagesJson => Some(IndexedEntryKind::Package),
+            Self::FlakeInfoJson => None,
+        }
     }
 
     pub fn for_indexed_document_kind(kind: &DocumentKind) -> Option<Self> {

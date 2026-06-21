@@ -451,31 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_url_for_hit_is_clean_when_entry_url_is_unambiguous() {
-        let config = app_config("./data/indexes");
-        let request = PageRequest {
-            query: PageQuery {
-                q: Some("ripgrep".to_owned()),
-                kind: Some("option".to_owned()),
-                ..PageQuery::default()
-            },
-            ..PageRequest::default()
-        };
-        let state = page_state(&config, &request);
-        let document = package_doc_for(
-            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
-            "ripgrep",
-            "Ripgrep package.",
-        );
-
-        assert_eq!(
-            entry_url_for_hit(&config, &state, &hit(document), Some(3)),
-            "/fixtures/ripgrep?q=ripgrep&source=all&page=3"
-        );
-    }
-
-    #[test]
-    fn entry_url_for_hit_omits_request_kind() {
+    fn entry_url_for_hit_omits_request_kind_and_preserves_context() {
         let config = app_config("./data/indexes");
         let request = PageRequest {
             query: PageQuery {
@@ -510,19 +486,10 @@ mod tests {
             "ripgrep",
             "Ripgrep package.",
         );
-        let git_document = package_doc_for(
-            &ingest_context_for(SOURCE_FIXTURES, REF_SMALL),
-            "git",
-            "Git package.",
-        );
 
         assert_eq!(
             canonical_entry_path_for_document(&config, &clean_document),
             "/fixtures/ripgrep"
-        );
-        assert_eq!(
-            canonical_entry_path_for_document(&config, &git_document),
-            "/fixtures/git"
         );
     }
 

@@ -673,6 +673,13 @@ mod tests {
         assert!(!body.contains(&loc), "unexpected sitemap loc {loc:?}");
     }
 
+    fn assert_sitemap_has_no_query_kind(body: &str) {
+        assert!(
+            !body.contains("?kind="),
+            "unexpected sitemap kind query in {body}"
+        );
+    }
+
     fn assert_sitemap_home_only(body: &str) {
         assert_sitemap_has_path(body, "/");
         assert_eq!(
@@ -978,8 +985,7 @@ mod tests {
         let body = request_sitemap(app).await;
 
         assert_sitemap_has_path(&body, "/fixtures/git");
-        assert_sitemap_missing_path(&body, "/fixtures/git?kind=package");
-        assert_sitemap_missing_path(&body, "/fixtures/git?kind=option");
+        assert_sitemap_has_no_query_kind(&body);
     }
 
     #[tokio::test]
@@ -1005,7 +1011,6 @@ mod tests {
         let app = test_app(app_config_with_public_url(&index_dir));
         let body = request_sitemap(app).await;
 
-        assert_sitemap_missing_path(&body, "/fixtures/duplicate.entry?kind=option");
         assert_sitemap_home_only(&body);
     }
 
@@ -1990,7 +1995,7 @@ mod tests {
         publish_duplicate_option_index(&index_dir);
 
         let app = test_app(app_config_with_public_url(&index_dir));
-        let (status, body) = request_body(app, "/fixtures/duplicate.entry?kind=option").await;
+        let (status, body) = request_body(app, "/fixtures/duplicate.entry").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_no_canonical(&body);
