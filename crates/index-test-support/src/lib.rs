@@ -132,7 +132,7 @@ pub fn publish_documents_with_manifest_targets(
     let store = IndexStore::new(index_root);
     let generation = store.create_generation_path().unwrap();
 
-    let index = SearchIndex::create_or_replace(&generation).unwrap();
+    let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
     let mut writer = index.writer().unwrap();
     let mut annotations = EntryAnnotationIndex::new();
     let mut seo_facts = SeoSidecarAccumulator::new();
@@ -163,6 +163,7 @@ pub fn publish_documents_with_manifest_targets(
         .write_seo_sidecar(&published_generation, &sidecar)
         .unwrap();
     store.write_manifest(&generation, &manifest).unwrap();
+    store.write_integrity(&published_generation, true).unwrap();
     store.publish(&generation).unwrap();
     store.current_path().unwrap()
 }

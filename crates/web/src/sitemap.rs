@@ -425,13 +425,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(one_entry_len <= two_entry_len - 1);
+        assert!(one_entry_len < two_entry_len);
         assert_eq!(shards.len(), 2);
-        assert!(
-            shards
-                .iter()
-                .all(|shard| shard.byte_len <= two_entry_len - 1)
-        );
+        assert!(shards.iter().all(|shard| shard.byte_len < two_entry_len));
     }
 
     #[test]

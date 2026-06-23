@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::generation::{
@@ -15,6 +16,8 @@ use crate::manifest::{
 };
 use crate::search::SearchIndex;
 use crate::seo::SeoSidecar;
+
+const INTEGRITY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -36,6 +39,15 @@ pub struct GenerationLease {
 pub struct LeasedPublishedGeneration {
     generation: PublishedGeneration,
     _lease: Arc<GenerationLease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct GenerationIntegrity {
+    schema_version: u32,
+    manifest_generation_id: String,
+    manifest_hash: String,
+    seo_sidecar_hash: Option<String>,
+    index_fingerprint: String,
 }
 
 impl LeasedPublishedGeneration {
@@ -362,6 +374,13 @@ impl IndexStore {
             .with_context(|| format!("failed to sync directory {}", path.as_str()))
     }
 
+    fn sync_file(path: &Utf8Path) -> Result<()> {
+        fs::File::open(path)
+            .with_context(|| format!("failed to open file {}", path.as_str()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync file {}", path.as_str()))
+    }
+
     pub fn current_path(&self) -> Result<Utf8PathBuf> {
         self.try_current_path()?.with_context(|| {
             format!(
@@ -400,6 +419,114 @@ impl IndexStore {
 
     pub fn seo_sidecar_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
         generation_path.join("seo-facts.json")
+    }
+
+    pub fn integrity_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
+        generation_path.join("integrity.json")
+    }
+
+    pub fn index_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
+        generation_path.join("index")
+    }
+
+    pub fn write_integrity(
+        &self,
+        generation: &PublishedGeneration,
+        seo_sidecar_required: bool,
+    ) -> Result<()> {
+        let generation_path = self.validate_generation_path(&generation.path)?;
+        let integrity = self.build_integrity(generation, seo_sidecar_required)?;
+        let bytes = serde_json::to_vec_pretty(&integrity)
+            .context("failed to serialize index generation integrity metadata")?;
+        let path = self.integrity_path(&generation_path);
+        let temp_path = self.create_temp_file(&generation_path, "integrity.json.tmp", &bytes)?;
+
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error)
+                .with_context(|| format!("failed to write integrity metadata {path}"));
+        }
+
+        Self::sync_file(&path)?;
+        Self::sync_dir(&generation_path)?;
+
+        Ok(())
+    }
+
+    fn build_integrity(
+        &self,
+        generation: &PublishedGeneration,
+        seo_sidecar_required: bool,
+    ) -> Result<GenerationIntegrity> {
+        let manifest_path = self.manifest_path(&generation.path);
+        let sidecar_path = self.seo_sidecar_path(&generation.path);
+        let seo_sidecar_hash = match hash_file_if_present(&sidecar_path)? {
+            Some(hash) => Some(hash),
+            None if seo_sidecar_required => {
+                anyhow::bail!("SEO sidecar is required before writing generation integrity")
+            }
+            None => None,
+        };
+
+        Ok(GenerationIntegrity {
+            schema_version: INTEGRITY_SCHEMA_VERSION,
+            manifest_generation_id: generation.manifest.generation_id.clone(),
+            manifest_hash: hash_file(&manifest_path)?,
+            seo_sidecar_hash,
+            index_fingerprint: self.index_fingerprint(&generation.path)?,
+        })
+    }
+
+    fn read_integrity(&self, generation: &PublishedGeneration) -> Result<GenerationIntegrity> {
+        let path = self.integrity_path(&generation.path);
+        let bytes =
+            fs::read(&path).with_context(|| format!("failed to read integrity metadata {path}"))?;
+        let integrity: GenerationIntegrity = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse integrity metadata {path}"))?;
+
+        if integrity.schema_version != INTEGRITY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported integrity schema version {} (current {})",
+                integrity.schema_version,
+                INTEGRITY_SCHEMA_VERSION
+            );
+        }
+
+        Ok(integrity)
+    }
+
+    fn validate_integrity(
+        &self,
+        generation: &PublishedGeneration,
+        seo_sidecar_required: bool,
+    ) -> Result<()> {
+        let expected = self.build_integrity(generation, seo_sidecar_required)?;
+        let actual = self.read_integrity(generation)?;
+
+        if actual != expected {
+            anyhow::bail!("index generation integrity metadata does not match generation files");
+        }
+
+        Ok(())
+    }
+
+    fn index_fingerprint(&self, generation_path: &Utf8Path) -> Result<String> {
+        let index_path = self.index_path(generation_path);
+        let mut entries = Vec::new();
+        collect_index_files(&index_path, &index_path, &mut entries)?;
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut hasher = Sha256::new();
+        for (relative, size, hash) in entries {
+            hasher.update(relative.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(size.to_string().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(hash.as_bytes());
+            hasher.update(b"\0");
+        }
+
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
     pub fn write_manifest(
@@ -462,8 +589,9 @@ impl IndexStore {
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let index = SearchIndex::open(&generation_path)
-            .with_context(|| format!("failed to open search index {generation_path}"))?;
+        let index_path = self.index_path(&generation_path);
+        let index = SearchIndex::open(&index_path)
+            .with_context(|| format!("failed to open search index {index_path}"))?;
 
         sidecar
             .validate_for_index(&generation.manifest, &index)
@@ -545,9 +673,19 @@ impl IndexStore {
             .context("failed to validate supplied index generation manifest")?;
 
         let sidecar = self.read_seo_sidecar(generation)?;
-        let complete =
-            open_seo_complete_generation(&generation.path, &generation.manifest, sidecar)
-                .context("failed to validate SEO-complete generation")?;
+        if self.validate_integrity(generation, true).is_ok() {
+            let index_path = self.index_path(&generation.path);
+            let index = SearchIndex::open(&index_path)
+                .with_context(|| format!("failed to open search index {index_path}"))?;
+            return Ok((index, sidecar));
+        }
+
+        let complete = open_seo_complete_generation(
+            &self.index_path(&generation.path),
+            &generation.manifest,
+            sidecar,
+        )
+        .context("failed to validate SEO-complete generation")?;
 
         Ok((complete.index, complete.sidecar))
     }
@@ -556,7 +694,26 @@ impl IndexStore {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<StructurallyCompleteGeneration> {
-        open_structurally_complete_generation(&generation.path, &generation.manifest)
+        if self.validate_integrity(generation, false).is_ok() {
+            let index_path = self.index_path(&generation.path);
+            let index = SearchIndex::open(&index_path)
+                .with_context(|| format!("failed to open search index {index_path}"))?;
+            let seo_sidecar = crate::seo::SeoSidecarAccumulator::from_index(&index)?
+                .into_sidecar_for_manifest(&generation.manifest);
+
+            return Ok(StructurallyCompleteGeneration {
+                index,
+                scan: crate::generation::GenerationScan {
+                    document_count: generation.manifest.document_count,
+                    seo_sidecar,
+                },
+            });
+        }
+
+        open_structurally_complete_generation(
+            &self.index_path(&generation.path),
+            &generation.manifest,
+        )
     }
 
     pub fn open_valid_leased_generation(
@@ -712,6 +869,58 @@ fn validate_generation_name(generation_name: &str) -> Result<()> {
     anyhow::bail!("invalid generation name {generation_name:?}")
 }
 
+fn hash_file(path: &Utf8Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read file {path}"))?;
+    Ok(hash_bytes(&bytes))
+}
+
+fn hash_file_if_present(path: &Utf8Path) -> Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(hash_bytes(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read file {path}")),
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn collect_index_files(
+    root: &Utf8Path,
+    path: &Utf8Path,
+    entries: &mut Vec<(String, u64, String)>,
+) -> Result<()> {
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read index dir {path}"))? {
+        let entry = entry.with_context(|| format!("failed to read index dir entry in {path}"))?;
+        let entry_path = Utf8PathBuf::from_path_buf(entry.path())
+            .map_err(|path| anyhow::anyhow!("index path is not valid UTF-8: {}", path.display()))?;
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to stat index file {entry_path}"))?;
+
+        if metadata.is_dir() {
+            collect_index_files(root, &entry_path, entries)?;
+            continue;
+        }
+
+        if !metadata.is_file() {
+            anyhow::bail!("unexpected non-regular index path {entry_path}");
+        }
+
+        let relative = entry_path
+            .strip_prefix(root)
+            .with_context(|| format!("failed to relativize index path {entry_path}"))?
+            .as_str()
+            .to_owned();
+        entries.push((relative, metadata.len(), hash_file(&entry_path)?));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -791,7 +1000,7 @@ mod tests {
     fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
         let generation = store.create_generation_path().unwrap();
         let document = SearchDocument::Option(OptionDoc::new(&context(), "programs.git.enable"));
-        let index = SearchIndex::create_or_replace(&generation).unwrap();
+        let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
         let mut annotations = EntryAnnotationIndex::new();
         annotations.observe(&document);
         let mut writer = index.writer().unwrap();
@@ -825,7 +1034,27 @@ mod tests {
         store
             .write_manifest(&generation.path, &generation.manifest)
             .unwrap();
+        store.write_integrity(&generation, true).unwrap();
         generation
+    }
+
+    #[test]
+    fn index_store_structural_fast_path_recomputes_seo_sidecar() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = publish_one_option_generation(&store);
+
+        let complete = store
+            .open_structurally_complete_published_generation(&generation)
+            .unwrap();
+
+        assert_eq!(complete.scan.document_count, 1);
+        assert_eq!(complete.scan.seo_sidecar.refs.len(), 1);
+        assert_eq!(complete.scan.seo_sidecar.entries.len(), 1);
+        assert_eq!(
+            complete.scan.seo_sidecar.entries[0].name,
+            "programs.git.enable"
+        );
     }
 
     #[test]

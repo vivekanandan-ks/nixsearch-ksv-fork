@@ -701,12 +701,7 @@
         selectedRefId === undefined
           ? activeRefSet || defaultRefSet()
           : selectedRefId;
-      container.innerHTML = refSets
-        .map((r) => {
-          const checked = r === selectedRefSet ? " checked" : "";
-          return `<label class="ref-radio-label"><input type="radio" name="ref_set" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
-        })
-        .join("");
+      replaceRefRadios(container, refSets, selectedRefSet, "ref_set");
       syncHeaderHeight();
       return;
     }
@@ -721,13 +716,30 @@
       selectedRefId === undefined
         ? firstRefForRefSetSource(activeRefSet, sourceId) || source.defaultRef
         : selectedRefId;
-    container.innerHTML = source.refs
-      .map((r) => {
-        const checked = r === selectedRef ? " checked" : "";
-        return `<label class="ref-radio-label"><input type="radio" name="ref" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
-      })
-      .join("");
+    replaceRefRadios(container, source.refs, selectedRef, "ref");
     syncHeaderHeight();
+  }
+
+  function replaceRefRadios(container, refs, selectedRef, inputName) {
+    container.replaceChildren(
+      ...refs.map((refId) => {
+        const label = document.createElement("label");
+        label.className = "ref-radio-label";
+
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = inputName;
+        input.value = refId;
+        input.checked = refId === selectedRef;
+        input.dataset.nixsearchInput = "ref";
+
+        const span = document.createElement("span");
+        span.textContent = refId;
+
+        label.append(input, span);
+        return label;
+      }),
+    );
   }
 
   function syncHeaderHeight() {
@@ -875,7 +887,10 @@
         ? refsForRefSetSource(contextActiveRefSet, sourceId)
         : [];
       const shouldUseRefSet = refSetRefs.length > 0;
-      const shouldSetRef = !shouldUseRefSet || refSetRefs.length > 1;
+      const shouldSetRef =
+        !shouldUseRefSet ||
+        refSetRefs.length > 1 ||
+        (source && refValue && refValue !== source.defaultRef);
       const sourceMatchesContext = context.sourceId === sourceId;
 
       if (

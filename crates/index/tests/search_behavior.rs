@@ -447,6 +447,27 @@ fn package_main_program_query_finds_package() {
 }
 
 #[test]
+fn package_program_query_finds_package_by_non_main_executable() {
+    let context = ingest_context_for(SOURCE_NIXPKGS, REF_SMALL);
+    let mut git = package_doc_with_main_program(&context, "git", "Git package.", "git");
+    let SearchDocument::Package(package) = &mut git else {
+        panic!("expected package document");
+    };
+    package.programs = vec!["git-shell".to_owned()];
+    let description_only = package_doc_for(
+        &context,
+        "git-shell-docs",
+        "Package whose description mentions git-shell.",
+    );
+    let (_tempdir, index) = build_index(vec![git, description_only]);
+
+    let hits = search(&index, "git-shell");
+
+    assert_contains(&hits, "git");
+    assert_ranks_before(&hits, "git", "git-shell-docs");
+}
+
+#[test]
 fn natural_language_query_uses_text_relevance_without_path_penalty() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
     let docs = vec![

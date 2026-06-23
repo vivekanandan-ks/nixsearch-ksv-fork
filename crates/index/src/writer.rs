@@ -18,6 +18,11 @@ impl SearchIndexWriter {
         document: &SearchDocument,
         annotation: &SearchHitAnnotation,
     ) -> Result<()> {
+        document
+            .validate_identity()
+            .map_err(anyhow::Error::msg)
+            .context("invalid search document identity")?;
+
         match document {
             SearchDocument::Option(option) => self.add_option(option, annotation),
             SearchDocument::Package(package) => self.add_package(package, annotation),
@@ -106,6 +111,10 @@ impl SearchIndexWriter {
 
         if let Some(main_program) = &package.main_program {
             document.add_text(self.fields.main_program, main_program);
+        }
+
+        for program in &package.programs {
+            document.add_text(self.fields.programs, program);
         }
 
         for platform in &package.platforms {

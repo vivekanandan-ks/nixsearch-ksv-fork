@@ -143,6 +143,10 @@ async fn build_and_publish_generation_with_policy(
 
             validate_produced_artifact_identity(&target, &produced)?;
 
+            let verified = artifact_store
+                .get_verified_artifact(&produced.artifact_ref)
+                .await?;
+
             let documents = consume_target(artifact_store, &target, &produced).await?;
 
             for document in &documents {
@@ -158,8 +162,8 @@ async fn build_and_publish_generation_with_policy(
                 ref_id: target.ref_config.id.clone(),
                 artifact_kind: produced.artifact_ref.kind,
                 document_count: documents.len(),
-                artifact_hash: Some(produced.metadata.content_hash.clone()),
-                revision: produced.metadata.revision.clone(),
+                artifact_hash: Some(verified.metadata.content_hash.clone()),
+                revision: verified.metadata.revision.clone(),
             });
 
             tracing::info!(
@@ -188,7 +192,8 @@ async fn build_and_publish_generation_with_policy(
 
         spool_writer.finish()?;
 
-        let index = SearchIndex::create_or_replace(&generation_path)?;
+        let index_path = index_store.index_path(&generation_path);
+        let index = SearchIndex::create_or_replace(&index_path)?;
         let mut writer = index.writer()?;
         let mut seo_facts = SeoSidecarAccumulator::new();
 
@@ -209,6 +214,7 @@ async fn build_and_publish_generation_with_policy(
 
         index_store.write_seo_sidecar(&published_generation, &sidecar)?;
         index_store.write_manifest(&generation_path, &manifest)?;
+        index_store.write_integrity(&published_generation, true)?;
 
         publish_started = true;
         index_store.publish(&generation_path)?;
@@ -512,6 +518,7 @@ mod tests {
             strip_prefixes: Vec::new(),
             ref_config: RefConfig {
                 id: REF.to_owned(),
+                artifact_only: true,
                 producer: ProducerConfig::ExistingFile {
                     path: PathBuf::from("unused.json"),
                     artifact: ArtifactKind::FlakeInfoJson,

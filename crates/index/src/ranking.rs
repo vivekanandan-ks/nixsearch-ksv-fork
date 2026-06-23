@@ -432,7 +432,15 @@ fn package_name_score(analysis: &QueryAnalysis, package: &PackageDoc) -> Score {
     if let Some(main_program) = &package.main_program
         && main_program.to_lowercase() == analysis.normalized
     {
-        score += 85.0;
+        score += 130.0;
+    }
+
+    if package
+        .programs
+        .iter()
+        .any(|program| program.to_lowercase() == analysis.normalized)
+    {
+        score += 110.0;
     }
 
     if package_set_explicit {

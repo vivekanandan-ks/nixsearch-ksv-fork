@@ -444,6 +444,9 @@ fn mixed_source_kind_allows_any_producer_artifact_kind() {
         path = "fixtures/search-small/packages.json"
         artifact = "packages-json"
 
+        [sources.fixtures.refs.apps]
+        artifact_only = true
+
         [sources.fixtures.refs.apps.producer]
         type = "existing-file"
         path = "fixtures/search-small/flake-info.json"
@@ -765,8 +768,8 @@ fn loads_flake_file_producer_with_empty_fallback_inputs() {
 }
 
 #[test]
-fn loads_flake_info_producer() {
-    let config = load_toml(
+fn rejects_flake_info_producer() {
+    let error = load_toml_error(
         r#"
         [sources.fixtures]
         name = "Fixtures"
@@ -778,16 +781,7 @@ fn loads_flake_info_producer() {
         "#,
     );
 
-    let producer = &config.sources[FIXTURES_SOURCE].refs[0].producer;
-
-    assert_eq!(producer.kind(), ProducerKind::FlakeInfo);
-
-    match producer {
-        ProducerConfig::FlakeInfo { source_ref } => {
-            assert_eq!(source_ref, "github:example/project/main");
-        }
-        other => panic!("unexpected producer: {other:?}"),
-    }
+    assert_error_contains(&error, "producer type flake-info is not implemented yet");
 }
 
 #[test]
@@ -800,7 +794,7 @@ fn rejects_invalid_source_ids() {
         "#,
     );
 
-    assert_error_contains(&error, "must not contain '/'");
+    assert_error_contains(&error, "must contain only ASCII letters");
 }
 
 #[test]
@@ -845,7 +839,7 @@ fn validates_nix_build_options_required_fields_by_deserialization() {
 }
 
 #[test]
-fn validates_custom_command_is_not_empty() {
+fn rejects_custom_command_producer() {
     let error = load_toml_error(
         r#"
         [sources.custom]
@@ -859,7 +853,10 @@ fn validates_custom_command_is_not_empty() {
         "#,
     );
 
-    assert_error_contains(&error, "command must not be empty");
+    assert_error_contains(
+        &error,
+        "producer type custom-command is not implemented yet",
+    );
 }
 
 #[test]
@@ -1435,12 +1432,12 @@ fn infers_default_ref_from_single_ref() {
 }
 
 #[test]
-fn rejects_missing_default_ref_with_multiple_refs() {
-    let error = load_toml_error(&fixture_two_ref_source_toml(None));
+fn infers_default_ref_from_first_searchable_ref_with_multiple_refs() {
+    let config = load_toml(&fixture_two_ref_source_toml(None));
 
-    assert_error_contains(
-        &error,
-        "default_ref is required when multiple refs are configured",
+    assert_eq!(
+        config.sources[FIXTURES_SOURCE].default_ref.as_deref(),
+        Some("stable"),
     );
 }
 
@@ -1471,7 +1468,7 @@ fn rejects_unknown_default_ref() {
     );
 
     assert_error_contains(&error, "default_ref");
-    assert_error_contains(&error, "does not match any configured ref");
+    assert_error_contains(&error, "does not match any searchable configured ref");
 }
 
 #[test]

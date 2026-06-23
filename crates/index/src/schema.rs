@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+pub const INDEX_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IndexFields {
@@ -25,6 +25,7 @@ pub(crate) struct IndexFields {
     pub(crate) package_set: Field,
     pub(crate) platforms: Field,
     pub(crate) main_program: Field,
+    pub(crate) programs: Field,
 }
 
 impl IndexFields {
@@ -82,6 +83,9 @@ impl IndexFields {
             main_program: schema
                 .get_field("main_program")
                 .context("missing field main_program")?,
+            programs: schema
+                .get_field("programs")
+                .context("missing field programs")?,
         })
     }
 }
@@ -110,6 +114,7 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_text_field("package_set", STRING | STORED);
     builder.add_text_field("platforms", STRING | STORED);
     builder.add_text_field("main_program", STRING | STORED);
+    builder.add_text_field("programs", STRING | STORED);
 
     builder.add_text_field("stored_json", STORED);
 

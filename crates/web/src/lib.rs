@@ -1666,17 +1666,11 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_no_canonical(&body);
-        assert_og_url(
-            &body,
-            "https://search.example.com/fixtures/programs.git.enable?q=git&amp;source=all",
-        );
+        assert_no_open_graph(&body);
         assert!(body.contains(r#"<script id="initial-history-metadata" type="application/json">"#));
         assert!(body.contains(r#""returnHeadMetadata":{"#));
         assert!(body.contains(r#""returnHeadMetadataUrl":"/?q=git""#));
-        assert!(body.contains(r#""openGraph":{"url":"https://search.example.com/?q=git""#));
-        assert!(body.contains(r#""type":"website""#));
-        assert!(body.contains(r#""siteName":"nixsearch""#));
-        assert!(body.contains(r#""imageUrl":"https://search.example.com/apple-touch-icon.png""#));
+        assert!(body.contains(r#""openGraph":null"#));
         assert!(body.contains(" results for git"));
         assert!(body.contains(r#""canonicalUrl":null"#));
         assert!(body.contains(r#""robots":"noindex,follow""#));
@@ -2076,7 +2070,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_no_canonical(&body);
         assert_has_robots(&body);
-        assert_og_url(&body, "https://search.example.com/?q=git");
+        assert_no_open_graph(&body);
     }
 
     #[tokio::test]
@@ -2258,7 +2252,7 @@ mod tests {
         assert_ne!(generation.path, broken);
         assert_canonical_options_manifest_targets(&generation.manifest);
         assert_eq!(store.current_path().unwrap(), generation.path);
-        SearchIndex::open(&generation.path).unwrap();
+        SearchIndex::open(store.index_path(&generation.path)).unwrap();
     }
 
     #[tokio::test]

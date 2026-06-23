@@ -187,6 +187,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
                 default_ref: Some(REF_SMALL.to_owned()),
                 refs: vec![RefConfig {
                     id: REF_SMALL.to_owned(),
+                    artifact_only: false,
                     source_links: Some(SourceLinkConfig::Github {
                         owner: "example".to_owned(),
                         repo: "repo".to_owned(),
@@ -208,6 +209,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
 pub fn existing_file_ref_config(id: &str) -> RefConfig {
     RefConfig {
         id: id.to_owned(),
+        artifact_only: false,
         producer: ProducerConfig::ExistingFile {
             path: PathBuf::from("unused.json"),
             artifact: ArtifactKind::OptionsJson,

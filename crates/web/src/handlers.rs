@@ -266,7 +266,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let previous_request = query
         .previous_url
         .as_ref()
-        .and_then(|uri| page_request_from_public_uri(&uri).ok());
+        .and_then(|uri| page_request_from_public_uri(uri).ok());
     let navigation =
         state_events_navigation(&state, &snapshot, previous_request.as_ref(), &page_state);
     let has_entry_detail = page_state.detail.is_some();

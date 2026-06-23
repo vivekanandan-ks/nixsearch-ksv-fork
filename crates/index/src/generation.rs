@@ -200,14 +200,15 @@ fn manifest_target_counts(manifest: &IndexGenerationManifest) -> BTreeMap<Target
 
 fn target_key_for_document(document: &SearchDocument) -> Result<TargetCountKey> {
     let common = document.common();
+    let variant_kind = document.variant_kind();
     let artifact_kind =
-        ArtifactKind::for_indexed_document_kind(document.kind()).with_context(|| {
+        ArtifactKind::for_indexed_document_kind(&variant_kind).with_context(|| {
             format!(
                 "indexed document {}/{}/{} has unsupported document kind {}",
                 common.source,
                 common.ref_id,
                 common.name,
-                document.kind().as_str()
+                variant_kind.as_str()
             )
         })?;
 

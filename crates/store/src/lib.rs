@@ -28,6 +28,13 @@ pub enum StoreError {
         #[source]
         source: object_store::Error,
     },
+
+    #[error("artifact metadata mismatch for {field}: expected {expected:?}, got {actual:?}")]
+    MetadataMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -144,6 +151,12 @@ pub struct ArtifactStore {
     store: Arc<dyn ObjectStore>,
 }
 
+#[derive(Debug, Clone)]
+pub struct VerifiedArtifact {
+    pub bytes: Bytes,
+    pub metadata: ArtifactMetadata,
+}
+
 impl ArtifactStore {
     pub fn local(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -203,6 +216,26 @@ impl ArtifactStore {
         Ok(bytes)
     }
 
+    pub async fn get_verified_artifact(
+        &self,
+        artifact_ref: &ArtifactRef,
+    ) -> Result<VerifiedArtifact> {
+        let bytes = self.get_artifact(artifact_ref).await?;
+        let metadata = self.get_metadata(artifact_ref).await?;
+
+        validate_metadata_field("source", &artifact_ref.source, &metadata.source)?;
+        validate_metadata_field("ref_id", &artifact_ref.ref_id, &metadata.ref_id)?;
+        validate_metadata_field("kind", artifact_ref.kind.as_str(), metadata.kind.as_str())?;
+        validate_metadata_field("content_hash", &sha256_hex(&bytes), &metadata.content_hash)?;
+        validate_metadata_field(
+            "size_bytes",
+            &bytes.len().to_string(),
+            &metadata.size_bytes.to_string(),
+        )?;
+
+        Ok(VerifiedArtifact { bytes, metadata })
+    }
+
     pub async fn put_metadata(
         &self,
         artifact_ref: &ArtifactRef,
@@ -239,6 +272,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn validate_metadata_field(field: &'static str, expected: &str, actual: &str) -> Result<()> {
+    if expected != actual {
+        return Err(StoreError::MetadataMismatch {
+            field,
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -363,6 +408,31 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         assert_eq!(metadata.size_bytes, 5);
+    }
+
+    #[tokio::test]
+    async fn verified_artifact_rejects_metadata_that_does_not_match_bytes() {
+        let tempdir = tempdir().unwrap();
+        let store = ArtifactStore::local(tempdir.path()).unwrap();
+        let artifact_ref = ArtifactRef::latest("fixtures", "small", ArtifactKind::OptionsJson);
+
+        let mut metadata = store
+            .put_artifact(
+                &artifact_ref,
+                Bytes::from_static(b"hello"),
+                ArtifactMetadataInput::new("test-producer"),
+            )
+            .await
+            .unwrap();
+        metadata.content_hash = "forged".to_owned();
+        store.put_metadata(&artifact_ref, &metadata).await.unwrap();
+
+        let error = store
+            .get_verified_artifact(&artifact_ref)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("content_hash"));
     }
 
     #[tokio::test]

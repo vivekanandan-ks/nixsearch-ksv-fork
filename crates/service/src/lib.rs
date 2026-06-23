@@ -1103,9 +1103,7 @@ mod tests {
             Vec::new(),
             ref_ids
                 .iter()
-                .map(|ref_id| {
-                    index_target(SOURCE_FIXTURES, *ref_id, ArtifactKind::FlakeInfoJson, 0)
-                })
+                .map(|ref_id| index_target(SOURCE_FIXTURES, ref_id, ArtifactKind::FlakeInfoJson, 0))
                 .collect(),
         );
     }

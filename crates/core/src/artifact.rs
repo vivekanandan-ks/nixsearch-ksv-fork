@@ -10,6 +10,52 @@ pub enum ArtifactKind {
     FlakeInfoJson,
 }
 
+impl ArtifactKind {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::OptionsJson => "options.json",
+            Self::PackagesJson => "packages.json",
+            Self::FlakeInfoJson => "flake-info.json",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OptionsJson => "options-json",
+            Self::PackagesJson => "packages-json",
+            Self::FlakeInfoJson => "flake-info-json",
+        }
+    }
+
+    pub fn indexes_search_documents(self) -> bool {
+        self.indexed_document_kind().is_some()
+    }
+
+    pub fn indexed_document_kind(self) -> Option<DocumentKind> {
+        match self {
+            Self::OptionsJson => Some(DocumentKind::Option),
+            Self::PackagesJson => Some(DocumentKind::Package),
+            Self::FlakeInfoJson => None,
+        }
+    }
+
+    pub fn indexed_entry_kind(self) -> Option<IndexedEntryKind> {
+        match self {
+            Self::OptionsJson => Some(IndexedEntryKind::Option),
+            Self::PackagesJson => Some(IndexedEntryKind::Package),
+            Self::FlakeInfoJson => None,
+        }
+    }
+
+    pub fn for_indexed_document_kind(kind: &DocumentKind) -> Option<Self> {
+        match kind {
+            DocumentKind::Option => Some(Self::OptionsJson),
+            DocumentKind::Package => Some(Self::PackagesJson),
+            DocumentKind::App | DocumentKind::Service => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::document::{DocumentKind, IndexedEntryKind};
@@ -60,51 +106,5 @@ mod tests {
             ArtifactKind::for_indexed_document_kind(&DocumentKind::Service),
             None
         );
-    }
-}
-
-impl ArtifactKind {
-    pub fn file_name(self) -> &'static str {
-        match self {
-            Self::OptionsJson => "options.json",
-            Self::PackagesJson => "packages.json",
-            Self::FlakeInfoJson => "flake-info.json",
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OptionsJson => "options-json",
-            Self::PackagesJson => "packages-json",
-            Self::FlakeInfoJson => "flake-info-json",
-        }
-    }
-
-    pub fn indexes_search_documents(self) -> bool {
-        self.indexed_document_kind().is_some()
-    }
-
-    pub fn indexed_document_kind(self) -> Option<DocumentKind> {
-        match self {
-            Self::OptionsJson => Some(DocumentKind::Option),
-            Self::PackagesJson => Some(DocumentKind::Package),
-            Self::FlakeInfoJson => None,
-        }
-    }
-
-    pub fn indexed_entry_kind(self) -> Option<IndexedEntryKind> {
-        match self {
-            Self::OptionsJson => Some(IndexedEntryKind::Option),
-            Self::PackagesJson => Some(IndexedEntryKind::Package),
-            Self::FlakeInfoJson => None,
-        }
-    }
-
-    pub fn for_indexed_document_kind(kind: &DocumentKind) -> Option<Self> {
-        match kind {
-            DocumentKind::Option => Some(Self::OptionsJson),
-            DocumentKind::Package => Some(Self::PackagesJson),
-            DocumentKind::App | DocumentKind::Service => None,
-        }
     }
 }

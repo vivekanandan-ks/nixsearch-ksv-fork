@@ -201,7 +201,7 @@ mod tests {
 
         assert_eq!(
             id,
-            "sha256:d8c5480c0a07d5f45c5ce4edae6544c67f3798b8184d5e13c0894f3b2451b066"
+            "sha256:216cb02b23a778da8acc5f63b3722dc0d3ca535b04e27a7aa5e1b24922847bda"
         );
     }
 
@@ -274,7 +274,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"generation_id_version":1,"schema_version":3,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","document_count":1,"artifact_hash":null,"revision":null}]}"#
+            r#"{"generation_id_version":1,"schema_version":4,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","document_count":1,"artifact_hash":null,"revision":null}]}"#
         );
     }
 
@@ -287,7 +287,7 @@ mod tests {
 
         assert_eq!(
             manifest.generation_id,
-            "sha256:d8c5480c0a07d5f45c5ce4edae6544c67f3798b8184d5e13c0894f3b2451b066"
+            "sha256:216cb02b23a778da8acc5f63b3722dc0d3ca535b04e27a7aa5e1b24922847bda"
         );
     }
 

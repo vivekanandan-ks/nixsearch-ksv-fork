@@ -7,7 +7,7 @@ use nixsearch_core::ingest::IngestContext;
 use nixsearch_ingest::{
     parse_options_json_with_strip_prefixes, parse_packages_json_with_strip_prefixes,
 };
-use nixsearch_store::ArtifactStore;
+use nixsearch_store::{ArtifactStore, VerifiedArtifact};
 
 use crate::artifact::ProducedArtifact;
 
@@ -45,20 +45,19 @@ impl Consumer for OptionsJsonConsumer {
             );
         }
 
-        let bytes = store
-            .get_artifact(&artifact.artifact_ref)
+        let verified = store
+            .get_verified_artifact(&artifact.artifact_ref)
             .await
-            .context("failed to read options artifact")?;
+            .context("failed to read verified options artifact")?;
 
-        let context = IngestContext {
-            source: artifact.metadata.source.clone(),
-            ref_id: artifact.metadata.ref_id.clone(),
-            revision: artifact.metadata.revision.clone(),
-            repo: None,
-        };
+        let context = ingest_context_from_verified(&verified);
 
-        parse_options_json_with_strip_prefixes(bytes.as_ref(), &context, &self.strip_prefixes)
-            .context("failed to parse options artifact")
+        parse_options_json_with_strip_prefixes(
+            verified.bytes.as_ref(),
+            &context,
+            &self.strip_prefixes,
+        )
+        .context("failed to parse options artifact")
     }
 }
 
@@ -87,20 +86,19 @@ impl Consumer for PackagesJsonConsumer {
             );
         }
 
-        let bytes = store
-            .get_artifact(&artifact.artifact_ref)
+        let verified = store
+            .get_verified_artifact(&artifact.artifact_ref)
             .await
-            .context("failed to read packages artifact")?;
+            .context("failed to read verified packages artifact")?;
 
-        let context = IngestContext {
-            source: artifact.metadata.source.clone(),
-            ref_id: artifact.metadata.ref_id.clone(),
-            revision: artifact.metadata.revision.clone(),
-            repo: None,
-        };
+        let context = ingest_context_from_verified(&verified);
 
-        parse_packages_json_with_strip_prefixes(bytes.as_ref(), &context, &self.strip_prefixes)
-            .context("failed to parse packages artifact")
+        parse_packages_json_with_strip_prefixes(
+            verified.bytes.as_ref(),
+            &context,
+            &self.strip_prefixes,
+        )
+        .context("failed to parse packages artifact")
     }
 }
 
@@ -121,17 +119,26 @@ impl Consumer for FlakeInfoJsonConsumer {
             );
         }
 
-        let bytes = store
-            .get_artifact(&artifact.artifact_ref)
+        let verified = store
+            .get_verified_artifact(&artifact.artifact_ref)
             .await
-            .context("failed to read flake-info artifact")?;
+            .context("failed to read verified flake-info artifact")?;
 
-        let value = serde_json::from_slice::<serde_json::Value>(bytes.as_ref())
+        let value = serde_json::from_slice::<serde_json::Value>(verified.bytes.as_ref())
             .context("failed to parse flake-info artifact as JSON")?;
 
         validate_flake_info_json(&value).context("invalid flake-info artifact shape")?;
 
         Ok(Vec::new())
+    }
+}
+
+fn ingest_context_from_verified(verified: &VerifiedArtifact) -> IngestContext {
+    IngestContext {
+        source: verified.metadata.source.clone(),
+        ref_id: verified.metadata.ref_id.clone(),
+        revision: verified.metadata.revision.clone(),
+        repo: None,
     }
 }
 

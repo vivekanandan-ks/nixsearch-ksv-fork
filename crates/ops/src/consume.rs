@@ -10,12 +10,24 @@ use nixsearch_source::consumer::{
 use nixsearch_store::ArtifactStore;
 
 use crate::targets::TargetRef;
+use crate::targets::latest_artifact_ref_for_target;
 
 pub async fn consume_target(
     store: &ArtifactStore,
     target: &TargetRef,
     produced: &ProducedArtifact,
 ) -> Result<Vec<SearchDocument>> {
+    let expected_ref = latest_artifact_ref_for_target(target);
+    if produced.artifact_ref != expected_ref {
+        bail!(
+            "artifact ref mismatch for {}/{}: expected {:?}, got {:?}",
+            target.source_id,
+            target.ref_config.id,
+            expected_ref,
+            produced.artifact_ref
+        );
+    }
+
     if !target
         .source_kind
         .accepts_artifact_kind(produced.artifact_ref.kind)
@@ -96,6 +108,7 @@ mod tests {
             strip_prefixes: Vec::new(),
             ref_config: RefConfig {
                 id: REF.to_owned(),
+                artifact_only: artifact_kind == ArtifactKind::FlakeInfoJson,
                 producer: ProducerConfig::ExistingFile {
                     path: PathBuf::from("unused.json"),
                     artifact: artifact_kind,
@@ -217,7 +230,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error:#}").contains("failed to read flake-info artifact"));
+        assert!(format!("{error:#}").contains("failed to read verified flake-info artifact"));
     }
 
     #[tokio::test]

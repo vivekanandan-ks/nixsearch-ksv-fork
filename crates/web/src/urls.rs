@@ -61,14 +61,6 @@ fn canonical_entry_path(config: &AppConfig, source: &str, entry: &str, ref_id: &
     )
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn paginated_search_url(source: Option<&str>, query: &PageQuery, page: usize) -> String {
-    let mut paged_query = query.clone();
-    paged_query.page = if page > 1 { Some(page) } else { None };
-    search_url_for(source, &paged_query)
-}
-
 fn entry_url_for(source: &str, entry: &str, query: &PageQuery) -> String {
     let path = format!("{}/{}", source_path(source), encode_path(entry));
     let page_str = query.page.filter(|&p| p > 1).map(|p| p.to_string());
@@ -160,8 +152,17 @@ pub fn source_url_from_state(config: &AppConfig, state: &PageState, source: &str
         });
 
     let ref_set = active_ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set));
+    let source_default_ref = config
+        .sources
+        .get(source)
+        .and_then(|source| source.default_ref.as_deref());
     let ref_id = match ref_set_refs {
-        Some(refs) if refs.len() == 1 => None,
+        Some(refs)
+            if refs.len() == 1
+                && (ref_set.is_some() || source_ref.as_deref() == source_default_ref) =>
+        {
+            None
+        }
         Some(_) => source_ref.clone(),
         None => source_ref.clone(),
     };
@@ -252,7 +253,6 @@ fn entry_url_for_document(
             ref_set: ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set)),
             source: from_scope,
             page,
-            ..PageQuery::default()
         },
     )
 }
@@ -336,6 +336,7 @@ mod tests {
     fn ref_config(id: &str) -> RefConfig {
         RefConfig {
             id: id.to_owned(),
+            artifact_only: false,
             producer: ProducerConfig::ExistingFile {
                 path: PathBuf::from("unused.json"),
                 artifact: ArtifactKind::OptionsJson,

@@ -132,7 +132,7 @@ pub enum SourceFilter {
 
 impl SourceFilter {
     pub fn from_request(request: &PageRequest) -> Self {
-        if request.query.source == Some(LinkOrigin::All) {
+        if request.query.source == Some(LinkOrigin::All) && request.entry.is_some() {
             return Self::All;
         }
 
@@ -602,6 +602,7 @@ mod tests {
     fn ref_config(id: &str) -> RefConfig {
         RefConfig {
             id: id.to_owned(),
+            artifact_only: false,
             producer: ProducerConfig::ExistingFile {
                 path: PathBuf::from("unused.json"),
                 artifact: ArtifactKind::OptionsJson,

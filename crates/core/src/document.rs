@@ -821,6 +821,54 @@ impl SearchDocument {
         &self.common().kind
     }
 
+    pub fn variant_kind(&self) -> DocumentKind {
+        match self {
+            Self::Option(_) => DocumentKind::Option,
+            Self::Package(_) => DocumentKind::Package,
+        }
+    }
+
+    pub fn validate_identity(&self) -> Result<(), String> {
+        let common = self.common();
+        let variant_kind = self.variant_kind();
+
+        if common.kind != variant_kind {
+            return Err(format!(
+                "document variant kind {:?} does not match common kind {:?} for {}",
+                variant_kind, common.kind, common.id
+            ));
+        }
+
+        let expected_id = make_document_id(
+            &common.source,
+            &common.ref_id,
+            variant_kind.as_str(),
+            &common.name,
+        );
+        if common.id != expected_id {
+            return Err(format!(
+                "document id mismatch for {}: expected {expected_id}",
+                common.id
+            ));
+        }
+
+        let expected_name_parts = NameParts::from_dotted(&common.name);
+        if common.name_parts != expected_name_parts {
+            return Err(format!("document name_parts mismatch for {}", common.id));
+        }
+
+        if let Self::Package(package) = self
+            && package.attribute != package.common.name
+        {
+            return Err(format!(
+                "package attribute {:?} does not match common name {:?}",
+                package.attribute, package.common.name
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn is_seo_eligible_entry(&self) -> bool {
         match self {
             Self::Package(_) => true,

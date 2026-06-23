@@ -35,6 +35,8 @@ pub(crate) struct RawSourceConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRefConfig {
+    #[serde(default)]
+    pub artifact_only: bool,
     pub producer: ProducerConfig,
     #[serde(default)]
     pub source_links: Option<SourceLinkConfig>,
@@ -44,6 +46,7 @@ impl RawRefConfig {
     fn into_ref_config(self, id: String) -> RefConfig {
         RefConfig {
             id,
+            artifact_only: self.artifact_only,
             producer: self.producer,
             source_links: self.source_links,
         }
@@ -128,6 +131,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(nixpkgs_source_links(&ref_id)),
                 producer: ProducerConfig::ChannelPackagesJson {
                     channel: ref_id,
@@ -155,6 +159,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(nixpkgs_source_links(&ref_id)),
                 producer: ProducerConfig::ChannelOptionsJson {
                     channel: ref_id,
@@ -190,6 +195,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(home_manager_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:nix-community/home-manager/{ref_id}"),
@@ -228,6 +234,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(nix_darwin_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:nix-darwin/nix-darwin/{ref_id}"),
@@ -258,6 +265,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(hjem_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:feel-co/hjem/{ref_id}"),
@@ -293,6 +301,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                artifact_only: false,
                 source_links: Some(hjem_rum_source_links(&ref_id)),
                 producer: ProducerConfig::EvalModules {
                     source_ref: format!("github:snugnug/hjem-rum/{ref_id}"),
@@ -409,22 +418,22 @@ fn effective_default_ref(
     if let Some(configured) = configured {
         validate_id("default_ref", &configured)?;
 
-        if !refs.iter().any(|ref_config| ref_config.id == configured) {
+        if !refs
+            .iter()
+            .any(|ref_config| ref_config.id == configured && ref_config.is_searchable())
+        {
             return Err(ConfigError::Validation(format!(
-                "sources.{source_id}.default_ref {configured:?} does not match any configured ref"
+                "sources.{source_id}.default_ref {configured:?} does not match any searchable configured ref"
             )));
         }
 
         return Ok(Some(configured));
     }
 
-    if refs.len() > 1 {
-        return Err(ConfigError::Validation(format!(
-            "sources.{source_id}: default_ref is required when multiple refs are configured"
-        )));
-    }
-
-    Ok(refs.first().map(|ref_config| ref_config.id.clone()))
+    Ok(refs
+        .iter()
+        .find(|ref_config| ref_config.is_searchable())
+        .map(|ref_config| ref_config.id.clone()))
 }
 
 fn default_strip_prefixes(configured: Option<Vec<String>>, default_prefix: &str) -> Vec<String> {
@@ -480,10 +489,10 @@ impl SourceConfig {
             if !self
                 .refs
                 .iter()
-                .any(|ref_config| &ref_config.id == default_ref)
+                .any(|ref_config| &ref_config.id == default_ref && ref_config.is_searchable())
             {
                 return Err(ConfigError::Validation(format!(
-                    "sources.{source_id}.default_ref {default_ref:?} does not match any configured ref"
+                    "sources.{source_id}.default_ref {default_ref:?} does not match any searchable configured ref"
                 )));
             }
         }
@@ -510,6 +519,23 @@ fn validate_source_ref_artifact_kind(
     }
 
     Ok(())
+}
+
+impl SourceConfig {
+    pub fn searchable_refs(&self) -> impl Iterator<Item = &RefConfig> {
+        self.refs
+            .iter()
+            .filter(|ref_config| ref_config.is_searchable())
+    }
+
+    pub fn has_searchable_refs(&self) -> bool {
+        self.searchable_refs().next().is_some()
+    }
+
+    pub fn searchable_ref(&self, ref_id: &str) -> Option<&RefConfig> {
+        self.searchable_refs()
+            .find(|ref_config| ref_config.id == ref_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,14 +584,37 @@ pub enum SourcePreset {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefConfig {
     pub id: String,
+    #[serde(default)]
+    pub artifact_only: bool,
     pub producer: ProducerConfig,
     #[serde(default)]
     pub source_links: Option<SourceLinkConfig>,
 }
 
 impl RefConfig {
+    pub fn is_searchable(&self) -> bool {
+        !self.artifact_only && self.producer.artifact_kind().indexes_search_documents()
+    }
+
     fn validate(&self, source_id: &str) -> Result<()> {
         validate_id("ref id", &self.id)?;
-        self.producer.validate(source_id, &self.id)
+        self.producer.validate(source_id, &self.id)?;
+
+        if self.artifact_only && self.producer.artifact_kind().indexes_search_documents() {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}.refs.{} artifact_only refs cannot use searchable artifact kind {}",
+                self.id,
+                self.producer.artifact_kind().as_str()
+            )));
+        }
+
+        if self.producer.artifact_kind() == ArtifactKind::FlakeInfoJson && !self.artifact_only {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}.refs.{} flake-info-json refs must set artifact_only = true",
+                self.id
+            )));
+        }
+
+        Ok(())
     }
 }

@@ -216,14 +216,12 @@ impl ProducerConfig {
                 }
             }
 
-            Self::CustomCommand { command, .. } => {
-                if command.is_empty() {
-                    return producer_error(source_id, ref_id, "command must not be empty");
-                }
-
-                for item in command {
-                    validate_producer_non_empty(source_id, ref_id, "command item", item)?;
-                }
+            Self::CustomCommand { .. } => {
+                return producer_error(
+                    source_id,
+                    ref_id,
+                    "producer type custom-command is not implemented yet",
+                );
             }
 
             Self::FlakeFile {
@@ -248,8 +246,12 @@ impl ProducerConfig {
                 }
             }
 
-            Self::FlakeInfo { source_ref } => {
-                validate_producer_non_empty(source_id, ref_id, "ref", source_ref)?;
+            Self::FlakeInfo { .. } => {
+                return producer_error(
+                    source_id,
+                    ref_id,
+                    "producer type flake-info is not implemented yet; use an explicit artifact-only flake-info-json producer for validation workflows",
+                );
             }
         }
 

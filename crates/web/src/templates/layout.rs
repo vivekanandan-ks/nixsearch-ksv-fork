@@ -366,12 +366,15 @@ fn page_metadata(
     let canonical_url = index_metadata.canonical_url;
     let title = title_for_entry(config, request, source_filter, entry.document());
     let description = description_for(config, request, source_filter, search_result, entry);
+    let open_graph_canonical = (index_metadata.robots != Some(ROBOTS_NOINDEX_FOLLOW))
+        .then_some(canonical_url.as_deref())
+        .flatten();
 
     PageMetadata {
         open_graph: open_graph_metadata(
             config.public_seo_enabled(),
             page_urls,
-            canonical_url.as_deref(),
+            open_graph_canonical,
             &title,
             &description,
         ),
@@ -389,8 +392,10 @@ fn open_graph_metadata(
     title: &str,
     description: &str,
 ) -> Option<OpenGraphMetadata> {
+    let canonical_url = canonical_url?;
+
     public_seo_enabled.then(|| OpenGraphMetadata {
-        url: canonical_url.unwrap_or(&page_urls.current_url).to_owned(),
+        url: canonical_url.to_owned(),
         kind: "website".to_owned(),
         site_name: "nixsearch".to_owned(),
         title: title.to_owned(),
@@ -653,8 +658,9 @@ fn source_metadata_json(config: &AppConfig) -> String {
     let sources = config
         .sources
         .iter()
+        .filter(|(_, source)| source.has_searchable_refs())
         .map(|(id, source)| {
-            let refs: Vec<&str> = source.refs.iter().map(|r| r.id.as_str()).collect();
+            let refs: Vec<&str> = source.searchable_refs().map(|r| r.id.as_str()).collect();
 
             serde_json::json!({
                 "id": id,
@@ -958,16 +964,7 @@ mod tests {
 
         assert_eq!(metadata.title, "nixsearch");
         assert_eq!(metadata.description, "Search the Nix ecosystem");
-        let open_graph = metadata.open_graph.unwrap();
-        assert_eq!(open_graph.url, "https://search.example.com/?q=git");
-        assert_eq!(open_graph.kind, "website");
-        assert_eq!(open_graph.site_name, "nixsearch");
-        assert_eq!(open_graph.title, "nixsearch");
-        assert_eq!(open_graph.description, "Search the Nix ecosystem");
-        assert_eq!(
-            open_graph.image_url,
-            "https://search.example.com/apple-touch-icon.png"
-        );
+        assert!(metadata.open_graph.is_none());
     }
 
     #[test]

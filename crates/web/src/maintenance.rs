@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(outcome, MaintenanceOutcome::Completed);
         let current = store.current_path().unwrap();
         assert_ne!(current, broken);
-        SearchIndex::open(&current).unwrap();
+        SearchIndex::open(store.index_path(&current)).unwrap();
     }
 
     #[tokio::test]
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(outcome, MaintenanceOutcome::Completed);
         let current = store.current_path().unwrap();
         assert_eq!(current, repaired);
-        SearchIndex::open(&current).unwrap();
+        SearchIndex::open(store.index_path(&current)).unwrap();
     }
 
     #[tokio::test]

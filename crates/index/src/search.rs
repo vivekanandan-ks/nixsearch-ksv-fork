@@ -718,7 +718,7 @@ fn search_document_from_tantivy(
         .and_then(|value| value.as_str())
         .context("entry document did not contain stored_json")?;
 
-    serde_json::from_str(stored_json).context("failed to deserialize entry document")
+    deserialize_stored_search_document(stored_json)
 }
 
 fn search_document_from_tantivy_strict(
@@ -727,7 +727,18 @@ fn search_document_from_tantivy_strict(
 ) -> Result<SearchDocument> {
     let stored_json = stored_single_str(retrieved, fields.stored_json, "stored_json")?;
 
-    serde_json::from_str(stored_json).context("failed to deserialize entry document")
+    deserialize_stored_search_document(stored_json)
+}
+
+fn deserialize_stored_search_document(stored_json: &str) -> Result<SearchDocument> {
+    let document = serde_json::from_str::<SearchDocument>(stored_json)
+        .context("failed to deserialize entry document")?;
+    document
+        .validate_identity()
+        .map_err(anyhow::Error::msg)
+        .context("invalid stored entry document identity")?;
+
+    Ok(document)
 }
 
 fn stored_bool(retrieved: &TantivyDocument, field: Field, name: &'static str) -> Result<bool> {

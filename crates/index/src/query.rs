@@ -121,6 +121,7 @@ impl SearchIndex {
                 self.fields.name_leaf,
                 self.fields.attribute_exact,
                 self.fields.main_program,
+                self.fields.programs,
                 self.fields.option_set,
                 self.fields.parents,
                 self.fields.package_set,
@@ -143,6 +144,7 @@ impl SearchIndex {
         parser.set_field_boost(self.fields.name_leaf, 6.0);
         parser.set_field_boost(self.fields.attribute_exact, 25.0);
         parser.set_field_boost(self.fields.main_program, 20.0);
+        parser.set_field_boost(self.fields.programs, 14.0);
         parser.set_field_boost(self.fields.option_set, 3.0);
         parser.set_field_boost(self.fields.parents, 2.0);
         parser.set_field_boost(self.fields.package_set, 2.0);
@@ -214,6 +216,13 @@ impl SearchIndex {
             self.fields.main_program,
             value,
             20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.programs,
+            value,
+            14.0,
             IndexRecordOption::Basic,
         );
         add_boosted_term_clause(
@@ -294,6 +303,13 @@ impl SearchIndex {
             self.fields.main_program,
             term,
             20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.programs,
+            term,
+            14.0,
             IndexRecordOption::Basic,
         );
         add_boosted_term_clause(
