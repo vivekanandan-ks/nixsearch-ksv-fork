@@ -1,5 +1,6 @@
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::fs;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use camino::Utf8Path;
@@ -32,10 +33,53 @@ impl Clone for SearchService {
 }
 
 #[derive(Clone)]
+struct LazySeoFacts {
+    value: Arc<OnceLock<Arc<SeoSidecar>>>,
+}
+
+impl LazySeoFacts {
+    fn unloaded() -> Self {
+        Self {
+            value: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn loaded(seo_facts: SeoSidecar) -> Self {
+        let lazy = Self::unloaded();
+        let _ = lazy.value.set(Arc::new(seo_facts));
+        lazy
+    }
+
+    fn get_or_load(
+        &self,
+        index_store: &IndexStore,
+        generation: &PublishedGeneration,
+    ) -> SeoFactsResult<Arc<SeoSidecar>> {
+        if let Some(loaded) = self.value.get() {
+            return Ok(Arc::clone(loaded));
+        }
+
+        let loaded = index_store
+            .read_seo_sidecar(generation)
+            .map(Arc::new)
+            .map_err(|error| {
+                tracing::warn!(
+                    generation = %generation.path,
+                    "failed to load SEO facts for served generation: {error:#}"
+                );
+                SeoFactsUnavailable
+            })?;
+        let _ = self.value.set(Arc::clone(&loaded));
+
+        Ok(self.value.get().map(Arc::clone).unwrap_or(loaded))
+    }
+}
+
+#[derive(Clone)]
 struct ServedGeneration {
     generation: LeasedPublishedGeneration,
     index: Arc<SearchIndex>,
-    seo_facts: Option<Arc<SeoSidecar>>,
+    seo_facts: Option<LazySeoFacts>,
 }
 
 impl ServedGeneration {
@@ -61,7 +105,7 @@ impl fmt::Debug for ServedGeneration {
 pub struct ServedGenerationSnapshot {
     generation: LeasedPublishedGeneration,
     pub index: Arc<SearchIndex>,
-    seo_facts: Option<Arc<SeoSidecar>>,
+    seo_facts: Option<LazySeoFacts>,
 }
 
 impl fmt::Debug for ServedGenerationSnapshot {
@@ -235,13 +279,26 @@ impl SearchService {
         })
     }
 
+    /// Opens a generation that the caller has already validated while holding its lease.
+    pub fn from_validated_leased_generation(
+        config: Arc<AppConfig>,
+        generation: LeasedPublishedGeneration,
+    ) -> Result<Self> {
+        let current = load_validated_servable_generation(&config, generation)?;
+
+        Ok(Self {
+            config,
+            current: Arc::new(RwLock::new(current)),
+        })
+    }
+
     pub fn validate_leased_generation_structural(
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
         let index_store = IndexStore::new(&config.data.index_dir);
         index_store
-            .open_structurally_complete_published_generation(generation.published_generation())
+            .open_structurally_valid_published_generation(generation.published_generation())
             .context("failed to validate structurally complete generation")
             .map(|_| ())
     }
@@ -254,6 +311,22 @@ impl SearchService {
         index_store
             .validate_leased_generation(generation)
             .context("failed to validate SEO-complete generation")
+    }
+
+    pub fn validate_leased_generation_seo_sidecar_present(
+        config: &AppConfig,
+        generation: &LeasedPublishedGeneration,
+    ) -> Result<()> {
+        let index_store = IndexStore::new(&config.data.index_dir);
+        let sidecar_path = index_store.seo_sidecar_path(generation.path());
+        let metadata = fs::metadata(&sidecar_path)
+            .with_context(|| format!("failed to read SEO sidecar metadata {sidecar_path}"))?;
+
+        if !metadata.is_file() {
+            anyhow::bail!("SEO sidecar is not a file {sidecar_path}");
+        }
+
+        Ok(())
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -617,7 +690,7 @@ impl SearchService {
         source_id: &str,
         ref_id: &str,
     ) -> SeoFactsResult<bool> {
-        let seo_facts = snapshot.seo_facts.as_ref().ok_or(SeoFactsUnavailable)?;
+        let seo_facts = self.seo_facts_for_snapshot(snapshot)?;
 
         let Some(document_kind) =
             self.configured_served_document_kind_for_seo(snapshot, source_id, ref_id)
@@ -636,7 +709,7 @@ impl SearchService {
         &self,
         snapshot: &ServedGenerationSnapshot,
     ) -> SeoFactsResult<Vec<SitemapCandidate>> {
-        let seo_facts = snapshot.seo_facts.as_ref().ok_or(SeoFactsUnavailable)?;
+        let seo_facts = self.seo_facts_for_snapshot(snapshot)?;
         let mut candidates = Vec::new();
 
         for entry in &seo_facts.entries {
@@ -657,6 +730,16 @@ impl SearchService {
         }
 
         Ok(candidates)
+    }
+
+    fn seo_facts_for_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+    ) -> SeoFactsResult<Arc<SeoSidecar>> {
+        let seo_facts = snapshot.seo_facts.as_ref().ok_or(SeoFactsUnavailable)?;
+        let index_store = IndexStore::new(&self.config.data.index_dir);
+
+        seo_facts.get_or_load(&index_store, snapshot.published_generation())
     }
 
     fn ref_allowed_to_be_indexed(&self, source: &SourceConfig, ref_id: &str) -> bool {
@@ -971,13 +1054,30 @@ fn load_servable_generation(
         let (index, seo_facts) = index_store
             .open_valid_leased_generation(&generation)
             .context("failed to open SEO-complete served generation")?;
-        (index, Some(Arc::new(seo_facts)))
+        (index, Some(LazySeoFacts::loaded(seo_facts)))
     } else {
-        let complete = index_store
-            .open_structurally_complete_published_generation(generation.published_generation())
+        let index = index_store
+            .open_structurally_valid_published_generation(generation.published_generation())
             .context("failed to open structurally complete served generation")?;
-        (complete.index, None)
+        (index, None)
     };
+
+    Ok(ServedGeneration {
+        generation,
+        index: Arc::new(index),
+        seo_facts,
+    })
+}
+
+fn load_validated_servable_generation(
+    config: &AppConfig,
+    generation: LeasedPublishedGeneration,
+) -> Result<ServedGeneration> {
+    let index_store = IndexStore::new(&config.data.index_dir);
+    let index_path = index_store.index_path(generation.path());
+    let index = SearchIndex::open(&index_path)
+        .with_context(|| format!("failed to open search index {index_path}"))?;
+    let seo_facts = config.public_seo_enabled().then(LazySeoFacts::unloaded);
 
     Ok(ServedGeneration {
         generation,

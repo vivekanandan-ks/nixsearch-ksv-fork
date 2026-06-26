@@ -8,6 +8,7 @@ use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_index::generation::validate_manifest_invariants;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_ops::targets::{TargetKey, default_indexed_search_target_keys};
 use nixsearch_ops::{cleanup, generate, lock, seo};
@@ -43,15 +44,21 @@ struct AppState {
 pub async fn serve(config: AppConfig) -> Result<()> {
     config.validate()?;
 
-    ensure_current_generation(&config).await?;
+    let generation = ensure_current_generation(&config).await?;
 
     let addr: SocketAddr =
         config.server.listen.parse().with_context(|| {
             format!("failed to parse listen address {:?}", config.server.listen)
         })?;
 
+    let index_store = IndexStore::new(&config.data.index_dir);
+    let leased_generation = index_store
+        .lease_published_generation(generation)
+        .context("failed to lease validated current index generation")?;
+
     let config = Arc::new(config);
-    let search = SearchService::open_current(Arc::clone(&config))?;
+    let search =
+        SearchService::from_validated_leased_generation(Arc::clone(&config), leased_generation)?;
     let generation = search.snapshot().to_published_generation();
 
     log_startup_maintenance_state(&config, &generation);
@@ -304,16 +311,24 @@ fn validated_current_generation(
     };
     let published = generation.to_published_generation();
 
-    if let Err(error) = SearchService::validate_leased_generation_structural(config, &generation) {
+    if let Err(error) = validate_manifest_invariants(generation.manifest()) {
         return Ok(CurrentGenerationValidation::Invalid {
             generation: published,
-            error,
+            error: error.context("failed to validate current index generation manifest invariants"),
+        });
+    }
+
+    let index_path = index_store.index_path(generation.path());
+    if !index_path.is_dir() {
+        return Ok(CurrentGenerationValidation::Invalid {
+            generation: published,
+            error: anyhow::anyhow!("missing search index directory {index_path}"),
         });
     }
 
     if config.public_seo_enabled()
         && let Err(error) =
-            SearchService::validate_leased_generation_seo_complete(config, &generation)
+            SearchService::validate_leased_generation_seo_sidecar_present(config, &generation)
     {
         return Ok(CurrentGenerationValidation::Invalid {
             generation: published,
@@ -645,6 +660,13 @@ mod tests {
         let current = store.current_path().unwrap();
 
         fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
+    }
+
+    fn corrupt_current_seo_sidecar(index_dir: &camino::Utf8Path) {
+        let store = IndexStore::new(index_dir);
+        let current = store.current_path().unwrap();
+
+        fs::write(store.seo_sidecar_path(&current), b"{ not valid json").unwrap();
     }
 
     fn assert_has_canonical(body: &str, expected: &str) {
@@ -2255,6 +2277,27 @@ mod tests {
         assert_canonical_options_manifest_targets(&generation.manifest);
         assert_eq!(store.current_path().unwrap(), generation.path);
         SearchIndex::open(store.index_path(&generation.path)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_defers_seo_sidecar_parse_until_seo_route() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        corrupt_current_seo_sidecar(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let config = app_config_with_public_url(&index_dir);
+
+        let generation = ensure_current_generation(&config).await.unwrap();
+        let generation_path = generation.path.clone();
+        let leased_generation = store.lease_published_generation(generation).unwrap();
+        let search =
+            SearchService::from_validated_leased_generation(Arc::new(config), leased_generation)
+                .unwrap();
+
+        assert_eq!(store.current_path().unwrap(), generation_path);
+        let snapshot = search.snapshot();
+        assert!(search.sitemap_candidates(&snapshot).is_err());
     }
 
     #[tokio::test]

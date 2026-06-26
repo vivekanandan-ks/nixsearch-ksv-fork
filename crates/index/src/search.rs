@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::fs;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
-use tantivy::{DocAddress, Index, IndexReader, Searcher, Term};
+use tantivy::{DocAddress, Index, IndexReader, ReloadPolicy, Searcher, Term};
 
 use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
 
@@ -19,7 +20,7 @@ const INDEX_DOCUMENT_SCAN_BATCH_SIZE: usize = 1024;
 
 pub struct SearchIndex {
     pub(crate) index: Index,
-    reader: IndexReader,
+    reader: OnceLock<IndexReader>,
     pub(crate) fields: IndexFields,
 }
 
@@ -165,11 +166,9 @@ impl SearchIndex {
         let fields = IndexFields::from_schema(&schema)?;
         let index = Index::create_in_dir(path, schema)
             .with_context(|| format!("failed to create Tantivy index at {path}"))?;
-        let reader = index.reader().context("failed to create index reader")?;
-
         Ok(Self {
             index,
-            reader,
+            reader: OnceLock::new(),
             fields,
         })
     }
@@ -180,13 +179,30 @@ impl SearchIndex {
             .with_context(|| format!("failed to open Tantivy index at {path}"))?;
         let schema = index.schema();
         let fields = IndexFields::from_schema(&schema)?;
-        let reader = index.reader().context("failed to create index reader")?;
-
         Ok(Self {
             index,
-            reader,
+            reader: OnceLock::new(),
             fields,
         })
+    }
+
+    fn reader(&self) -> Result<&IndexReader> {
+        if let Some(reader) = self.reader.get() {
+            return Ok(reader);
+        }
+
+        let reader = self
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .context("failed to create index reader")?;
+        let _ = self.reader.set(reader);
+
+        Ok(self
+            .reader
+            .get()
+            .expect("index reader should be initialized"))
     }
 
     pub fn writer(&self) -> Result<SearchIndexWriter> {
@@ -202,7 +218,7 @@ impl SearchIndex {
     }
 
     pub fn search(&self, options: SearchOptions) -> Result<SearchResult> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         let candidate_limit = rerank_candidate_limit(options.limit, options.offset);
         let diversify_sources = options.scopes.len() > 1;
         let analysis = QueryAnalysis::new(&self.index, self.fields.name_text, &options.query)?;
@@ -407,7 +423,7 @@ impl SearchIndex {
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<SearchDocument>> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
 
         let query = tantivy::query::TermQuery::new(
             tantivy::Term::from_field_text(self.fields.id, id),
@@ -453,7 +469,7 @@ impl SearchIndex {
                 )))
             }
             EntryFactsStatus::Ambiguous => {
-                let searcher = self.reader.searcher();
+                let searcher = self.reader()?.searcher();
                 let documents = self.ambiguous_entry_documents(&searcher, &lookup, facts.count)?;
 
                 Ok(EntryLookupResult::Ambiguous(documents))
@@ -462,7 +478,7 @@ impl SearchIndex {
     }
 
     pub fn entry_facts(&self, lookup: EntryLookup) -> Result<EntryFacts> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
 
         let mut facts = EntryFacts::not_found_for_lookup(&lookup);
         let count = self.count_exact_entry_kind(&searcher, &lookup)?;
@@ -485,7 +501,7 @@ impl SearchIndex {
         &self,
         mut visit: impl FnMut(&SearchDocument) -> Result<()>,
     ) -> Result<()> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         let count = searcher
             .search(&AllQuery, &Count)
             .context("failed to count indexed documents")?;
@@ -521,7 +537,7 @@ impl SearchIndex {
     }
 
     pub fn scan_indexed_documents(&self) -> Result<Vec<IndexedSearchDocument>> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         let count = searcher
             .search(&AllQuery, &Count)
             .context("failed to count indexed documents")?;
@@ -649,7 +665,7 @@ impl SearchIndex {
     }
 
     fn document_at(&self, address: DocAddress) -> Result<SearchDocument> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         self.document_at_with_searcher(&searcher, address)
     }
 
@@ -844,6 +860,21 @@ mod tests {
     use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
 
     use super::*;
+
+    #[test]
+    fn search_index_open_defers_reader_until_query() {
+        let tempdir = tempdir().unwrap();
+        let index_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+            .expect("test path must be valid UTF-8");
+
+        SearchIndex::create_or_replace(&index_path).unwrap();
+
+        let index = SearchIndex::open(&index_path).unwrap();
+        assert!(index.reader.get().is_none());
+
+        index.scan_indexed_documents().unwrap();
+        assert!(index.reader.get().is_some());
+    }
 
     #[test]
     fn corrupt_unique_entry_representative_is_an_error() {

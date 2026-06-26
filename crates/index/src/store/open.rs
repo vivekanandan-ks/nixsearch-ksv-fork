@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 
 use crate::generation::{
     StructurallyCompleteGeneration, open_seo_complete_generation,
-    open_structurally_complete_generation,
+    open_structurally_complete_generation, validate_manifest_invariants,
 };
-use crate::manifest::validate_index_schema_version;
+use crate::manifest::{validate_generation_id, validate_index_schema_version};
 use crate::search::SearchIndex;
 use crate::seo::SeoSidecar;
 
@@ -34,6 +34,28 @@ impl IndexStore {
         .context("failed to validate SEO-complete generation")?;
 
         Ok((complete.index, complete.sidecar))
+    }
+
+    /// Opens a published generation after cheap manifest and Tantivy checks.
+    ///
+    /// This intentionally avoids scanning or hashing generation contents. Startup and
+    /// request paths use it when they only need an index that can be served quickly;
+    /// maintenance and repair paths use the complete openers when they need full
+    /// generation validation.
+    pub fn open_structurally_valid_published_generation(
+        &self,
+        generation: &PublishedGeneration,
+    ) -> Result<SearchIndex> {
+        validate_index_schema_version(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+        validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest id")?;
+        validate_manifest_invariants(&generation.manifest)
+            .context("failed to validate supplied index generation manifest invariants")?;
+
+        let index_path = self.index_path(&generation.path);
+        SearchIndex::open(&index_path)
+            .with_context(|| format!("failed to open search index {index_path}"))
     }
 
     pub fn open_structurally_complete_published_generation(
