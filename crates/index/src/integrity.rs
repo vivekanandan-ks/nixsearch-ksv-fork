@@ -18,17 +18,17 @@ struct GenerationIntegrity {
     index_fingerprint: String,
 }
 
-pub(crate) struct GenerationIntegrityPaths<'a> {
-    pub(crate) manifest_path: &'a Utf8Path,
-    pub(crate) seo_sidecar_path: &'a Utf8Path,
-    pub(crate) index_path: &'a Utf8Path,
-    pub(crate) integrity_path: &'a Utf8Path,
+pub(crate) struct GenerationIntegrityPaths {
+    pub(crate) manifest_path: Utf8PathBuf,
+    pub(crate) seo_sidecar_path: Utf8PathBuf,
+    pub(crate) index_path: Utf8PathBuf,
+    pub(crate) integrity_path: Utf8PathBuf,
 }
 
 pub(crate) fn write_integrity(
     generation_path: &Utf8Path,
     manifest_generation_id: &str,
-    paths: &GenerationIntegrityPaths<'_>,
+    paths: &GenerationIntegrityPaths,
     seo_sidecar_required: bool,
 ) -> Result<()> {
     let integrity = build_integrity(manifest_generation_id, paths, seo_sidecar_required)?;
@@ -36,7 +36,7 @@ pub(crate) fn write_integrity(
         .context("failed to serialize index generation integrity metadata")?;
     let temp_path = atomic_file::create_temp_file(generation_path, INTEGRITY_TEMP_PREFIX, &bytes)?;
 
-    if let Err(error) = fs::rename(&temp_path, paths.integrity_path) {
+    if let Err(error) = fs::rename(&temp_path, &paths.integrity_path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error).with_context(|| {
             format!(
@@ -46,7 +46,7 @@ pub(crate) fn write_integrity(
         });
     }
 
-    atomic_file::sync_file(paths.integrity_path)?;
+    atomic_file::sync_file(&paths.integrity_path)?;
     atomic_file::sync_dir(generation_path)?;
 
     Ok(())
@@ -54,10 +54,10 @@ pub(crate) fn write_integrity(
 
 fn build_integrity(
     manifest_generation_id: &str,
-    paths: &GenerationIntegrityPaths<'_>,
+    paths: &GenerationIntegrityPaths,
     seo_sidecar_required: bool,
 ) -> Result<GenerationIntegrity> {
-    let seo_sidecar_hash = match hash_file_if_present(paths.seo_sidecar_path)? {
+    let seo_sidecar_hash = match hash_file_if_present(&paths.seo_sidecar_path)? {
         Some(hash) => Some(hash),
         None if seo_sidecar_required => {
             anyhow::bail!("SEO sidecar is required before writing generation integrity")
@@ -68,9 +68,9 @@ fn build_integrity(
     Ok(GenerationIntegrity {
         schema_version: INTEGRITY_SCHEMA_VERSION,
         manifest_generation_id: manifest_generation_id.to_owned(),
-        manifest_hash: hash_file(paths.manifest_path)?,
+        manifest_hash: hash_file(&paths.manifest_path)?,
         seo_sidecar_hash,
-        index_fingerprint: index_fingerprint(paths.index_path)?,
+        index_fingerprint: index_fingerprint(&paths.index_path)?,
     })
 }
 
@@ -93,11 +93,11 @@ fn read_integrity(integrity_path: &Utf8Path) -> Result<GenerationIntegrity> {
 
 pub(crate) fn validate_integrity(
     manifest_generation_id: &str,
-    paths: &GenerationIntegrityPaths<'_>,
+    paths: &GenerationIntegrityPaths,
     seo_sidecar_required: bool,
 ) -> Result<()> {
     let expected = build_integrity(manifest_generation_id, paths, seo_sidecar_required)?;
-    let actual = read_integrity(paths.integrity_path)?;
+    let actual = read_integrity(&paths.integrity_path)?;
 
     if actual != expected {
         anyhow::bail!("index generation integrity metadata does not match generation files");

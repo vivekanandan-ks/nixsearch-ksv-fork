@@ -1,4 +1,5 @@
 use anyhow::Result;
+use camino::Utf8Path;
 
 use crate::integrity::{self as generation_integrity, GenerationIntegrityPaths};
 
@@ -11,16 +12,7 @@ impl IndexStore {
         seo_sidecar_required: bool,
     ) -> Result<()> {
         let generation_path = self.validate_generation_path(&generation.path)?;
-        let manifest_path = self.manifest_path(&generation.path);
-        let seo_sidecar_path = self.seo_sidecar_path(&generation.path);
-        let index_path = self.index_path(&generation.path);
-        let integrity_path = self.integrity_path(&generation_path);
-        let paths = GenerationIntegrityPaths {
-            manifest_path: &manifest_path,
-            seo_sidecar_path: &seo_sidecar_path,
-            index_path: &index_path,
-            integrity_path: &integrity_path,
-        };
+        let paths = self.integrity_paths(&generation.path, &generation_path);
 
         generation_integrity::write_integrity(
             &generation_path,
@@ -35,21 +27,25 @@ impl IndexStore {
         generation: &PublishedGeneration,
         seo_sidecar_required: bool,
     ) -> Result<()> {
-        let manifest_path = self.manifest_path(&generation.path);
-        let seo_sidecar_path = self.seo_sidecar_path(&generation.path);
-        let index_path = self.index_path(&generation.path);
-        let integrity_path = self.integrity_path(&generation.path);
-        let paths = GenerationIntegrityPaths {
-            manifest_path: &manifest_path,
-            seo_sidecar_path: &seo_sidecar_path,
-            index_path: &index_path,
-            integrity_path: &integrity_path,
-        };
+        let paths = self.integrity_paths(&generation.path, &generation.path);
 
         generation_integrity::validate_integrity(
             &generation.manifest.generation_id,
             &paths,
             seo_sidecar_required,
         )
+    }
+
+    fn integrity_paths(
+        &self,
+        generation_path: &Utf8Path,
+        integrity_generation_path: &Utf8Path,
+    ) -> GenerationIntegrityPaths {
+        GenerationIntegrityPaths {
+            manifest_path: self.manifest_path(generation_path),
+            seo_sidecar_path: self.seo_sidecar_path(generation_path),
+            index_path: self.index_path(generation_path),
+            integrity_path: self.integrity_path(integrity_generation_path),
+        }
     }
 }
