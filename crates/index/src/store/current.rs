@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::atomic_file;
 use crate::manifest::IndexGenerationManifest;
 
 use super::layout::CURRENT_TEMP_PREFIX;
@@ -19,7 +20,7 @@ impl IndexStore {
         let generation_path = self.validate_generation_path(generation_path)?;
 
         // On Unix, rename atomically replaces CURRENT with this fully written file.
-        let current_tmp = self.create_temp_file(
+        let current_tmp = atomic_file::create_temp_file(
             self.root(),
             CURRENT_TEMP_PREFIX,
             generation_path.as_str().as_bytes(),
@@ -36,7 +37,7 @@ impl IndexStore {
             });
         }
 
-        Self::sync_dir(self.root())?;
+        atomic_file::sync_dir(self.root())?;
 
         Ok(())
     }

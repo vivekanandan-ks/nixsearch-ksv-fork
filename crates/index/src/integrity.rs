@@ -10,7 +10,7 @@ const INTEGRITY_SCHEMA_VERSION: u32 = 1;
 const INTEGRITY_TEMP_PREFIX: &str = "integrity.json.tmp";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct GenerationIntegrity {
+struct GenerationIntegrity {
     schema_version: u32,
     manifest_generation_id: String,
     manifest_hash: String,
@@ -52,7 +52,7 @@ pub(crate) fn write_integrity(
     Ok(())
 }
 
-pub(crate) fn build_integrity(
+fn build_integrity(
     manifest_generation_id: &str,
     paths: &GenerationIntegrityPaths<'_>,
     seo_sidecar_required: bool,
@@ -74,7 +74,7 @@ pub(crate) fn build_integrity(
     })
 }
 
-pub(crate) fn read_integrity(integrity_path: &Utf8Path) -> Result<GenerationIntegrity> {
+fn read_integrity(integrity_path: &Utf8Path) -> Result<GenerationIntegrity> {
     let bytes = fs::read(integrity_path)
         .with_context(|| format!("failed to read integrity metadata {integrity_path}"))?;
     let integrity: GenerationIntegrity = serde_json::from_slice(&bytes)

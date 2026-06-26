@@ -1,4 +1,3 @@
-mod atomic;
 mod current;
 mod integrity;
 mod layout;
