@@ -52,10 +52,7 @@ impl SeoFactsArtifact {
         let generation_path = store.validate_generation_path(&generation.path)?;
         let path = Self::path(&generation_path);
 
-        validate_generation_id(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
+        validate_supplied_manifest(&generation.manifest)?;
 
         let index_path = store.index_path(&generation_path);
         let index = SearchIndex::open(&index_path)
@@ -73,18 +70,15 @@ impl SeoFactsArtifact {
         generation: &PublishedGeneration,
         index: &SearchIndex,
     ) -> Result<SeoSidecar> {
-        validate_generation_id(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
+        validate_supplied_manifest(&generation.manifest)?;
 
         let sidecar = Self::derive_from_index(&generation.manifest, index)?;
-        Self::write_validated_unchecked(store, generation, &sidecar)?;
+        Self::write_without_index_validation(store, generation, &sidecar)?;
 
         Ok(sidecar)
     }
 
-    pub fn write_validated_unchecked(
+    pub fn write_without_index_validation(
         store: &IndexStore,
         generation: &PublishedGeneration,
         sidecar: &SeoSidecar,
@@ -92,10 +86,7 @@ impl SeoFactsArtifact {
         let generation_path = store.validate_generation_path(&generation.path)?;
         let path = Self::path(&generation_path);
 
-        validate_generation_id(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
+        validate_supplied_manifest(&generation.manifest)?;
         sidecar
             .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
@@ -141,5 +132,217 @@ impl SeoFactsArtifact {
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
         Ok(sidecar)
+    }
+}
+
+fn validate_supplied_manifest(manifest: &IndexGenerationManifest) -> Result<()> {
+    validate_generation_id(manifest)
+        .context("failed to validate supplied index generation manifest")?;
+    validate_index_schema_version(manifest)
+        .context("failed to validate supplied index generation manifest")?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tempfile::{TempDir, tempdir};
+
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::{OptionDoc, SearchDocument};
+    use nixsearch_core::ingest::IngestContext;
+
+    use crate::annotation::EntryAnnotationIndex;
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest, refresh_generation_id};
+    use crate::search::SearchIndex;
+    use crate::seo::{SEO_SIDECAR_SCHEMA_VERSION, SeoRefFacts, SeoSidecar, SeoSidecarAccumulator};
+    use crate::store::{IndexStore, PublishedGeneration};
+
+    use super::SeoFactsArtifact;
+
+    const SOURCE_FIXTURES: &str = "fixtures";
+    const REF_SMALL: &str = "small";
+
+    fn utf8_path(path: std::path::PathBuf) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(path).expect("test path must be valid UTF-8")
+    }
+
+    fn store_for(tempdir: &TempDir) -> IndexStore {
+        IndexStore::new(utf8_path(tempdir.path().to_path_buf()))
+    }
+
+    fn context() -> IngestContext {
+        IngestContext {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            revision: None,
+            repo: None,
+        }
+    }
+
+    fn options_manifest(document_count: usize) -> IndexGenerationManifest {
+        IndexGenerationManifest::new(
+            document_count,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count,
+                artifact_hash: None,
+                revision: None,
+            }],
+        )
+        .unwrap()
+    }
+
+    fn old_schema_manifest(document_count: usize) -> IndexGenerationManifest {
+        let mut manifest = options_manifest(document_count);
+        manifest.schema_version = 2;
+        refresh_generation_id(&mut manifest).unwrap();
+        manifest
+    }
+
+    fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
+        let generation = store.create_generation_path().unwrap();
+        let document = SearchDocument::Option(OptionDoc::new(&context(), "programs.git.enable"));
+        let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
+        let mut annotations = EntryAnnotationIndex::new();
+        annotations.observe(&document);
+        let mut writer = index.writer().unwrap();
+        writer
+            .add_document(&document, &annotations.annotation_for(&document))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let generation = PublishedGeneration {
+            path: generation,
+            manifest,
+        };
+
+        SeoFactsArtifact::write_derived(store, &generation, &index).unwrap();
+        generation
+    }
+
+    #[test]
+    fn read_rejects_unsupported_manifest_schema_before_file_read() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(1),
+        };
+
+        let error = SeoFactsArtifact::read(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn write_rejects_unsupported_manifest_schema_before_index_open() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(0),
+        };
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
+
+        let error = SeoFactsArtifact::write(&store, &generation, &sidecar).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn write_without_index_validation_rejects_unsupported_manifest_schema_before_write() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = PublishedGeneration {
+            path: store.create_generation_path().unwrap(),
+            manifest: old_schema_manifest(0),
+        };
+        let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
+
+        let error = SeoFactsArtifact::write_without_index_validation(&store, &generation, &sidecar)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn write_rejects_mismatched_manifest_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let mut manifest = IndexGenerationManifest::with_generated_at(
+            0,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 0,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let sidecar = SeoSidecar {
+            schema_version: SEO_SIDECAR_SCHEMA_VERSION,
+            generation_id: manifest.generation_id.clone(),
+            refs: vec![SeoRefFacts {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                total_supported_indexed_count: 0,
+                package_supported_count: 0,
+                option_supported_count: 0,
+                package_eligible_count: 0,
+                option_eligible_count: 0,
+            }],
+            entries: Vec::new(),
+        };
+
+        manifest.generation_id = "sha256:wrong".to_owned();
+
+        let error = SeoFactsArtifact::write(
+            &store,
+            &PublishedGeneration {
+                path: generation,
+                manifest,
+            },
+            &sidecar,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn write_rejects_forged_entry_name() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = publish_one_option_generation(&store);
+        let mut sidecar = SeoFactsArtifact::read(&generation).unwrap();
+
+        sidecar.entries[0].name = "not-real".to_owned();
+
+        let error = SeoFactsArtifact::write(&store, &generation, &sidecar).unwrap_err();
+
+        assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }
 }

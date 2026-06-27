@@ -63,7 +63,7 @@ pub fn repair_current_seo_sidecar_under_lock(
 
     let sidecar = structural.scan.seo_sidecar;
     if let Err(error) =
-        SeoFactsArtifact::write_validated_unchecked(&index_store, &candidate, &sidecar)
+        SeoFactsArtifact::write_without_index_validation(&index_store, &candidate, &sidecar)
     {
         return Ok(SeoSidecarRepairOutcome::RepairFailed {
             generation: candidate,
