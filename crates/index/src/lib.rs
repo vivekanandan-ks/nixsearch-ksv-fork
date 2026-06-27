@@ -1,6 +1,7 @@
 pub mod annotation;
 mod atomic_file;
 pub mod generation;
+pub mod generation_validator;
 mod integrity;
 pub mod manifest;
 mod query;

@@ -435,6 +435,7 @@ mod tests {
 
     use nixsearch_config::source::{RefConfig, SourceKind};
     use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_index::generation_validator::GenerationValidator;
     use nixsearch_store::{ArtifactMetadataInput, ArtifactRef};
 
     use super::*;
@@ -597,8 +598,10 @@ mod tests {
         assert!(sidecar.entries.is_empty());
 
         let leased = index_store.current_leased_generation().unwrap();
-        let (_index, leased_sidecar) = index_store.open_valid_leased_generation(&leased).unwrap();
-        assert_eq!(leased_sidecar, sidecar);
+        let complete = GenerationValidator::new(index_store.clone())
+            .open_seo_complete_leased_generation(&leased)
+            .unwrap();
+        assert_eq!(complete.sidecar, sidecar);
     }
 
     #[tokio::test]

@@ -22,20 +22,6 @@ impl IndexStore {
         )
     }
 
-    pub(super) fn validate_integrity(
-        &self,
-        generation: &PublishedGeneration,
-        seo_sidecar_required: bool,
-    ) -> Result<()> {
-        let paths = self.integrity_paths(&generation.path, &generation.path);
-
-        generation_integrity::validate_integrity(
-            &generation.manifest.generation_id,
-            &paths,
-            seo_sidecar_required,
-        )
-    }
-
     fn integrity_paths(
         &self,
         generation_path: &Utf8Path,

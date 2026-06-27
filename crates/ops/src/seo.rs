@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_index::generation_validator::GenerationValidator;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 
 use crate::lock::UpdateLock;
@@ -31,12 +32,13 @@ pub fn repair_current_seo_sidecar_under_lock(
     _update_lock: &UpdateLock,
 ) -> Result<SeoSidecarRepairOutcome> {
     let index_store = IndexStore::new(&config.data.index_dir);
+    let validator = GenerationValidator::new(index_store.clone());
     let Some(candidate) = index_store.try_current_generation_metadata()? else {
         return Ok(SeoSidecarRepairOutcome::MissingCurrent);
     };
 
-    if index_store
-        .validate_unleased_published_generation(&candidate)
+    if validator
+        .validate_seo_complete_published_generation_unleased(&candidate)
         .is_ok()
     {
         return Ok(SeoSidecarRepairOutcome::AlreadySeoComplete {
@@ -44,7 +46,7 @@ pub fn repair_current_seo_sidecar_under_lock(
         });
     }
 
-    let structural = match index_store.open_structurally_complete_published_generation(&candidate) {
+    let structural = match validator.open_structurally_complete_published_generation(&candidate) {
         Ok(structural) => structural,
         Err(error) => {
             return Ok(SeoSidecarRepairOutcome::Unrepairable {
@@ -70,8 +72,8 @@ pub fn repair_current_seo_sidecar_under_lock(
         return Ok(SeoSidecarRepairOutcome::SupersededAfterRepair);
     }
 
-    index_store
-        .validate_unleased_published_generation(&candidate)
+    validator
+        .validate_seo_complete_published_generation_unleased(&candidate)
         .context("repaired SEO sidecar did not validate")?;
 
     Ok(SeoSidecarRepairOutcome::Repaired {

@@ -3,7 +3,6 @@ mod integrity;
 mod layout;
 mod leases;
 mod manifest;
-mod open;
 mod sidecar;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -50,6 +49,7 @@ mod tests {
     use nixsearch_core::ingest::IngestContext;
 
     use crate::annotation::EntryAnnotationIndex;
+    use crate::generation_validator::GenerationValidator;
     use crate::manifest::{
         IndexGenerationManifest, IndexTargetManifest, canonical_generation_id,
         refresh_generation_id,
@@ -159,7 +159,7 @@ mod tests {
         let store = store_for(&tempdir);
         let generation = publish_one_option_generation(&store);
 
-        let complete = store
+        let complete = GenerationValidator::new(store.clone())
             .open_structurally_complete_published_generation(&generation)
             .unwrap();
 

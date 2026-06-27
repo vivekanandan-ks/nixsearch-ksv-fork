@@ -8,6 +8,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use tokio::process::Command;
 
 use nixsearch_config::app::AppConfig;
+use nixsearch_index::generation_validator::GenerationValidator;
 use nixsearch_index::manifest::IndexGenerationManifest;
 use nixsearch_index::store::{GenerationLease, IndexStore, PublishedGeneration};
 
@@ -175,6 +176,7 @@ fn log_nix_outcome(outcome: &NixCleanupOutcome) {
 
 fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
     let index_store = IndexStore::new(&config.data.index_dir);
+    let validator = GenerationValidator::new(index_store.clone());
     let delete_failed_after = match config
         .maintenance
         .index_generations
@@ -272,12 +274,15 @@ fn prune_index_generations(config: &AppConfig, report: &mut CleanupReport) {
             .as_ref()
             .is_some_and(|current| current == &canonical);
 
-        if is_current && current_generation_is_valid_for_cleanup(config, &index_store, &canonical) {
+        if is_current
+            && current_generation_is_valid_for_cleanup(config, &index_store, &validator, &canonical)
+        {
             current_is_valid = true;
             continue;
         }
 
-        if let Some(manifest) = structurally_complete_generation_manifest(&index_store, &canonical)
+        if let Some(manifest) =
+            structurally_complete_generation_manifest(&index_store, &validator, &canonical)
         {
             if is_current {
                 report.warnings.push(format!(
@@ -341,21 +346,23 @@ fn current_generation_canonical(
 fn current_generation_is_valid_for_cleanup(
     config: &AppConfig,
     index_store: &IndexStore,
+    validator: &GenerationValidator,
     path: &Utf8Path,
 ) -> bool {
     if config.public_seo_enabled() {
-        valid_seo_complete_generation(index_store, path).is_some()
+        valid_seo_complete_generation(index_store, validator, path).is_some()
     } else {
-        structurally_complete_generation_manifest(index_store, path).is_some()
+        structurally_complete_generation_manifest(index_store, validator, path).is_some()
     }
 }
 
 fn structurally_complete_generation_manifest(
     index_store: &IndexStore,
+    validator: &GenerationValidator,
     path: &Utf8Path,
 ) -> Option<IndexGenerationManifest> {
     let manifest = index_store.read_manifest(path).ok()?;
-    index_store
+    validator
         .open_structurally_complete_published_generation(&PublishedGeneration {
             path: path.to_owned(),
             manifest: manifest.clone(),
@@ -366,11 +373,12 @@ fn structurally_complete_generation_manifest(
 
 fn valid_seo_complete_generation(
     index_store: &IndexStore,
+    validator: &GenerationValidator,
     path: &Utf8Path,
 ) -> Option<IndexGenerationManifest> {
     let manifest = index_store.read_manifest(path).ok()?;
-    index_store
-        .validate_unleased_published_generation(&PublishedGeneration {
+    validator
+        .validate_seo_complete_published_generation_unleased(&PublishedGeneration {
             path: path.to_owned(),
             manifest: manifest.clone(),
         })

@@ -8,6 +8,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
+use nixsearch_index::generation_validator::GenerationValidator;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::{
     EntryFacts, EntryLookup, EntryLookupResult, SearchIndex, SearchOptions, SearchResult,
@@ -296,8 +297,8 @@ impl SearchService {
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
-        let index_store = IndexStore::new(&config.data.index_dir);
-        index_store
+        let validator = GenerationValidator::new(IndexStore::new(&config.data.index_dir));
+        validator
             .open_structurally_valid_published_generation(generation.published_generation())
             .context("failed to validate structurally valid generation")
             .map(|_| ())
@@ -307,9 +308,9 @@ impl SearchService {
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
-        let index_store = IndexStore::new(&config.data.index_dir);
-        index_store
-            .validate_leased_generation(generation)
+        let validator = GenerationValidator::new(IndexStore::new(&config.data.index_dir));
+        validator
+            .validate_seo_complete_leased_generation(generation)
             .context("failed to validate SEO-complete generation")
     }
 
@@ -317,8 +318,8 @@ impl SearchService {
         config: &AppConfig,
         generation: &LeasedPublishedGeneration,
     ) -> Result<()> {
-        let index_store = IndexStore::new(&config.data.index_dir);
-        index_store.require_seo_sidecar_file(generation.published_generation())
+        let validator = GenerationValidator::new(IndexStore::new(&config.data.index_dir));
+        validator.require_seo_sidecar_file(generation.published_generation())
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -1042,13 +1043,14 @@ fn load_servable_generation(
     generation: LeasedPublishedGeneration,
 ) -> Result<ServedGeneration> {
     let index_store = IndexStore::new(&config.data.index_dir);
+    let validator = GenerationValidator::new(index_store);
     let (index, seo_facts) = if config.public_seo_enabled() {
-        let (index, seo_facts) = index_store
-            .open_valid_leased_generation(&generation)
+        let complete = validator
+            .open_seo_complete_leased_generation(&generation)
             .context("failed to open SEO-complete served generation")?;
-        (index, Some(LazySeoFacts::loaded(seo_facts)))
+        (complete.index, Some(LazySeoFacts::loaded(complete.sidecar)))
     } else {
-        let index = index_store
+        let index = validator
             .open_structurally_valid_published_generation(generation.published_generation())
             .context("failed to open structurally valid served generation")?;
         (index, None)
