@@ -49,7 +49,6 @@ mod tests {
     use nixsearch_core::ingest::IngestContext;
 
     use crate::annotation::EntryAnnotationIndex;
-    use crate::generation_validator::GenerationValidator;
     use crate::manifest::{
         IndexGenerationManifest, IndexTargetManifest, canonical_generation_id,
         refresh_generation_id,
@@ -151,25 +150,6 @@ mod tests {
             .unwrap();
         store.write_integrity(&generation, true).unwrap();
         generation
-    }
-
-    #[test]
-    fn index_store_structural_fast_path_recomputes_seo_sidecar() {
-        let tempdir = tempdir().unwrap();
-        let store = store_for(&tempdir);
-        let generation = publish_one_option_generation(&store);
-
-        let complete = GenerationValidator::new(store.clone())
-            .open_structurally_complete_published_generation(&generation)
-            .unwrap();
-
-        assert_eq!(complete.scan.document_count, 1);
-        assert_eq!(complete.scan.seo_sidecar.refs.len(), 1);
-        assert_eq!(complete.scan.seo_sidecar.entries.len(), 1);
-        assert_eq!(
-            complete.scan.seo_sidecar.entries[0].name,
-            "programs.git.enable"
-        );
     }
 
     #[test]

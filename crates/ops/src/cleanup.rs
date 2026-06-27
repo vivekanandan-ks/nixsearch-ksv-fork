@@ -350,7 +350,7 @@ fn current_generation_is_valid_for_cleanup(
     path: &Utf8Path,
 ) -> bool {
     if config.public_seo_enabled() {
-        valid_seo_complete_generation(index_store, validator, path).is_some()
+        seo_complete_generation_manifest(index_store, validator, path).is_some()
     } else {
         structurally_complete_generation_manifest(index_store, validator, path).is_some()
     }
@@ -371,7 +371,7 @@ fn structurally_complete_generation_manifest(
     Some(manifest)
 }
 
-fn valid_seo_complete_generation(
+fn seo_complete_generation_manifest(
     index_store: &IndexStore,
     validator: &GenerationValidator,
     path: &Utf8Path,

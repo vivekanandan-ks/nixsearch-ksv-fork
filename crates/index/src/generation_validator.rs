@@ -22,10 +22,6 @@ impl GenerationValidator {
         Self { store }
     }
 
-    pub fn store(&self) -> &IndexStore {
-        &self.store
-    }
-
     pub fn open_structurally_valid_published_generation(
         &self,
         generation: &PublishedGeneration,
@@ -159,5 +155,103 @@ impl GenerationValidator {
             &paths,
             seo_sidecar_required,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tempfile::{TempDir, tempdir};
+
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::document::{OptionDoc, SearchDocument};
+    use nixsearch_core::ingest::IngestContext;
+
+    use crate::annotation::EntryAnnotationIndex;
+    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::search::SearchIndex;
+    use crate::seo::SeoSidecarAccumulator;
+    use crate::store::{IndexStore, PublishedGeneration};
+
+    use super::GenerationValidator;
+
+    const SOURCE_FIXTURES: &str = "fixtures";
+    const REF_SMALL: &str = "small";
+
+    fn utf8_path(path: std::path::PathBuf) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(path).expect("test path must be valid UTF-8")
+    }
+
+    fn store_for(tempdir: &TempDir) -> IndexStore {
+        IndexStore::new(utf8_path(tempdir.path().to_path_buf()))
+    }
+
+    fn context() -> IngestContext {
+        IngestContext {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            revision: None,
+            repo: None,
+        }
+    }
+
+    fn publish_one_option_generation(store: &IndexStore) -> PublishedGeneration {
+        let generation = store.create_generation_path().unwrap();
+        let document = SearchDocument::Option(OptionDoc::new(&context(), "programs.git.enable"));
+        let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
+        let mut annotations = EntryAnnotationIndex::new();
+        annotations.observe(&document);
+        let mut writer = index.writer().unwrap();
+        writer
+            .add_document(&document, &annotations.annotation_for(&document))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut accumulator = SeoSidecarAccumulator::new();
+        accumulator.observe(&document);
+        let sidecar = accumulator.into_sidecar_for_manifest(&manifest);
+        let generation = PublishedGeneration {
+            path: generation,
+            manifest,
+        };
+
+        store.write_seo_sidecar(&generation, &sidecar).unwrap();
+        store
+            .write_manifest(&generation.path, &generation.manifest)
+            .unwrap();
+        store.write_integrity(&generation, true).unwrap();
+        generation
+    }
+
+    #[test]
+    fn structural_fast_path_recomputes_seo_sidecar() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = publish_one_option_generation(&store);
+
+        let complete = GenerationValidator::new(store)
+            .open_structurally_complete_published_generation(&generation)
+            .unwrap();
+
+        assert_eq!(complete.scan.document_count, 1);
+        assert_eq!(complete.scan.seo_sidecar.refs.len(), 1);
+        assert_eq!(complete.scan.seo_sidecar.entries.len(), 1);
+        assert_eq!(
+            complete.scan.seo_sidecar.entries[0].name,
+            "programs.git.enable"
+        );
     }
 }
