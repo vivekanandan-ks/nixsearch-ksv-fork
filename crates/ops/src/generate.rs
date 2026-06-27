@@ -9,7 +9,7 @@ use nixsearch_config::producer::ProducerConfig;
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
-use nixsearch_index::seo::SeoSidecarAccumulator;
+use nixsearch_index::seo_sidecar::SeoFactsArtifact;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_source::artifact::ProducedArtifact;
 use nixsearch_source::error::NixCommandFailure;
@@ -195,24 +195,21 @@ async fn build_and_publish_generation_with_policy(
         let index_path = index_store.index_path(&generation_path);
         let index = SearchIndex::create_or_replace(&index_path)?;
         let mut writer = index.writer()?;
-        let mut seo_facts = SeoSidecarAccumulator::new();
 
         for document in spool.reader()? {
             let document = document?;
             writer.add_document(&document, &annotations.annotation_for(&document))?;
-            seo_facts.observe(&document);
         }
 
         writer.commit()?;
 
         let manifest = IndexGenerationManifest::new(total_documents, manifest_targets)?;
-        let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
         let published_generation = PublishedGeneration {
             path: generation_path.clone(),
             manifest: manifest.clone(),
         };
 
-        index_store.write_seo_sidecar(&published_generation, &sidecar)?;
+        SeoFactsArtifact::write_derived(index_store, &published_generation, &index)?;
         index_store.write_manifest(&generation_path, &manifest)?;
         index_store.write_integrity(&published_generation, true)?;
 
@@ -592,7 +589,7 @@ mod tests {
             path: result.path,
             manifest: manifest.clone(),
         };
-        let sidecar = index_store.read_seo_sidecar(&published_generation).unwrap();
+        let sidecar = SeoFactsArtifact::read(&published_generation).unwrap();
         sidecar.validate_for_manifest(&manifest).unwrap();
         assert!(sidecar.refs.is_empty());
         assert!(sidecar.entries.is_empty());

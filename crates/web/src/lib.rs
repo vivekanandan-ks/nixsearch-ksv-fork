@@ -429,6 +429,7 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::SearchDocument;
     use nixsearch_index::search::SearchIndex;
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         assert_canonical_options_manifest_targets, index_target, options_target,
@@ -659,14 +660,14 @@ mod tests {
         let store = IndexStore::new(index_dir);
         let current = store.current_path().unwrap();
 
-        fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&current)).unwrap();
     }
 
     fn corrupt_current_seo_sidecar(index_dir: &camino::Utf8Path) {
         let store = IndexStore::new(index_dir);
         let current = store.current_path().unwrap();
 
-        fs::write(store.seo_sidecar_path(&current), b"{ not valid json").unwrap();
+        fs::write(SeoFactsArtifact::path(&current), b"{ not valid json").unwrap();
     }
 
     fn assert_has_canonical(body: &str, expected: &str) {
@@ -2306,7 +2307,7 @@ mod tests {
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let published_path = publish_canonical_options_index(&index_dir);
         let store = IndexStore::new(&index_dir);
-        let sidecar_path = store.seo_sidecar_path(&published_path);
+        let sidecar_path = SeoFactsArtifact::path(&published_path);
         fs::remove_file(&sidecar_path).unwrap();
 
         let config = bootstrap_config(&index_dir, &tempdir);
@@ -2348,7 +2349,7 @@ mod tests {
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let published_path = publish_canonical_options_index(&index_dir);
         let store = IndexStore::new(&index_dir);
-        fs::remove_file(store.seo_sidecar_path(&published_path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&published_path)).unwrap();
         let mut config = app_config(&index_dir);
         config.server.bootstrap = false;
 

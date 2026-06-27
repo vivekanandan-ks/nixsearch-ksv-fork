@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::generation_validator::GenerationValidator;
+use nixsearch_index::seo_sidecar::SeoFactsArtifact;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 
 use crate::lock::UpdateLock;
@@ -61,7 +62,9 @@ pub fn repair_current_seo_sidecar_under_lock(
     }
 
     let sidecar = structural.scan.seo_sidecar;
-    if let Err(error) = index_store.write_validated_seo_sidecar_unchecked(&candidate, &sidecar) {
+    if let Err(error) =
+        SeoFactsArtifact::write_validated_unchecked(&index_store, &candidate, &sidecar)
+    {
         return Ok(SeoSidecarRepairOutcome::RepairFailed {
             generation: candidate,
             error: format!("{error:#}"),

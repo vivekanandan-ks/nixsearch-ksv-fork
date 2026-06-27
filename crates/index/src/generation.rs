@@ -11,7 +11,8 @@ use crate::manifest::{
     IndexGenerationManifest, validate_generation_id, validate_index_schema_version,
 };
 use crate::search::{IndexedSearchDocument, SearchIndex};
-use crate::seo::{SeoSidecar, SeoSidecarAccumulator};
+use crate::seo::SeoSidecar;
+use crate::seo_sidecar::SeoFactsArtifact;
 
 pub struct StructurallyCompleteGeneration {
     pub index: SearchIndex,
@@ -127,7 +128,6 @@ fn scan_generation(
     let expected = manifest_target_counts(manifest);
     let mut actual = BTreeMap::<TargetCountKey, usize>::new();
     let mut annotations = EntryAnnotationIndex::new();
-    let mut seo = SeoSidecarAccumulator::new();
 
     for document in &documents {
         annotations.observe(&document.document);
@@ -148,7 +148,6 @@ fn scan_generation(
         }
 
         *actual.entry(key).or_default() += 1;
-        seo.observe(&indexed.document);
     }
 
     for (key, expected_count) in expected {
@@ -177,7 +176,10 @@ fn scan_generation(
 
     Ok(GenerationScan {
         document_count: documents.len(),
-        seo_sidecar: seo.into_sidecar_for_manifest(manifest),
+        seo_sidecar: SeoFactsArtifact::derive_from_documents(
+            manifest,
+            documents.iter().map(|indexed| &indexed.document),
+        ),
     })
 }
 

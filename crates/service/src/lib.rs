@@ -15,6 +15,7 @@ use nixsearch_index::search::{
     SearchScope,
 };
 use nixsearch_index::seo::{SeoEntryFacts, SeoSidecar};
+use nixsearch_index::seo_sidecar::SeoFactsArtifact;
 use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
 
 #[derive(Debug)]
@@ -50,17 +51,12 @@ impl LazySeoFacts {
         lazy
     }
 
-    fn get_or_load(
-        &self,
-        index_store: &IndexStore,
-        generation: &PublishedGeneration,
-    ) -> SeoFactsResult<Arc<SeoSidecar>> {
+    fn get_or_load(&self, generation: &PublishedGeneration) -> SeoFactsResult<Arc<SeoSidecar>> {
         if let Some(loaded) = self.value.get() {
             return Ok(Arc::clone(loaded));
         }
 
-        let loaded = index_store
-            .read_seo_sidecar(generation)
+        let loaded = SeoFactsArtifact::read(generation)
             .map(Arc::new)
             .map_err(|error| {
                 tracing::warn!(
@@ -730,9 +726,8 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
     ) -> SeoFactsResult<Arc<SeoSidecar>> {
         let seo_facts = snapshot.seo_facts.as_ref().ok_or(SeoFactsUnavailable)?;
-        let index_store = IndexStore::new(&self.config.data.index_dir);
 
-        seo_facts.get_or_load(&index_store, snapshot.published_generation())
+        seo_facts.get_or_load(snapshot.published_generation())
     }
 
     fn ref_allowed_to_be_indexed(&self, source: &SourceConfig, ref_id: &str) -> bool {
@@ -1122,6 +1117,7 @@ mod tests {
     use nixsearch_core::document::SearchDocument;
     use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
     use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult};
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
     use nixsearch_index_test_support::{
         index_target, options_target, publish_canonical_index,
@@ -1665,7 +1661,7 @@ mod tests {
             path,
             manifest: manifest.clone(),
         };
-        let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
+        let mut sidecar = SeoFactsArtifact::read(&generation).unwrap();
 
         sidecar.entries[0].name = "not-real".to_owned();
         write_raw_seo_sidecar(&store, &generation, &sidecar);
@@ -1692,7 +1688,7 @@ mod tests {
             path,
             manifest: manifest.clone(),
         };
-        let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
+        let mut sidecar = SeoFactsArtifact::read(&generation).unwrap();
         let mut forged_manifest = manifest;
 
         forged_manifest.document_count += 1;
@@ -1742,8 +1738,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
-        let store = IndexStore::new(&index_dir);
-        fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&path)).unwrap();
 
         let config = Arc::new(app_config_with_public_url(&index_dir));
         let error = SearchService::open_current(config).unwrap_err();
@@ -1755,8 +1750,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let path = publish_canonical_index(&index_dir);
-        let store = IndexStore::new(&index_dir);
-        let sidecar_path = store.seo_sidecar_path(&path);
+        let sidecar_path = SeoFactsArtifact::path(&path);
         fs::remove_file(&sidecar_path).unwrap();
 
         let config = Arc::new(app_config(&index_dir));
@@ -2351,7 +2345,7 @@ mod tests {
         let store = IndexStore::new(&index_dir);
         let manifest = store.read_manifest(&path).unwrap();
 
-        fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&path)).unwrap();
 
         let config = Arc::new(app_config_with_public_url(&index_dir));
         let error = SearchService::from_leased_generation(
@@ -2379,7 +2373,7 @@ mod tests {
         .unwrap();
 
         let before = service.current_index();
-        fs::remove_file(store.seo_sidecar_path(&path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&path)).unwrap();
 
         let report = service.reconcile_current_generation().unwrap();
 
@@ -2397,7 +2391,6 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_index_with_generated_at(&index_dir, time::OffsetDateTime::UNIX_EPOCH);
-        let store = IndexStore::new(&index_dir);
 
         let config = Arc::new(app_config_with_public_url(&index_dir));
         let service = SearchService::open_current(config).unwrap();
@@ -2405,7 +2398,7 @@ mod tests {
 
         let next_time = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1);
         let next_path = publish_canonical_index_with_generated_at(&index_dir, next_time);
-        fs::remove_file(store.seo_sidecar_path(&next_path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&next_path)).unwrap();
 
         let error = service.reconcile_current_generation().unwrap_err();
         let snapshot = service.snapshot();
@@ -2434,7 +2427,7 @@ mod tests {
             path: next_path,
             manifest: next_manifest,
         };
-        let mut sidecar = store.read_seo_sidecar(&next_generation).unwrap();
+        let mut sidecar = SeoFactsArtifact::read(&next_generation).unwrap();
         sidecar.entries[0].name = "not-real".to_owned();
         write_raw_seo_sidecar(&store, &next_generation, &sidecar);
 
@@ -2545,7 +2538,7 @@ mod tests {
         service.reconcile_current_generation().unwrap();
         let observed_current = service.snapshot().to_published_generation();
 
-        fs::remove_file(store.seo_sidecar_path(&old_path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&old_path)).unwrap();
         let stale = store
             .lease_published_generation(PublishedGeneration {
                 path: old_path,
@@ -2584,7 +2577,7 @@ mod tests {
         service.reconcile_current_generation().unwrap();
         let observed_current = service.snapshot().to_published_generation();
 
-        let mut sidecar = store.read_seo_sidecar(&old_generation).unwrap();
+        let mut sidecar = SeoFactsArtifact::read(&old_generation).unwrap();
         sidecar.entries[0].name = "not-real".to_owned();
         write_raw_seo_sidecar(&store, &old_generation, &sidecar);
         let stale = store

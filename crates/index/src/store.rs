@@ -3,8 +3,6 @@ mod integrity;
 mod layout;
 mod leases;
 mod manifest;
-mod sidecar;
-
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::manifest::IndexGenerationManifest;
@@ -55,6 +53,7 @@ mod tests {
     };
     use crate::search::SearchIndex;
     use crate::seo::SeoSidecarAccumulator;
+    use crate::seo_sidecar::SeoFactsArtifact;
     use crate::store::{IndexStore, PublishedGeneration};
 
     const SOURCE_FIXTURES: &str = "fixtures";
@@ -144,7 +143,7 @@ mod tests {
             manifest,
         };
 
-        store.write_seo_sidecar(&generation, &sidecar).unwrap();
+        SeoFactsArtifact::write(store, &generation, &sidecar).unwrap();
         store
             .write_manifest(&generation.path, &generation.manifest)
             .unwrap();
@@ -602,7 +601,7 @@ mod tests {
             manifest: old_schema_manifest(1),
         };
 
-        let error = store.read_seo_sidecar(&generation).unwrap_err();
+        let error = SeoFactsArtifact::read(&generation).unwrap_err();
 
         assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
@@ -617,7 +616,7 @@ mod tests {
         };
         let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
 
-        let error = store.write_seo_sidecar(&generation, &sidecar).unwrap_err();
+        let error = SeoFactsArtifact::write(&store, &generation, &sidecar).unwrap_err();
 
         assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
@@ -632,9 +631,8 @@ mod tests {
         };
         let sidecar = SeoSidecarAccumulator::new().into_sidecar_for_manifest(&generation.manifest);
 
-        let error = store
-            .write_validated_seo_sidecar_unchecked(&generation, &sidecar)
-            .unwrap_err();
+        let error =
+            SeoFactsArtifact::write_validated_unchecked(&store, &generation, &sidecar).unwrap_err();
 
         assert!(format!("{error:#}").contains("unsupported index schema version 2"));
     }
@@ -1051,15 +1049,15 @@ mod tests {
 
         manifest.generation_id = "sha256:wrong".to_owned();
 
-        let error = store
-            .write_seo_sidecar(
-                &PublishedGeneration {
-                    path: generation,
-                    manifest,
-                },
-                &sidecar,
-            )
-            .unwrap_err();
+        let error = SeoFactsArtifact::write(
+            &store,
+            &PublishedGeneration {
+                path: generation,
+                manifest,
+            },
+            &sidecar,
+        )
+        .unwrap_err();
 
         assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
@@ -1069,11 +1067,11 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let store = store_for(&tempdir);
         let generation = publish_one_option_generation(&store);
-        let mut sidecar = store.read_seo_sidecar(&generation).unwrap();
+        let mut sidecar = SeoFactsArtifact::read(&generation).unwrap();
 
         sidecar.entries[0].name = "not-real".to_owned();
 
-        let error = store.write_seo_sidecar(&generation, &sidecar).unwrap_err();
+        let error = SeoFactsArtifact::write(&store, &generation, &sidecar).unwrap_err();
 
         assert!(format!("{error:#}").contains("entry facts do not match indexed documents"));
     }

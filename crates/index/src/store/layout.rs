@@ -8,7 +8,6 @@ use super::IndexStore;
 
 pub(super) const CURRENT_TEMP_PREFIX: &str = "CURRENT.tmp";
 pub(super) const MANIFEST_TEMP_PREFIX: &str = "index-manifest.json.tmp";
-pub(super) const SEO_SIDECAR_TEMP_PREFIX: &str = "seo-facts.json.tmp";
 
 const CURRENT_FILE: &str = "CURRENT";
 const GENERATIONS_DIR: &str = "generations";
@@ -17,7 +16,6 @@ const GENERATION_NAME_PREFIX: &str = "generation-";
 const INDEX_DIR: &str = "index";
 const INTEGRITY_FILE: &str = "integrity.json";
 const MANIFEST_FILE: &str = "index-manifest.json";
-const SEO_SIDECAR_FILE: &str = "seo-facts.json";
 
 #[derive(Debug, Clone)]
 pub(super) struct GenerationLayout {
@@ -70,10 +68,6 @@ impl IndexStore {
         generation_path.join(MANIFEST_FILE)
     }
 
-    pub fn seo_sidecar_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
-        generation_path.join(SEO_SIDECAR_FILE)
-    }
-
     pub fn integrity_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
         generation_path.join(INTEGRITY_FILE)
     }
@@ -115,7 +109,7 @@ impl IndexStore {
         )
     }
 
-    pub(super) fn validate_generation_path(
+    pub(crate) fn validate_generation_path(
         &self,
         generation_path: &Utf8Path,
     ) -> Result<Utf8PathBuf> {

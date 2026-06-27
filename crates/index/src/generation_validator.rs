@@ -9,7 +9,7 @@ use crate::generation::{
 use crate::integrity::{self as generation_integrity, GenerationIntegrityPaths};
 use crate::manifest::{validate_generation_id, validate_index_schema_version};
 use crate::search::SearchIndex;
-use crate::seo::SeoSidecarAccumulator;
+use crate::seo_sidecar::SeoFactsArtifact;
 use crate::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
 
 #[derive(Debug, Clone)]
@@ -46,8 +46,7 @@ impl GenerationValidator {
             let index_path = self.store.index_path(&generation.path);
             let index = SearchIndex::open(&index_path)
                 .with_context(|| format!("failed to open search index {index_path}"))?;
-            let seo_sidecar = SeoSidecarAccumulator::from_index(&index)?
-                .into_sidecar_for_manifest(&generation.manifest);
+            let seo_sidecar = SeoFactsArtifact::derive_from_index(&generation.manifest, &index)?;
 
             return Ok(StructurallyCompleteGeneration {
                 index,
@@ -71,7 +70,7 @@ impl GenerationValidator {
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let sidecar = self.store.read_seo_sidecar(generation)?;
+        let sidecar = SeoFactsArtifact::read(generation)?;
         if self.validate_integrity(generation, true).is_ok() {
             let index_path = self.store.index_path(&generation.path);
             let index = SearchIndex::open(&index_path)
@@ -127,7 +126,7 @@ impl GenerationValidator {
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let path = self.store.seo_sidecar_path(&generation.path);
+        let path = SeoFactsArtifact::path(&generation.path);
         let metadata = fs::metadata(&path)
             .with_context(|| format!("failed to read SEO sidecar metadata {path}"))?;
 
@@ -145,7 +144,7 @@ impl GenerationValidator {
     ) -> Result<()> {
         let paths = GenerationIntegrityPaths {
             manifest_path: self.store.manifest_path(&generation.path),
-            seo_sidecar_path: self.store.seo_sidecar_path(&generation.path),
+            seo_sidecar_path: SeoFactsArtifact::path(&generation.path),
             index_path: self.store.index_path(&generation.path),
             integrity_path: self.store.integrity_path(&generation.path),
         };
@@ -171,6 +170,7 @@ mod tests {
     use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
     use crate::search::SearchIndex;
     use crate::seo::SeoSidecarAccumulator;
+    use crate::seo_sidecar::SeoFactsArtifact;
     use crate::store::{IndexStore, PublishedGeneration};
 
     use super::GenerationValidator;
@@ -228,7 +228,7 @@ mod tests {
             manifest,
         };
 
-        store.write_seo_sidecar(&generation, &sidecar).unwrap();
+        SeoFactsArtifact::write(store, &generation, &sidecar).unwrap();
         store
             .write_manifest(&generation.path, &generation.manifest)
             .unwrap();

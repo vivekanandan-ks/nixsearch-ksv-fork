@@ -9,7 +9,8 @@ use nixsearch_core::document::SearchDocument;
 use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
-use nixsearch_index::seo::{SeoSidecar, SeoSidecarAccumulator};
+use nixsearch_index::seo::SeoSidecar;
+use nixsearch_index::seo_sidecar::SeoFactsArtifact;
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_test_support::{
     REF_SMALL, SOURCE_FIXTURES, canonical_documents, ingest_context_for, option_doc_for,
@@ -135,11 +136,9 @@ pub fn publish_documents_with_manifest_targets(
     let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
     let mut writer = index.writer().unwrap();
     let mut annotations = EntryAnnotationIndex::new();
-    let mut seo_facts = SeoSidecarAccumulator::new();
 
     for doc in &documents {
         annotations.observe(doc);
-        seo_facts.observe(doc);
     }
 
     for doc in &documents {
@@ -153,15 +152,12 @@ pub fn publish_documents_with_manifest_targets(
     let manifest =
         IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at).unwrap();
 
-    let sidecar = seo_facts.into_sidecar_for_manifest(&manifest);
     let published_generation = PublishedGeneration {
         path: generation.clone(),
         manifest: manifest.clone(),
     };
 
-    store
-        .write_seo_sidecar(&published_generation, &sidecar)
-        .unwrap();
+    SeoFactsArtifact::write_derived(&store, &published_generation, &index).unwrap();
     store.write_manifest(&generation, &manifest).unwrap();
     store.write_integrity(&published_generation, true).unwrap();
     store.publish(&generation).unwrap();
@@ -172,12 +168,12 @@ pub fn publish_documents_with_manifest_targets(
 ///
 /// Use only in tests that intentionally simulate corrupt on-disk sidecars.
 pub fn write_raw_seo_sidecar(
-    store: &IndexStore,
+    _store: &IndexStore,
     generation: &PublishedGeneration,
     sidecar: &SeoSidecar,
 ) {
     std::fs::write(
-        store.seo_sidecar_path(&generation.path),
+        SeoFactsArtifact::path(&generation.path),
         serde_json::to_vec_pretty(sidecar).unwrap(),
     )
     .unwrap();

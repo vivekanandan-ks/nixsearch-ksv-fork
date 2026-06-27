@@ -1033,6 +1033,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use camino::Utf8PathBuf;
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::publish_canonical_index_with_generated_at;
     use tempfile::tempdir;
@@ -1141,8 +1142,7 @@ mod tests {
             &index_dir,
             time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
         );
-        let store = IndexStore::new(&index_dir);
-        fs::remove_file(store.seo_sidecar_path(&current)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&current)).unwrap();
 
         let mut config = nixsearch_test_support::app_config_with_public_url(&index_dir);
         config.maintenance.index_generations.keep = 1;
@@ -1172,8 +1172,7 @@ mod tests {
             &index_dir,
             time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
         );
-        let store = IndexStore::new(&index_dir);
-        let sidecar_path = store.seo_sidecar_path(&current);
+        let sidecar_path = SeoFactsArtifact::path(&current);
         fs::remove_file(&sidecar_path).unwrap();
 
         let mut config = nixsearch_test_support::app_config(&index_dir);

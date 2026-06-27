@@ -1,31 +1,63 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
+
+use nixsearch_core::document::SearchDocument;
 
 use crate::atomic_file;
-use crate::manifest::{validate_generation_id, validate_index_schema_version};
+use crate::manifest::{
+    IndexGenerationManifest, validate_generation_id, validate_index_schema_version,
+};
 use crate::search::SearchIndex;
-use crate::seo::SeoSidecar;
+use crate::seo::{SeoSidecar, SeoSidecarAccumulator};
+use crate::store::{IndexStore, PublishedGeneration};
 
-use super::layout::SEO_SIDECAR_TEMP_PREFIX;
-use super::{IndexStore, PublishedGeneration};
+const SEO_SIDECAR_FILE: &str = "seo-facts.json";
+const SEO_SIDECAR_TEMP_PREFIX: &str = "seo-facts.json.tmp";
 
-impl IndexStore {
-    pub fn write_seo_sidecar(
-        &self,
+#[derive(Debug, Clone, Copy)]
+pub struct SeoFactsArtifact;
+
+impl SeoFactsArtifact {
+    pub fn path(generation_path: &Utf8Path) -> Utf8PathBuf {
+        generation_path.join(SEO_SIDECAR_FILE)
+    }
+
+    pub fn derive_from_index(
+        manifest: &IndexGenerationManifest,
+        index: &SearchIndex,
+    ) -> Result<SeoSidecar> {
+        Ok(SeoSidecarAccumulator::from_index(index)?.into_sidecar_for_manifest(manifest))
+    }
+
+    pub fn derive_from_documents<'a>(
+        manifest: &IndexGenerationManifest,
+        documents: impl IntoIterator<Item = &'a SearchDocument>,
+    ) -> SeoSidecar {
+        let mut accumulator = SeoSidecarAccumulator::new();
+
+        for document in documents {
+            accumulator.observe(document);
+        }
+
+        accumulator.into_sidecar_for_manifest(manifest)
+    }
+
+    pub fn write(
+        store: &IndexStore,
         generation: &PublishedGeneration,
         sidecar: &SeoSidecar,
     ) -> Result<()> {
-        let generation_path = self.validate_generation_path(&generation.path)?;
-        let path = self.seo_sidecar_path(&generation_path);
+        let generation_path = store.validate_generation_path(&generation.path)?;
+        let path = Self::path(&generation_path);
 
         validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let index_path = self.index_path(&generation_path);
+        let index_path = store.index_path(&generation_path);
         let index = SearchIndex::open(&index_path)
             .with_context(|| format!("failed to open search index {index_path}"))?;
 
@@ -33,16 +65,32 @@ impl IndexStore {
             .validate_for_index(&generation.manifest, &index)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
-        self.write_serialized_seo_sidecar(&generation_path, &path, sidecar)
+        Self::write_serialized(&generation_path, &path, sidecar)
     }
 
-    pub fn write_validated_seo_sidecar_unchecked(
-        &self,
+    pub fn write_derived(
+        store: &IndexStore,
+        generation: &PublishedGeneration,
+        index: &SearchIndex,
+    ) -> Result<SeoSidecar> {
+        validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+        validate_index_schema_version(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
+
+        let sidecar = Self::derive_from_index(&generation.manifest, index)?;
+        Self::write_validated_unchecked(store, generation, &sidecar)?;
+
+        Ok(sidecar)
+    }
+
+    pub fn write_validated_unchecked(
+        store: &IndexStore,
         generation: &PublishedGeneration,
         sidecar: &SeoSidecar,
     ) -> Result<()> {
-        let generation_path = self.validate_generation_path(&generation.path)?;
-        let path = self.seo_sidecar_path(&generation_path);
+        let generation_path = store.validate_generation_path(&generation.path)?;
+        let path = Self::path(&generation_path);
 
         validate_generation_id(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
@@ -52,11 +100,10 @@ impl IndexStore {
             .validate_for_manifest(&generation.manifest)
             .with_context(|| format!("failed to validate SEO sidecar {}", path.as_str()))?;
 
-        self.write_serialized_seo_sidecar(&generation_path, &path, sidecar)
+        Self::write_serialized(&generation_path, &path, sidecar)
     }
 
-    fn write_serialized_seo_sidecar(
-        &self,
+    fn write_serialized(
         generation_path: &Utf8Path,
         path: &Utf8Path,
         sidecar: &SeoSidecar,
@@ -78,11 +125,11 @@ impl IndexStore {
         Ok(())
     }
 
-    pub fn read_seo_sidecar(&self, generation: &PublishedGeneration) -> Result<SeoSidecar> {
+    pub fn read(generation: &PublishedGeneration) -> Result<SeoSidecar> {
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
-        let path = self.seo_sidecar_path(&generation.path);
+        let path = Self::path(&generation.path);
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read SEO sidecar {}", path.as_str()))?;
 

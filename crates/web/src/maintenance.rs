@@ -487,6 +487,7 @@ mod tests {
     use nixsearch_config::producer::ProducerConfig;
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_index::search::SearchIndex;
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
         publish_canonical_index, publish_canonical_index_with_generated_at,
@@ -782,7 +783,7 @@ mod tests {
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         let published_path = publish_canonical_index(&index_dir);
         let store = IndexStore::new(&index_dir);
-        fs::remove_file(store.seo_sidecar_path(&published_path)).unwrap();
+        fs::remove_file(SeoFactsArtifact::path(&published_path)).unwrap();
 
         let config = app_config_with_public_url(&index_dir);
 
