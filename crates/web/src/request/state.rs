@@ -1,6 +1,6 @@
 use nixsearch_config::app::AppConfig;
 
-use super::{PageRequest, non_empty, normalized_query};
+use super::{PageRequest, PublicRoute, QuerySource, non_empty, normalized_query};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageState {
@@ -56,13 +56,16 @@ pub enum SourceFilter {
 
 impl SourceFilter {
     pub fn from_request(request: &PageRequest) -> Self {
-        if request.query.source == Some(super::LinkOrigin::All) && request.entry.is_some() {
-            return Self::All;
-        }
-
-        match &request.source {
-            None => Self::All,
-            Some(source) => Self::Named(source.clone()),
+        match &request.route {
+            PublicRoute::Home => Self::All,
+            PublicRoute::Source { source } => Self::Named(source.clone()),
+            PublicRoute::Entry { source, .. } => {
+                if request.query.source == Some(QuerySource::All) {
+                    Self::All
+                } else {
+                    Self::Named(source.clone())
+                }
+            }
         }
     }
 }
@@ -129,15 +132,14 @@ fn detail_state(
     active_ref_set: Option<&str>,
     source_ref: Option<&str>,
 ) -> Option<DetailState> {
-    request
-        .entry
-        .as_ref()
-        .zip(request.source.as_ref())
-        .map(|(entry, source)| DetailState {
+    match &request.route {
+        PublicRoute::Entry { source, entry } => Some(DetailState {
             source: source.clone(),
             entry: entry.clone(),
             ref_id: detail_ref(config, source, raw_ref, active_ref_set, source_ref),
-        })
+        }),
+        PublicRoute::Home | PublicRoute::Source { .. } => None,
+    }
 }
 
 fn detail_ref(

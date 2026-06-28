@@ -1029,7 +1029,7 @@ fn validate_page_request(
 
     match &page_state.source_filter {
         SourceFilter::All => {
-            let all_source_ref = if request.entry.is_some() {
+            let all_source_ref = if request.route.is_entry() {
                 None
             } else {
                 raw_ref
@@ -1049,8 +1049,8 @@ fn validate_page_request(
         }
     }
 
-    if request.entry.is_some()
-        && let Some(source) = request.source.as_deref()
+    if request.route.is_entry()
+        && let Some(source) = request.source()
     {
         let entry_ref_set = if page_state.source_filter == SourceFilter::All {
             page_state.active_ref_set()

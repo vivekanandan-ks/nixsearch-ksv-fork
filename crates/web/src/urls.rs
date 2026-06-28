@@ -6,7 +6,7 @@ use nixsearch_service::SitemapCandidate;
 use crate::entry::AnnotatedEntryDocument;
 #[cfg(test)]
 use crate::request::PageRequest;
-use crate::request::{LinkOrigin, PageQuery, PageState, SourceFilter, non_empty};
+use crate::request::{PageQuery, PageState, QuerySource, SourceFilter, non_empty};
 
 pub fn canonical_home_path() -> String {
     "/".to_owned()
@@ -82,7 +82,7 @@ fn entry_url_for(source: &str, entry: &str, query: &PageQuery) -> String {
 
 #[cfg(test)]
 pub fn close_url_for(request: &PageRequest) -> String {
-    if request.query.source == Some(LinkOrigin::All) {
+    if request.query.source == Some(QuerySource::All) {
         return search_url_for(
             None,
             &PageQuery {
@@ -95,7 +95,7 @@ pub fn close_url_for(request: &PageRequest) -> String {
     }
 
     search_url_for(
-        request.source.as_deref(),
+        request.source(),
         &PageQuery {
             q: request.query.q.clone(),
             ref_id: request.query.ref_id.clone(),
@@ -229,7 +229,7 @@ fn entry_url_for_document(
     page: Option<usize>,
 ) -> String {
     let common = document.common();
-    let from_scope = matches!(state.source_filter, SourceFilter::All).then_some(LinkOrigin::All);
+    let from_scope = matches!(state.source_filter, SourceFilter::All).then_some(QuerySource::All);
     let ref_set = state.active_ref_set().filter(|ref_set| {
         config.ref_set_contains_source_ref(ref_set, &common.source, &common.ref_id)
     });
@@ -332,7 +332,7 @@ mod tests {
         REF_SMALL, SOURCE_FIXTURES, app_config, ingest_context_for, package_doc_for,
     };
 
-    use crate::request::{LinkOrigin, PageQuery, PageRequest, page_state};
+    use crate::request::{PageQuery, PageRequest, PublicRoute, QuerySource, page_state};
 
     fn ref_config(id: &str) -> RefConfig {
         RefConfig {
@@ -386,6 +386,32 @@ mod tests {
             ]
             .into(),
             ..AppConfig::default()
+        }
+    }
+
+    fn home_request(query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Home,
+            query,
+        }
+    }
+
+    fn source_request(source: &str, query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Source {
+                source: source.to_owned(),
+            },
+            query,
+        }
+    }
+
+    fn entry_request(source: &str, entry: &str, query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Entry {
+                source: source.to_owned(),
+                entry: entry.to_owned(),
+            },
+            query,
         }
     }
 
@@ -444,7 +470,7 @@ mod tests {
             query: PageQuery {
                 q: Some("git".to_owned()),
                 ref_set: Some("unused".to_owned()),
-                source: Some(LinkOrigin::All),
+                source: Some(QuerySource::All),
                 page: Some(2),
                 ..PageQuery::default()
             },
@@ -481,60 +507,55 @@ mod tests {
 
     #[test]
     fn close_url_for_strips_entry_segment() {
-        let request = PageRequest {
-            source: Some("fixtures".to_owned()),
-            entry: Some("programs.git.enable".to_owned()),
-            query: PageQuery {
+        let request = entry_request(
+            "fixtures",
+            "programs.git.enable",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("small".to_owned()),
                 source: None,
                 ..PageQuery::default()
             },
-        };
+        );
         assert_eq!(close_url_for(&request), "/fixtures?q=git&ref=small");
     }
 
     #[test]
     fn close_url_for_returns_root_when_no_source() {
-        let request = PageRequest {
-            source: None,
-            entry: None,
-            query: PageQuery {
-                q: Some("git".to_owned()),
-                ..PageQuery::default()
-            },
-        };
+        let request = home_request(PageQuery {
+            q: Some("git".to_owned()),
+            ..PageQuery::default()
+        });
         assert_eq!(close_url_for(&request), "/?q=git");
     }
 
     #[test]
     fn close_url_for_all_scope_returns_to_root() {
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            entry: Some("rubyPackages.git".to_owned()),
-            query: PageQuery {
+        let request = entry_request(
+            "nixpkgs",
+            "rubyPackages.git",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ref_set: Some("25.11".to_owned()),
-                source: Some(LinkOrigin::All),
+                source: Some(QuerySource::All),
                 ..PageQuery::default()
             },
-        };
+        );
         assert_eq!(close_url_for(&request), "/?q=git&ref_set=25.11");
     }
 
     #[test]
     fn source_url_does_not_serialize_inferred_ref_set() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            query: PageQuery {
+        let request = source_request(
+            "nixpkgs",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ..PageQuery::default()
             },
-            ..PageRequest::default()
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -548,16 +569,15 @@ mod tests {
     #[test]
     fn source_url_prefers_unique_ref_set_over_ref() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            query: PageQuery {
+        let request = source_request(
+            "nixpkgs",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ref_set: Some("25.11".to_owned()),
                 ..PageQuery::default()
             },
-            ..PageRequest::default()
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -569,16 +589,15 @@ mod tests {
     #[test]
     fn source_url_includes_ref_when_ref_set_is_ambiguous() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            query: PageQuery {
+        let request = source_request(
+            "nixpkgs",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ref_set: Some("multi".to_owned()),
                 ..PageQuery::default()
             },
-            ..PageRequest::default()
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -590,16 +609,15 @@ mod tests {
     #[test]
     fn search_url_for_state_preserves_source_page() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            query: PageQuery {
+        let request = source_request(
+            "nixpkgs",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 page: Some(3),
                 ..PageQuery::default()
             },
-            ..PageRequest::default()
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -611,16 +629,15 @@ mod tests {
     #[test]
     fn source_tab_url_resets_page() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            query: PageQuery {
+        let request = source_request(
+            "nixpkgs",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 page: Some(3),
                 ..PageQuery::default()
             },
-            ..PageRequest::default()
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -632,15 +649,12 @@ mod tests {
     #[test]
     fn all_tab_url_resets_page() {
         let config = handoff_config();
-        let request = PageRequest {
-            query: PageQuery {
-                q: Some("git".to_owned()),
-                ref_set: Some("25.11".to_owned()),
-                page: Some(3),
-                ..PageQuery::default()
-            },
-            ..PageRequest::default()
-        };
+        let request = home_request(PageQuery {
+            q: Some("git".to_owned()),
+            ref_set: Some("25.11".to_owned()),
+            page: Some(3),
+            ..PageQuery::default()
+        });
         let state = page_state(&config, &request);
 
         assert_eq!(
@@ -652,16 +666,16 @@ mod tests {
     #[test]
     fn close_url_for_state_preserves_source_page() {
         let config = handoff_config();
-        let request = PageRequest {
-            source: Some("nixpkgs".to_owned()),
-            entry: Some("git".to_owned()),
-            query: PageQuery {
+        let request = entry_request(
+            "nixpkgs",
+            "git",
+            PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 page: Some(3),
                 ..PageQuery::default()
             },
-        };
+        );
         let state = page_state(&config, &request);
 
         assert_eq!(

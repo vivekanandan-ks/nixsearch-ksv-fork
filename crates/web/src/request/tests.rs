@@ -90,8 +90,7 @@ fn handoff_config() -> AppConfig {
 #[test]
 fn parses_root_public_url() {
     let request = page_request_from_public_url("/").unwrap();
-    assert_eq!(request.source, None);
-    assert_eq!(request.entry, None);
+    assert_eq!(request.route, PublicRoute::Home);
     assert_eq!(request.query.q, None);
 }
 
@@ -129,8 +128,12 @@ fn public_uri_rejects_fragments() {
 #[test]
 fn parses_source_search_public_url() {
     let request = page_request_from_public_url("/fixtures?q=git&ref=small").unwrap();
-    assert_eq!(request.source.as_deref(), Some("fixtures"));
-    assert_eq!(request.entry, None);
+    assert_eq!(
+        request.route,
+        PublicRoute::Source {
+            source: "fixtures".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("git"));
     assert_eq!(request.query.ref_id.as_deref(), Some("small"));
 }
@@ -141,8 +144,12 @@ fn parses_absolute_public_url() {
         page_request_from_public_url("https://search.example.com/fixtures?q=git&ref=small")
             .unwrap();
 
-    assert_eq!(request.source.as_deref(), Some("fixtures"));
-    assert_eq!(request.entry, None);
+    assert_eq!(
+        request.route,
+        PublicRoute::Source {
+            source: "fixtures".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("git"));
     assert_eq!(request.query.ref_id.as_deref(), Some("small"));
 }
@@ -151,10 +158,29 @@ fn parses_absolute_public_url() {
 fn parses_entry_public_url() {
     let request =
         page_request_from_public_url("/fixtures/programs.git.enable?q=git&ref=small").unwrap();
-    assert_eq!(request.source.as_deref(), Some("fixtures"));
-    assert_eq!(request.entry.as_deref(), Some("programs.git.enable"));
+    assert_eq!(
+        request.route,
+        PublicRoute::Entry {
+            source: "fixtures".to_owned(),
+            entry: "programs.git.enable".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("git"));
     assert_eq!(request.query.ref_id.as_deref(), Some("small"));
+}
+
+#[test]
+fn parses_nested_entry_public_url() {
+    let request = page_request_from_public_url("/fixtures/nested/path?q=git").unwrap();
+
+    assert_eq!(
+        request.route,
+        PublicRoute::Entry {
+            source: "fixtures".to_owned(),
+            entry: "nested/path".to_owned(),
+        }
+    );
+    assert_eq!(request.query.q.as_deref(), Some("git"));
 }
 
 #[test]
@@ -247,8 +273,13 @@ fn rejects_empty_path_segments() {
 fn strictly_decodes_path_and_query() {
     let request = page_request_from_public_url("/fix%74ures/programs%2Egit?q=hello+world").unwrap();
 
-    assert_eq!(request.source.as_deref(), Some("fixtures"));
-    assert_eq!(request.entry.as_deref(), Some("programs.git"));
+    assert_eq!(
+        request.route,
+        PublicRoute::Entry {
+            source: "fixtures".to_owned(),
+            entry: "programs.git".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("hello world"));
 }
 
@@ -256,7 +287,7 @@ fn strictly_decodes_path_and_query() {
 fn keeps_plus_literal_in_path() {
     let request = page_request_from_public_url("/fixtures/a+b?q=a+b").unwrap();
 
-    assert_eq!(request.entry.as_deref(), Some("a+b"));
+    assert_eq!(request.entry(), Some("a+b"));
     assert_eq!(request.query.q.as_deref(), Some("a b"));
 }
 
@@ -269,10 +300,15 @@ fn rejects_bad_percent_encoding_and_utf8() {
 #[test]
 fn parses_source_query_param() {
     let request = page_request_from_public_url("/nixpkgs/git?q=git&source=all").unwrap();
-    assert_eq!(request.source.as_deref(), Some("nixpkgs"));
-    assert_eq!(request.entry.as_deref(), Some("git"));
+    assert_eq!(
+        request.route,
+        PublicRoute::Entry {
+            source: "nixpkgs".to_owned(),
+            entry: "git".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("git"));
-    assert_eq!(request.query.source, Some(LinkOrigin::All));
+    assert_eq!(request.query.source, Some(QuerySource::All));
 }
 
 #[test]

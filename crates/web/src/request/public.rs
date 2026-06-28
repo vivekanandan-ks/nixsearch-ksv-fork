@@ -10,26 +10,66 @@ use super::decode::{
 };
 use super::{ParseResult, RequestParseError, non_empty};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PageRequest {
-    pub source: Option<String>,
-    pub entry: Option<String>,
+    pub route: PublicRoute,
     pub query: PageQuery,
 }
 
 impl PageRequest {
+    pub fn source(&self) -> Option<&str> {
+        self.route.source()
+    }
+
+    pub fn entry(&self) -> Option<&str> {
+        self.route.entry()
+    }
+
     pub fn has_search_return_context(&self) -> bool {
         normalized_query(&self.query).is_some()
             || self.query.page.is_some()
-            || self.query.source == Some(LinkOrigin::All)
+            || self.query.source == Some(QuerySource::All)
     }
 
     pub fn is_direct_entry(&self) -> bool {
-        self.entry.is_some() && !self.has_search_return_context()
+        self.route.is_entry() && !self.has_search_return_context()
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PublicRoute {
+    #[default]
+    Home,
+    Source {
+        source: String,
+    },
+    Entry {
+        source: String,
+        entry: String,
+    },
+}
+
+impl PublicRoute {
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::Home => None,
+            Self::Source { source } | Self::Entry { source, .. } => Some(source),
+        }
+    }
+
+    pub fn entry(&self) -> Option<&str> {
+        match self {
+            Self::Entry { entry, .. } => Some(entry),
+            Self::Home | Self::Source { .. } => None,
+        }
+    }
+
+    pub fn is_entry(&self) -> bool {
+        matches!(self, Self::Entry { .. })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PageQuery {
     pub q: Option<String>,
 
@@ -37,17 +77,17 @@ pub struct PageQuery {
 
     pub ref_set: Option<String>,
 
-    pub source: Option<LinkOrigin>,
+    pub source: Option<QuerySource>,
 
     pub page: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkOrigin {
+pub enum QuerySource {
     All,
 }
 
-impl LinkOrigin {
+impl QuerySource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -103,16 +143,15 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
 
-    let source = path_parts
-        .first()
-        .map(|value| strict_decode(value, false))
-        .transpose()?;
-
-    let entry = if path_parts.len() >= 2 {
-        let raw_entry = path_parts[1..].join("/");
-        Some(strict_decode(&raw_entry, false)?)
-    } else {
-        None
+    let route = match path_parts.as_slice() {
+        [] => PublicRoute::Home,
+        [source] => PublicRoute::Source {
+            source: strict_decode(source, false)?,
+        },
+        [source, rest @ ..] => PublicRoute::Entry {
+            source: strict_decode(source, false)?,
+            entry: strict_decode(&rest.join("/"), false)?,
+        },
     };
 
     let mut q = None;
@@ -130,10 +169,10 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
             "ref" => ref_id = Some(required_value(&key, value)?),
             "ref_set" => ref_set = Some(required_value(&key, value)?),
             "source" => {
-                if value != LinkOrigin::All.as_str() {
+                if value != QuerySource::All.as_str() {
                     return Err(RequestParseError::new("source must be all"));
                 }
-                source_param = Some(LinkOrigin::All);
+                source_param = Some(QuerySource::All);
             }
             "page" => {
                 page = Some(parse_bounded_usize(&value, "page", 1, MAX_PAGE)?);
@@ -151,8 +190,7 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
     }
 
     Ok(PageRequest {
-        source,
-        entry,
+        route,
         query: PageQuery {
             q,
             ref_id,

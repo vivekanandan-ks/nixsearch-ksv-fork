@@ -8,7 +8,9 @@ use nixsearch_service::{SeoFactsResult, ServedGenerationSnapshot};
 use crate::AppState;
 use crate::entry::EntryData;
 use crate::origin::PageUrls;
-use crate::request::{PageRequest, PageState, SourceFilter, non_empty, normalized_query};
+use crate::request::{
+    PageRequest, PageState, PublicRoute, SourceFilter, non_empty, normalized_query,
+};
 use crate::source_labels::{source_display_name, source_kind_noun};
 use crate::urls::{canonical_entry_path_for_document, canonical_home_path, canonical_source_path};
 
@@ -241,8 +243,7 @@ fn page_index_metadata(
 
     match &page_state.source_filter {
         SourceFilter::All => {
-            if request.source.is_none()
-                && request.entry.is_none()
+            if matches!(request.route, PublicRoute::Home)
                 && request
                     .query
                     .ref_id
@@ -257,7 +258,7 @@ fn page_index_metadata(
             }
         }
         SourceFilter::Named(source) => {
-            if request.entry.is_some() || request.query.source.is_some() {
+            if request.route.is_entry() || request.query.source.is_some() {
                 return noindex_metadata();
             }
 
@@ -320,7 +321,7 @@ fn title_for_entry(
 
     if let Some(document) = entry_document {
         parts.push(document.common().name.to_owned());
-    } else if let Some(entry) = request.entry.as_deref().and_then(crate::request::non_empty) {
+    } else if let Some(entry) = request.entry().and_then(crate::request::non_empty) {
         parts.push(entry.to_owned());
     } else if let Some(q) = normalized_query(&request.query) {
         parts.push(q.to_owned());
@@ -417,7 +418,7 @@ mod tests {
 
     use crate::entry::{AnnotatedEntryDocument, EntryData};
     use crate::origin::PageUrls;
-    use crate::request::{PageQuery, PageRequest, SourceFilter};
+    use crate::request::{PageQuery, PageRequest, PublicRoute, SourceFilter};
 
     use super::{IndexMetadata, description_for, page_metadata, title_for, title_for_entry};
 
@@ -448,6 +449,32 @@ mod tests {
         }
     }
 
+    fn home_request(query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Home,
+            query,
+        }
+    }
+
+    fn source_request(source: &str, query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Source {
+                source: source.to_owned(),
+            },
+            query,
+        }
+    }
+
+    fn entry_request(source: &str, entry: &str, query: PageQuery) -> PageRequest {
+        PageRequest {
+            route: PublicRoute::Entry {
+                source: source.to_owned(),
+                entry: entry.to_owned(),
+            },
+            query,
+        }
+    }
+
     fn found_entry(document: SearchDocument) -> EntryData {
         EntryData::Found(AnnotatedEntryDocument {
             annotation: SearchHitAnnotation {
@@ -460,14 +487,13 @@ mod tests {
     #[test]
     fn title_includes_query_and_named_source() {
         let config = config();
-        let request = PageRequest {
-            source: Some(SOURCE_FIXTURES.to_owned()),
-            entry: None,
-            query: PageQuery {
+        let request = source_request(
+            SOURCE_FIXTURES,
+            PageQuery {
                 q: Some("git".to_owned()),
                 ..PageQuery::default()
             },
-        };
+        );
 
         assert_eq!(
             title_for(
@@ -482,14 +508,10 @@ mod tests {
     #[test]
     fn title_omits_all_source_filter() {
         let config = config();
-        let request = PageRequest {
-            source: None,
-            entry: None,
-            query: PageQuery {
-                q: Some("git".to_owned()),
-                ..PageQuery::default()
-            },
-        };
+        let request = home_request(PageQuery {
+            q: Some("git".to_owned()),
+            ..PageQuery::default()
+        });
 
         assert_eq!(
             title_for(&config, &request, &SourceFilter::All),
@@ -500,11 +522,7 @@ mod tests {
     #[test]
     fn title_includes_named_source_without_query() {
         let config = config();
-        let request = PageRequest {
-            source: Some(SOURCE_FIXTURES.to_owned()),
-            entry: None,
-            query: PageQuery::default(),
-        };
+        let request = source_request(SOURCE_FIXTURES, PageQuery::default());
 
         assert_eq!(
             title_for(
@@ -520,14 +538,14 @@ mod tests {
     fn title_uses_entry_document_when_present() {
         let config = config();
         let document = SearchDocument::Package(PackageDoc::new(&ingest_context(), "git"));
-        let request = PageRequest {
-            source: Some(SOURCE_FIXTURES.to_owned()),
-            entry: Some("git".to_owned()),
-            query: PageQuery {
+        let request = entry_request(
+            SOURCE_FIXTURES,
+            "git",
+            PageQuery {
                 q: Some("version control".to_owned()),
                 ..PageQuery::default()
             },
-        };
+        );
 
         assert_eq!(
             title_for_entry(
@@ -588,10 +606,7 @@ mod tests {
     #[test]
     fn metadata_describes_source_page() {
         let config = config();
-        let request = PageRequest {
-            source: Some(SOURCE_FIXTURES.to_owned()),
-            ..PageRequest::default()
-        };
+        let request = source_request(SOURCE_FIXTURES, PageQuery::default());
         let search = SearchResult {
             hits: Vec::new(),
             total: 0,
@@ -612,13 +627,10 @@ mod tests {
     #[test]
     fn metadata_describes_search_results() {
         let config = config();
-        let request = PageRequest {
-            query: PageQuery {
-                q: Some("git".to_owned()),
-                ..PageQuery::default()
-            },
-            ..PageRequest::default()
-        };
+        let request = home_request(PageQuery {
+            q: Some("git".to_owned()),
+            ..PageQuery::default()
+        });
         let search = SearchResult {
             hits: Vec::new(),
             total: 59_526,

@@ -7,7 +7,7 @@ mod public;
 mod state;
 
 pub use decode::non_empty;
-pub use public::{LinkOrigin, PageQuery, PageRequest, normalized_query};
+pub use public::{PageQuery, PageRequest, PublicRoute, QuerySource, normalized_query};
 pub use state::{PageState, SourceFilter, page_state};
 
 pub(crate) use endpoint::{slice_query_from_uri, state_events_query_from_uri};
