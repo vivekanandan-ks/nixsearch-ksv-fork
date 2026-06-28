@@ -29,7 +29,7 @@ pub(super) async fn rebuild(args: SelectionArgs) -> Result<()> {
     let index_store = IndexStore::new(&config.data.index_dir);
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
 
-    build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await?;
+    build_and_publish_generation(&index_store, &store, targets, &refresh_keys, None).await?;
 
     let report = cleanup::cleanup_under_lock(&config, &update_lock).await?;
     cleanup::log_report(&report);

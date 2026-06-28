@@ -9,6 +9,7 @@ use crate::consume::consume_target;
 use crate::spool::{DocumentSpool, DocumentSpoolWriter};
 use crate::targets::TargetKey;
 
+use super::RetainedTarget;
 use super::production::ProducedTarget;
 
 pub(crate) struct SpooledDocumentSetBuilder {
@@ -44,30 +45,62 @@ impl SpooledDocumentSetBuilder {
         produced_target: &ProducedTarget,
         documents: &[SearchDocument],
     ) -> Result<()> {
+        self.append_documents(
+            produced_target.key.clone(),
+            IndexTargetManifest {
+                source: produced_target.target.source_id.clone(),
+                ref_id: produced_target.target.ref_config.id.clone(),
+                artifact_kind: produced_target.produced.artifact_ref.kind,
+                target_role: produced_target.target.ref_config.role,
+                indexes_search_documents: produced_target.target.indexes_search_documents(),
+                document_count: documents.len(),
+                artifact_hash: Some(produced_target.verified_metadata.content_hash.clone()),
+                revision: produced_target.verified_metadata.revision.clone(),
+            },
+            documents,
+            produced_target.status.as_str(),
+        )
+    }
+
+    pub(crate) fn append_retained_target(
+        &mut self,
+        key: &TargetKey,
+        retained: &RetainedTarget,
+    ) -> Result<()> {
+        if TargetKey::from(&retained.manifest_target) != *key {
+            anyhow::bail!("retained manifest target does not match target key {key}");
+        }
+
+        self.append_documents(
+            key.clone(),
+            retained.manifest_target.clone(),
+            &retained.documents,
+            "retained",
+        )
+    }
+
+    fn append_documents(
+        &mut self,
+        key: TargetKey,
+        manifest_target: IndexTargetManifest,
+        documents: &[SearchDocument],
+        status: &str,
+    ) -> Result<()> {
         for document in documents {
             self.annotations.observe(document);
             self.writer.push(document)?;
         }
 
         self.total_documents += documents.len();
-        self.successful_targets.push(produced_target.key.clone());
-        self.manifest_targets.push(IndexTargetManifest {
-            source: produced_target.target.source_id.clone(),
-            ref_id: produced_target.target.ref_config.id.clone(),
-            artifact_kind: produced_target.produced.artifact_ref.kind,
-            target_role: produced_target.target.ref_config.role,
-            indexes_search_documents: produced_target.target.indexes_search_documents(),
-            document_count: documents.len(),
-            artifact_hash: Some(produced_target.verified_metadata.content_hash.clone()),
-            revision: produced_target.verified_metadata.revision.clone(),
-        });
+        self.successful_targets.push(key);
+        self.manifest_targets.push(manifest_target.clone());
 
         tracing::info!(
             "{} {} documents: {}/{}",
-            produced_target.status.as_str(),
+            status,
             documents.len(),
-            produced_target.target.source_id,
-            produced_target.target.ref_config.id
+            manifest_target.source,
+            manifest_target.ref_id
         );
 
         Ok(())

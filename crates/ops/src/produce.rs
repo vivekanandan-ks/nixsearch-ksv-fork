@@ -16,7 +16,7 @@ use nixsearch_source::producers::{
 };
 use nixsearch_store::ArtifactStore;
 
-use crate::targets::{TargetRef, latest_artifact_ref_for_target};
+use crate::targets::TargetRef;
 
 pub async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result<ProducedArtifact> {
     let request = ProduceRequest {
@@ -148,24 +148,6 @@ pub async fn produce_target(store: &ArtifactStore, target: &TargetRef) -> Result
             unsupported.kind()
         ),
     }
-}
-
-pub async fn produced_from_existing_artifact(
-    store: &ArtifactStore,
-    target: &TargetRef,
-) -> Result<ProducedArtifact> {
-    let artifact_ref = latest_artifact_ref_for_target(target);
-    let metadata = store.get_metadata(&artifact_ref).await.with_context(|| {
-        format!(
-            "failed to read artifact metadata for retained target {}/{}",
-            target.source_id, target.ref_config.id
-        )
-    })?;
-
-    Ok(ProducedArtifact {
-        artifact_ref,
-        metadata,
-    })
 }
 
 fn source_download_compression(

@@ -9,10 +9,11 @@ use nixsearch_index::store::IndexStore;
 use nixsearch_source::artifact::ProducedArtifact;
 use nixsearch_store::ArtifactStore;
 
-pub use crate::generation::GenerationBuildResult;
 use crate::generation::{
-    GenerationFailurePolicy, TargetProducer, build_and_publish_generation_with_policy,
+    GenerationBuildPlan, GenerationFailurePolicy, TargetProducer,
+    build_and_publish_generation_with_policy,
 };
+pub use crate::generation::{GenerationBuildResult, RetainedGeneration};
 use crate::produce::{artifact_store_from_config, produce_target};
 use crate::targets::{TargetKey, TargetRef, all_targets, default_indexed_search_target_keys};
 
@@ -30,14 +31,18 @@ pub async fn build_and_publish_generation(
     artifact_store: &ArtifactStore,
     targets: Vec<TargetRef>,
     refresh_keys: &BTreeSet<TargetKey>,
+    retained_generation: Option<&RetainedGeneration>,
 ) -> Result<Utf8PathBuf> {
     let result = build_and_publish_generation_with_policy(
         index_store,
         artifact_store,
-        targets,
-        refresh_keys,
-        GenerationFailurePolicy::Strict,
-        None,
+        GenerationBuildPlan {
+            targets,
+            refresh_keys,
+            policy: GenerationFailurePolicy::Strict,
+            required_success_targets: None,
+            retained_generation,
+        },
         &RealTargetProducer,
     )
     .await?;
@@ -62,10 +67,13 @@ pub async fn bootstrap_all_tolerant(config: &AppConfig) -> Result<GenerationBuil
     build_and_publish_generation_with_policy(
         &index_store,
         &store,
-        targets,
-        &refresh_keys,
-        GenerationFailurePolicy::TolerateBootstrapNixFailures,
-        Some(&required_success_targets),
+        GenerationBuildPlan {
+            targets,
+            refresh_keys: &refresh_keys,
+            policy: GenerationFailurePolicy::TolerateBootstrapNixFailures,
+            required_success_targets: Some(&required_success_targets),
+            retained_generation: None,
+        },
         &RealTargetProducer,
     )
     .await
@@ -82,7 +90,7 @@ pub async fn regenerate_all(config: &AppConfig) -> Result<Utf8PathBuf> {
     }
 
     let refresh_keys: BTreeSet<TargetKey> = targets.iter().map(TargetKey::from).collect();
-    build_and_publish_generation(&index_store, &store, targets, &refresh_keys).await
+    build_and_publish_generation(&index_store, &store, targets, &refresh_keys, None).await
 }
 
 #[cfg(test)]
@@ -99,11 +107,14 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::target::RefRole;
     use nixsearch_index::generation_validator::GenerationValidator;
+    use nixsearch_index::search::SearchIndex;
     use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::PublishedGeneration;
+    use nixsearch_index_test_support::publish_fixture_options_index_for_refs;
     use nixsearch_store::{ArtifactMetadataInput, ArtifactRef};
+    use nixsearch_test_support::{REF_SMALL, REF_STABLE, SOURCE_FIXTURES, multi_ref_app_config};
 
-    use crate::targets::latest_artifact_ref_for_target;
+    use crate::targets::{current_manifest_targets, latest_artifact_ref_for_target};
 
     use super::*;
 
@@ -120,6 +131,8 @@ mod tests {
     struct MockProducer {
         behavior: MockBehavior,
     }
+
+    struct FixtureOptionsProducer;
 
     #[async_trait]
     impl TargetProducer for MockProducer {
@@ -157,6 +170,31 @@ mod tests {
                     Ok(produced)
                 }
             }
+        }
+    }
+
+    #[async_trait]
+    impl TargetProducer for FixtureOptionsProducer {
+        async fn produce(
+            &self,
+            store: &ArtifactStore,
+            target: &TargetRef,
+        ) -> Result<ProducedArtifact> {
+            let artifact_ref = latest_artifact_ref_for_target(target);
+            let metadata = store
+                .put_artifact(
+                    &artifact_ref,
+                    Bytes::from_static(include_bytes!(
+                        "../../../fixtures/search-small/options.json"
+                    )),
+                    ArtifactMetadataInput::new("test-options-producer"),
+                )
+                .await?;
+
+            Ok(ProducedArtifact {
+                artifact_ref,
+                metadata,
+            })
         }
     }
 
@@ -236,10 +274,13 @@ mod tests {
         build_and_publish_generation_with_policy(
             index_store,
             artifact_store,
-            vec![target],
-            &refresh_keys,
-            GenerationFailurePolicy::Strict,
-            None,
+            GenerationBuildPlan {
+                targets: vec![target],
+                refresh_keys: &refresh_keys,
+                policy: GenerationFailurePolicy::Strict,
+                required_success_targets: None,
+                retained_generation: None,
+            },
             &producer,
         )
         .await
@@ -328,10 +369,13 @@ mod tests {
         let result = build_and_publish_generation_with_policy(
             &index_store,
             &artifact_store,
-            vec![target],
-            &refresh_keys,
-            GenerationFailurePolicy::TolerateBootstrapNixFailures,
-            Some(&required_success_targets),
+            GenerationBuildPlan {
+                targets: vec![target],
+                refresh_keys: &refresh_keys,
+                policy: GenerationFailurePolicy::TolerateBootstrapNixFailures,
+                required_success_targets: Some(&required_success_targets),
+                retained_generation: None,
+            },
             &producer,
         )
         .await
@@ -340,6 +384,80 @@ mod tests {
         assert_eq!(result.successful_targets.len(), 1);
         assert!(result.failed_refresh_targets.is_empty());
         assert!(result.skipped_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_generation_retains_unselected_targets_from_current_index() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path(tempdir.path().join("index"));
+        let artifact_store = ArtifactStore::local(tempdir.path().join("artifacts")).unwrap();
+        publish_fixture_options_index_for_refs(&index_dir, &[REF_SMALL, REF_STABLE]);
+
+        let index_store = IndexStore::new(&index_dir);
+        let config = multi_ref_app_config(&index_dir);
+        let targets = current_manifest_targets(&config, &index_store)
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+        let refresh_keys = BTreeSet::from([TargetKey::new(
+            SOURCE_FIXTURES,
+            REF_SMALL,
+            ArtifactKind::OptionsJson,
+            RefRole::Search,
+        )]);
+
+        let current = index_store.current_leased_generation().unwrap();
+        let complete = GenerationValidator::new(index_store.clone())
+            .open_structurally_complete_published_generation(current.published_generation())
+            .unwrap();
+        let retained = RetainedGeneration::from_index(current.manifest(), &complete.index).unwrap();
+
+        let stale_latest =
+            ArtifactRef::latest(SOURCE_FIXTURES, REF_STABLE, ArtifactKind::OptionsJson);
+        artifact_store
+            .put_artifact(
+                &stale_latest,
+                Bytes::from_static(include_bytes!(
+                    "../../../fixtures/search-small/options.json"
+                )),
+                ArtifactMetadataInput::new("unselected-latest"),
+            )
+            .await
+            .unwrap();
+
+        let result = build_and_publish_generation_with_policy(
+            &index_store,
+            &artifact_store,
+            GenerationBuildPlan {
+                targets,
+                refresh_keys: &refresh_keys,
+                policy: GenerationFailurePolicy::Strict,
+                required_success_targets: None,
+                retained_generation: Some(&retained),
+            },
+            &FixtureOptionsProducer,
+        )
+        .await
+        .unwrap();
+
+        let manifest = index_store.read_manifest(&result.path).unwrap();
+        let stable_target = manifest
+            .targets
+            .iter()
+            .find(|target| target.ref_id == REF_STABLE)
+            .unwrap();
+        assert_eq!(stable_target.document_count, 1);
+
+        let index = SearchIndex::open(index_store.index_path(&result.path)).unwrap();
+        let stable_docs = index
+            .scan_indexed_documents()
+            .unwrap()
+            .into_iter()
+            .filter(|indexed| indexed.document.common().ref_id == REF_STABLE)
+            .collect::<Vec<_>>();
+
+        assert_eq!(stable_docs.len(), 1);
+        assert_eq!(stable_docs[0].document.name(), "programs.stable.git.enable");
     }
 
     #[tokio::test]

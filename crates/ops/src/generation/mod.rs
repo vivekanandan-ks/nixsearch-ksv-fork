@@ -1,8 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 
+use nixsearch_core::artifact::ArtifactKind;
+use nixsearch_core::document::SearchDocument;
+use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
+use nixsearch_index::search::SearchIndex;
 use nixsearch_index::store::IndexStore;
 use nixsearch_store::ArtifactStore;
 
@@ -41,16 +45,105 @@ impl GenerationBuildResult {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RetainedGeneration {
+    targets: BTreeMap<TargetKey, RetainedTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RetainedTarget {
+    pub(crate) manifest_target: IndexTargetManifest,
+    pub(crate) documents: Vec<SearchDocument>,
+}
+
+impl RetainedGeneration {
+    pub fn from_index(manifest: &IndexGenerationManifest, index: &SearchIndex) -> Result<Self> {
+        let mut document_target_keys = BTreeMap::<(String, String, ArtifactKind), TargetKey>::new();
+        let mut targets = BTreeMap::<TargetKey, RetainedTarget>::new();
+
+        for manifest_target in &manifest.targets {
+            let key = TargetKey::from(manifest_target);
+            document_target_keys.insert(
+                (
+                    manifest_target.source.clone(),
+                    manifest_target.ref_id.clone(),
+                    manifest_target.artifact_kind,
+                ),
+                key.clone(),
+            );
+            targets.insert(
+                key,
+                RetainedTarget {
+                    manifest_target: manifest_target.clone(),
+                    documents: Vec::new(),
+                },
+            );
+        }
+
+        for indexed in index.scan_indexed_documents()? {
+            let common = indexed.document.common();
+            let artifact_kind = ArtifactKind::for_indexed_document_kind(indexed.document.kind())
+                .with_context(|| {
+                    format!(
+                        "indexed document {}/{}/{} has unsupported document kind {}",
+                        common.source,
+                        common.ref_id,
+                        common.name,
+                        indexed.document.kind().as_str()
+                    )
+                })?;
+            let key = document_target_keys
+                .get(&(common.source.clone(), common.ref_id.clone(), artifact_kind))
+                .with_context(|| {
+                    format!(
+                        "indexed document {}/{}/{} has no retained manifest target {}",
+                        common.source,
+                        common.ref_id,
+                        common.name,
+                        artifact_kind.as_str()
+                    )
+                })?
+                .clone();
+            targets
+                .get_mut(&key)
+                .expect("retained target key came from retained target map")
+                .documents
+                .push(indexed.document);
+        }
+
+        for (key, retained) in &targets {
+            let actual = retained.documents.len();
+            let expected = retained.manifest_target.document_count;
+            if actual != expected {
+                bail!(
+                    "retained target {key} document count mismatch: index {actual}, manifest {expected}"
+                );
+            }
+        }
+
+        Ok(Self { targets })
+    }
+
+    pub(crate) fn target(&self, key: &TargetKey) -> Option<&RetainedTarget> {
+        self.targets.get(key)
+    }
+}
+
+pub(crate) struct GenerationBuildPlan<'a> {
+    pub(crate) targets: Vec<TargetRef>,
+    pub(crate) refresh_keys: &'a BTreeSet<TargetKey>,
+    pub(crate) policy: GenerationFailurePolicy,
+    pub(crate) required_success_targets: Option<&'a BTreeSet<TargetKey>>,
+    pub(crate) retained_generation: Option<&'a RetainedGeneration>,
+}
+
 pub(crate) async fn build_and_publish_generation_with_policy(
     index_store: &IndexStore,
     artifact_store: &ArtifactStore,
-    targets: Vec<TargetRef>,
-    refresh_keys: &BTreeSet<TargetKey>,
-    policy: GenerationFailurePolicy,
-    required_success_targets: Option<&BTreeSet<TargetKey>>,
+    plan: GenerationBuildPlan<'_>,
     producer: &(dyn TargetProducer + Send + Sync),
 ) -> Result<GenerationBuildResult> {
-    validate_generation_policy(&targets, refresh_keys, policy)?;
+    validate_generation_policy(&plan.targets, plan.refresh_keys, plan.policy)?;
 
     let mut generation = IncompleteGenerationGuard::create(index_store)?;
 
@@ -58,10 +151,28 @@ pub(crate) async fn build_and_publish_generation_with_policy(
     let mut skipped_targets = Vec::new();
     let mut failed_refresh_targets = Vec::new();
 
-    for target in targets {
+    for target in plan.targets {
         let key = TargetKey::from(&target);
-        match produce_or_retain_target(artifact_store, target, refresh_keys, policy, producer)
-            .await?
+
+        if !plan.refresh_keys.contains(&key) {
+            let retained = plan
+                .retained_generation
+                .and_then(|generation| generation.target(&key))
+                .with_context(|| {
+                    format!("target {key} was not refreshed and is not available to retain")
+                })?;
+            documents_builder.append_retained_target(&key, retained)?;
+            continue;
+        }
+
+        match produce_or_retain_target(
+            artifact_store,
+            target,
+            plan.refresh_keys,
+            plan.policy,
+            producer,
+        )
+        .await?
         {
             Some(produced_target) => {
                 consume_and_spool_target(artifact_store, &produced_target, &mut documents_builder)
@@ -75,8 +186,8 @@ pub(crate) async fn build_and_publish_generation_with_policy(
     }
 
     validate_generation_success_requirements(
-        policy,
-        required_success_targets,
+        plan.policy,
+        plan.required_success_targets,
         documents_builder.successful_targets(),
     )?;
 

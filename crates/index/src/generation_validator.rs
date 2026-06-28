@@ -22,17 +22,6 @@ impl GenerationValidator {
         Self { store }
     }
 
-    pub fn open_structurally_valid_published_generation(
-        &self,
-        generation: &PublishedGeneration,
-    ) -> Result<SearchIndex> {
-        validate_supplied_manifest(&generation.manifest)?;
-
-        let index_path = self.store.index_path(&generation.path);
-        SearchIndex::open(&index_path)
-            .with_context(|| format!("failed to open search index {index_path}"))
-    }
-
     pub fn open_structurally_complete_published_generation(
         &self,
         generation: &PublishedGeneration,

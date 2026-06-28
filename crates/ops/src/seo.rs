@@ -71,6 +71,13 @@ pub fn repair_current_seo_sidecar_under_lock(
         });
     }
 
+    if let Err(error) = index_store.write_integrity(&candidate, true) {
+        return Ok(SeoSidecarRepairOutcome::RepairFailed {
+            generation: candidate,
+            error: format!("{error:#}"),
+        });
+    }
+
     if !published_generation_is_current(&index_store, &candidate)? {
         return Ok(SeoSidecarRepairOutcome::SupersededAfterRepair);
     }
@@ -93,4 +100,41 @@ fn published_generation_is_current(
     };
 
     Ok(current == *generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use nixsearch_index::generation_validator::GenerationValidator;
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
+    use nixsearch_index::store::IndexStore;
+    use nixsearch_index_test_support::publish_canonical_index;
+    use nixsearch_test_support::{app_config_with_public_url, utf8_path_buf};
+
+    use crate::lock::acquire_update_lock;
+    use crate::seo::{SeoSidecarRepairOutcome, repair_current_seo_sidecar_under_lock};
+
+    #[test]
+    fn repair_current_seo_sidecar_rewrites_integrity_metadata() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let config = app_config_with_public_url(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let generation = store.try_current_generation_metadata().unwrap().unwrap();
+
+        std::fs::remove_file(SeoFactsArtifact::path(&path)).unwrap();
+        std::fs::remove_file(store.integrity_path(&path)).unwrap();
+
+        let update_lock = acquire_update_lock(&index_dir).unwrap();
+        let outcome = repair_current_seo_sidecar_under_lock(&config, &update_lock).unwrap();
+
+        assert!(matches!(outcome, SeoSidecarRepairOutcome::Repaired { .. }));
+        assert!(SeoFactsArtifact::path(&path).exists());
+        assert!(store.integrity_path(&path).exists());
+        GenerationValidator::new(store)
+            .validate_seo_complete_published_generation_unleased(&generation)
+            .unwrap();
+    }
 }

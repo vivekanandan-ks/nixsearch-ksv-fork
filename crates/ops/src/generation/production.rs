@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use nixsearch_source::artifact::ProducedArtifact;
 use nixsearch_store::{ArtifactMetadata, ArtifactStore};
 
-use crate::produce::produced_from_existing_artifact;
 use crate::targets::{TargetKey, TargetRef, latest_artifact_ref_for_target};
 
 use super::policy::{
@@ -30,14 +29,12 @@ pub(crate) struct ProducedTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TargetProductionStatus {
     Refreshed,
-    Retained,
 }
 
 impl TargetProductionStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Refreshed => "refreshed",
-            Self::Retained => "retained",
         }
     }
 }
@@ -51,51 +48,41 @@ pub(crate) async fn produce_or_retain_target(
 ) -> Result<Option<ProducedTarget>> {
     let key = TargetKey::from(&target);
 
-    if refresh_keys.contains(&key) {
-        return match producer.produce(artifact_store, &target).await {
-            Ok(produced) => {
-                let produced = verify_produced_target(
-                    artifact_store,
-                    key,
-                    target,
-                    TargetProductionStatus::Refreshed,
-                    produced,
-                )
-                .await?;
-
-                Ok(Some(produced))
-            }
-            Err(error) => match policy {
-                GenerationFailurePolicy::Strict => Err(error),
-                GenerationFailurePolicy::TolerateBootstrapNixFailures => {
-                    match classify_bootstrap_produce_error(&target, &error) {
-                        ProduceFailureDisposition::Fatal => Err(error),
-                        ProduceFailureDisposition::TolerableSkip => {
-                            tracing::warn!(
-                                source = %target.source_id,
-                                ref_id = %target.ref_config.id,
-                                "skipping target after bootstrap production failure: {error:#}"
-                            );
-
-                            Ok(None)
-                        }
-                    }
-                }
-            },
-        };
+    if !refresh_keys.contains(&key) {
+        bail!("target {key} requires retained current-generation documents");
     }
 
-    let produced = produced_from_existing_artifact(artifact_store, &target).await?;
-    let produced = verify_produced_target(
-        artifact_store,
-        key,
-        target,
-        TargetProductionStatus::Retained,
-        produced,
-    )
-    .await?;
+    match producer.produce(artifact_store, &target).await {
+        Ok(produced) => {
+            let produced = verify_produced_target(
+                artifact_store,
+                key,
+                target,
+                TargetProductionStatus::Refreshed,
+                produced,
+            )
+            .await?;
 
-    Ok(Some(produced))
+            Ok(Some(produced))
+        }
+        Err(error) => match policy {
+            GenerationFailurePolicy::Strict => Err(error),
+            GenerationFailurePolicy::TolerateBootstrapNixFailures => {
+                match classify_bootstrap_produce_error(&target, &error) {
+                    ProduceFailureDisposition::Fatal => Err(error),
+                    ProduceFailureDisposition::TolerableSkip => {
+                        tracing::warn!(
+                            source = %target.source_id,
+                            ref_id = %target.ref_config.id,
+                            "skipping target after bootstrap production failure: {error:#}"
+                        );
+
+                        Ok(None)
+                    }
+                }
+            }
+        },
+    }
 }
 
 async fn verify_produced_target(

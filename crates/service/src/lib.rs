@@ -297,8 +297,8 @@ impl SearchService {
     ) -> Result<()> {
         let validator = GenerationValidator::new(IndexStore::new(&config.data.index_dir));
         validator
-            .open_structurally_valid_published_generation(generation.published_generation())
-            .context("failed to validate structurally valid generation")
+            .open_structurally_complete_published_generation(generation.published_generation())
+            .context("failed to validate structurally complete generation")
             .map(|_| ())
     }
 
@@ -1059,10 +1059,10 @@ fn load_servable_generation(
             .context("failed to open SEO-complete served generation")?;
         (complete.index, Some(LazySeoFacts::loaded(complete.sidecar)))
     } else {
-        let index = validator
-            .open_structurally_valid_published_generation(generation.published_generation())
-            .context("failed to open structurally valid served generation")?;
-        (index, None)
+        let complete = validator
+            .open_structurally_complete_published_generation(generation.published_generation())
+            .context("failed to open structurally complete served generation")?;
+        (complete.index, None)
     };
 
     Ok(ServedGeneration {
@@ -1779,6 +1779,29 @@ mod tests {
 
         assert!(message.contains("artifact-only"));
         assert!(message.contains("flake-info-json"));
+    }
+
+    #[test]
+    fn open_current_without_public_seo_rejects_manifest_index_count_mismatch() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let mut manifest = store.read_manifest(&path).unwrap();
+
+        manifest.document_count += 1;
+        manifest.targets[0].document_count += 1;
+        refresh_generation_id(&mut manifest).unwrap();
+        let generation = PublishedGeneration {
+            path,
+            manifest: manifest.clone(),
+        };
+        write_raw_manifest(&store, &generation, &manifest);
+
+        let config = Arc::new(app_config(&index_dir));
+        let error = SearchService::open_current(config).unwrap_err();
+
+        assert!(format!("{error:#}").contains("indexed document count mismatch"));
     }
 
     #[test]
