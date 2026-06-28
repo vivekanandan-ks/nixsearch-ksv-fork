@@ -109,11 +109,7 @@ mod tests {
             strip_prefixes: Vec::new(),
             ref_config: RefConfig {
                 id: REF.to_owned(),
-                role: if artifact_kind == ArtifactKind::FlakeInfoJson {
-                    RefRole::ArtifactOnly
-                } else {
-                    RefRole::Search
-                },
+                role: RefRole::default_for_artifact_kind(artifact_kind),
                 producer: ProducerConfig::ExistingFile {
                     path: PathBuf::from("unused.json"),
                     artifact: artifact_kind,

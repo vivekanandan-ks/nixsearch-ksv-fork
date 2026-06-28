@@ -1189,11 +1189,7 @@ mod tests {
             .expect("fixture source exists");
 
         for ref_config in &mut source.refs {
-            ref_config.role = if artifact_kind.indexed_document_kind().is_some() {
-                RefRole::Search
-            } else {
-                RefRole::ArtifactOnly
-            };
+            ref_config.role = RefRole::default_for_artifact_kind(artifact_kind);
             ref_config.producer = ProducerConfig::ExistingFile {
                 path: PathBuf::from("unused.json"),
                 artifact: artifact_kind,

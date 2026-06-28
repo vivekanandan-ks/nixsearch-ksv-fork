@@ -22,6 +22,14 @@ impl RefRole {
             Self::ArtifactOnly => "artifact-only",
         }
     }
+
+    pub fn default_for_artifact_kind(artifact_kind: ArtifactKind) -> Self {
+        if artifact_kind.indexed_document_kind().is_some() {
+            Self::Search
+        } else {
+            Self::ArtifactOnly
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

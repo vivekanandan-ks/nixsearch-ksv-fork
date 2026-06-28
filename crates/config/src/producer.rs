@@ -250,7 +250,7 @@ impl ProducerConfig {
                 return producer_error(
                     source_id,
                     ref_id,
-                    "producer type flake-info is not implemented yet; use an explicit artifact-only flake-info-json producer for validation workflows",
+                    "producer type flake-info is not implemented yet; use an explicit flake-info-json producer with role = \"artifact-only\" for validation workflows",
                 );
             }
         }

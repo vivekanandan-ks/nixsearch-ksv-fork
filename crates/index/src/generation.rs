@@ -341,11 +341,7 @@ mod tests {
     }
 
     fn target(artifact_kind: ArtifactKind, document_count: usize) -> IndexTargetManifest {
-        let target_role = if artifact_kind.indexed_document_kind().is_some() {
-            RefRole::Search
-        } else {
-            RefRole::ArtifactOnly
-        };
+        let target_role = RefRole::default_for_artifact_kind(artifact_kind);
 
         IndexTargetManifest {
             source: SOURCE.to_owned(),

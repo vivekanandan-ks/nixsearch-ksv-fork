@@ -47,7 +47,7 @@ impl RawRefConfig {
     fn into_ref_config(self, id: String) -> RefConfig {
         let role = self
             .role
-            .unwrap_or_else(|| default_ref_role_for_artifact_kind(self.producer.artifact_kind()));
+            .unwrap_or_else(|| RefRole::default_for_artifact_kind(self.producer.artifact_kind()));
 
         RefConfig {
             id,
@@ -413,14 +413,6 @@ fn reject_conflicting_kind(
     }
 
     Ok(())
-}
-
-fn default_ref_role_for_artifact_kind(artifact_kind: ArtifactKind) -> RefRole {
-    if artifact_kind.indexed_document_kind().is_some() {
-        RefRole::Search
-    } else {
-        RefRole::ArtifactOnly
-    }
 }
 
 fn effective_default_ref(
