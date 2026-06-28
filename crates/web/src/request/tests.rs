@@ -287,7 +287,13 @@ fn strictly_decodes_path_and_query() {
 fn keeps_plus_literal_in_path() {
     let request = page_request_from_public_url("/fixtures/a+b?q=a+b").unwrap();
 
-    assert_eq!(request.entry(), Some("a+b"));
+    assert_eq!(
+        request.route,
+        PublicRoute::Entry {
+            source: "fixtures".to_owned(),
+            entry: "a+b".to_owned(),
+        }
+    );
     assert_eq!(request.query.q.as_deref(), Some("a b"));
 }
 

@@ -4,9 +4,9 @@ use nixsearch_index::search::SearchHit;
 use nixsearch_service::SitemapCandidate;
 
 use crate::entry::AnnotatedEntryDocument;
-#[cfg(test)]
-use crate::request::PageRequest;
 use crate::request::{PageQuery, PageState, QuerySource, SourceFilter, non_empty};
+#[cfg(test)]
+use crate::request::{PageRequest, PublicRoute};
 
 pub fn canonical_home_path() -> String {
     "/".to_owned()
@@ -94,8 +94,13 @@ pub fn close_url_for(request: &PageRequest) -> String {
         );
     }
 
+    let source = match &request.route {
+        PublicRoute::Home => None,
+        PublicRoute::Source { source } | PublicRoute::Entry { source, .. } => Some(source.as_str()),
+    };
+
     search_url_for(
-        request.source(),
+        source,
         &PageQuery {
             q: request.query.q.clone(),
             ref_id: request.query.ref_id.clone(),

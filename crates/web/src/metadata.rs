@@ -321,7 +321,9 @@ fn title_for_entry(
 
     if let Some(document) = entry_document {
         parts.push(document.common().name.to_owned());
-    } else if let Some(entry) = request.entry().and_then(crate::request::non_empty) {
+    } else if let PublicRoute::Entry { entry, .. } = &request.route
+        && let Some(entry) = non_empty(entry)
+    {
         parts.push(entry.to_owned());
     } else if let Some(q) = normalized_query(&request.query) {
         parts.push(q.to_owned());

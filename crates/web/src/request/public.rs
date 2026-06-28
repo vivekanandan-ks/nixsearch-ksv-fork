@@ -17,14 +17,6 @@ pub struct PageRequest {
 }
 
 impl PageRequest {
-    pub fn source(&self) -> Option<&str> {
-        self.route.source()
-    }
-
-    pub fn entry(&self) -> Option<&str> {
-        self.route.entry()
-    }
-
     pub fn has_search_return_context(&self) -> bool {
         normalized_query(&self.query).is_some()
             || self.query.page.is_some()
@@ -50,20 +42,6 @@ pub enum PublicRoute {
 }
 
 impl PublicRoute {
-    pub fn source(&self) -> Option<&str> {
-        match self {
-            Self::Home => None,
-            Self::Source { source } | Self::Entry { source, .. } => Some(source),
-        }
-    }
-
-    pub fn entry(&self) -> Option<&str> {
-        match self {
-            Self::Entry { entry, .. } => Some(entry),
-            Self::Home | Self::Source { .. } => None,
-        }
-    }
-
     pub fn is_entry(&self) -> bool {
         matches!(self, Self::Entry { .. })
     }

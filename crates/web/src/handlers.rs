@@ -20,8 +20,8 @@ use crate::entry::{AnnotatedEntryDocument, EntryData};
 use crate::metadata::{self, PageHeadMetadataInput, PageMetadata};
 use crate::origin::{PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query};
 use crate::request::{
-    PageRequest, PageState, SourceFilter, normalized_query, page_request_from_public_uri,
-    page_state, public_uri,
+    PageRequest, PageState, PublicRoute, SourceFilter, normalized_query,
+    page_request_from_public_uri, page_state, public_uri,
 };
 use crate::scripts::datastar_script;
 use crate::sitemap::{
@@ -1029,7 +1029,7 @@ fn validate_page_request(
 
     match &page_state.source_filter {
         SourceFilter::All => {
-            let all_source_ref = if request.route.is_entry() {
+            let all_source_ref = if matches!(&request.route, PublicRoute::Entry { .. }) {
                 None
             } else {
                 raw_ref
@@ -1049,9 +1049,7 @@ fn validate_page_request(
         }
     }
 
-    if request.route.is_entry()
-        && let Some(source) = request.source()
-    {
+    if let PublicRoute::Entry { source, .. } = &request.route {
         let entry_ref_set = if page_state.source_filter == SourceFilter::All {
             page_state.active_ref_set()
         } else {
