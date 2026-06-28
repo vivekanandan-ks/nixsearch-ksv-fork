@@ -19,6 +19,7 @@ mod handlers;
 mod maintenance;
 mod metadata;
 mod origin;
+mod reconciliation;
 mod render_docs;
 mod request;
 mod scripts;

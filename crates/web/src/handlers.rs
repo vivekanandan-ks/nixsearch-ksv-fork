@@ -10,8 +10,8 @@ use futures_util::stream;
 
 use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult, SearchResult};
 use nixsearch_service::{
-    EntryRequest, ReconcileReport, RequestResolutionError, SearchRequest, ServedGenerationSnapshot,
-    ServiceError, ServiceResult,
+    EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
+    ServiceResult,
 };
 
 use crate::AppState;
@@ -19,6 +19,7 @@ use crate::DEFAULT_LIMIT;
 use crate::entry::{AnnotatedEntryDocument, EntryData};
 use crate::metadata::{self, PageHeadMetadataInput, PageMetadata};
 use crate::origin::{PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query};
+use crate::reconciliation::RequestGeneration;
 use crate::request::{
     PageRequest, PageState, PublicRoute, SourceFilter, normalized_query,
     page_request_from_public_uri, page_state, public_uri,
@@ -35,8 +36,6 @@ use crate::templates::layout::{
 use crate::urls::{
     canonical_home_path, canonical_source_path, close_url_for_state, sitemap_candidate_path,
 };
-
-const REQUEST_RECONCILE_ATTEMPTS: usize = 3;
 
 pub async fn health() -> &'static str {
     "ok"
@@ -89,10 +88,11 @@ pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri:
     }
 
     let urls = page_urls(state.config.as_ref(), &headers, &uri);
-    let snapshot = current_snapshot_for_request(&state);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
 
     let mut paths = vec![canonical_home_path()];
-    if let Ok(candidates) = state.search.sitemap_candidates(&snapshot) {
+    if let Ok(candidates) = state.search.sitemap_candidates(snapshot) {
         paths.extend(candidates.iter().map(sitemap_candidate_path));
     }
     for (source_id, source) in &state.config.sources {
@@ -101,7 +101,7 @@ pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri:
         };
         if state
             .search
-            .source_has_indexable_entries(&snapshot, source_id, ref_id)
+            .source_has_indexable_entries(snapshot, source_id, ref_id)
             .unwrap_or(false)
         {
             paths.push(canonical_source_path(&state.config, source_id, ref_id));
@@ -228,15 +228,19 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let target_uri = query.url;
     let target_public_url = public_path_and_query(&target_uri);
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
-    let snapshot = current_snapshot_for_request(&state);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
 
-    if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
+    if generation
+        .client_status(query.generation_id.as_deref())
+        .changed()
+    {
         return generation_change_response(
             &state,
             &target_uri,
             &target_public_url,
             &page_urls,
-            &snapshot,
+            snapshot,
         );
     }
 
@@ -252,7 +256,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
         }
     };
 
-    let page_state = match resolve_page_state(&state, &snapshot, &request) {
+    let page_state = match resolve_page_state(&state, snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
             return sse_error_response(
@@ -269,7 +273,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
         .as_ref()
         .and_then(|uri| page_request_from_public_uri(uri).ok());
     let navigation =
-        state_events_navigation(&state, &snapshot, previous_request.as_ref(), &page_state);
+        state_events_navigation(&state, snapshot, previous_request.as_ref(), &page_state);
     let has_entry_detail = page_state.detail.is_some();
     let direct_entry = request.is_direct_entry();
 
@@ -288,7 +292,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
 
         Some(run_search_with_snapshot(
             &state,
-            &snapshot,
+            snapshot,
             &page_state,
             offset,
             DEFAULT_LIMIT,
@@ -319,7 +323,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
                 templates::results::render_status_error("Search failed", &format!("{error:#}"))
                     .into_string()
             }
-            None => templates::home::render(&state, &request, &page_state, &snapshot).into_string(),
+            None => templates::home::render(&state, &request, &page_state, snapshot).into_string(),
         })
     } else {
         None
@@ -328,7 +332,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     let entry = match load_entry_data_from_snapshot(
         &state,
         &page_state,
-        has_entry_detail.then_some(&snapshot),
+        has_entry_detail.then_some(snapshot),
     ) {
         Ok(entry) => entry,
         Err(error) => {
@@ -338,7 +342,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
                     request: &request,
                     page_state: &page_state,
                     page_urls: &page_urls,
-                    snapshot: &snapshot,
+                    snapshot,
                     results_html: context_results_html,
                     results_content,
                     target_public_url: &target_public_url,
@@ -379,7 +383,7 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
             request: &request,
             page_state: &page_state,
             page_urls: &page_urls,
-            snapshot: &snapshot,
+            snapshot,
             content: results_content.metadata_content(),
             entry: &entry,
         });
@@ -392,44 +396,6 @@ pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri
     }
 
     Sse::new(stream::iter(events)).into_response()
-}
-
-fn client_generation_matches(
-    client_generation_id: Option<&str>,
-    snapshot: &ServedGenerationSnapshot,
-) -> bool {
-    client_generation_id == Some(snapshot.manifest().generation_id.as_str())
-}
-
-fn current_snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
-    for _ in 0..REQUEST_RECONCILE_ATTEMPTS {
-        let report = match state.search.reconcile_current_generation() {
-            Ok(report) => report,
-            Err(error) => {
-                tracing::warn!(
-                    "failed to reconcile published index generation during request; continuing to serve previous generation: {error:#}"
-                );
-                return state.search.snapshot();
-            }
-        };
-
-        if matches!(report, ReconcileReport::Superseded) {
-            continue;
-        }
-
-        return snapshot_for_request(state);
-    }
-
-    tracing::warn!(
-        attempts = REQUEST_RECONCILE_ATTEMPTS,
-        "published index generation changed repeatedly during request reconciliation; continuing with current snapshot"
-    );
-
-    snapshot_for_request(state)
-}
-
-fn snapshot_for_request(state: &AppState) -> ServedGenerationSnapshot {
-    state.search.snapshot()
 }
 
 struct GenerationChangeContent {
@@ -690,10 +656,14 @@ pub async fn results_slice(
         }
     };
 
-    let snapshot = current_snapshot_for_request(&state);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
 
-    if !client_generation_matches(query.generation_id.as_deref(), &snapshot) {
-        return stale_generation_response(&snapshot);
+    if generation
+        .client_status(query.generation_id.as_deref())
+        .changed()
+    {
+        return generation.stale_json_response();
     }
 
     let uri = query.url;
@@ -709,14 +679,14 @@ pub async fn results_slice(
         return json_error_response(StatusCode::BAD_REQUEST, "result slice requires q");
     }
 
-    let page_state = match resolve_page_state(&state, &snapshot, &request) {
+    let page_state = match resolve_page_state(&state, snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
             return json_error_response(status_for_resolution_error(&error), &error.to_string());
         }
     };
     let search_result =
-        run_search_with_snapshot(&state, &snapshot, &page_state, query.offset, limit);
+        run_search_with_snapshot(&state, snapshot, &page_state, query.offset, limit);
 
     match search_result {
         Ok(result) => {
@@ -750,29 +720,18 @@ pub async fn results_slice(
     }
 }
 
-fn stale_generation_response(snapshot: &ServedGenerationSnapshot) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": "stale_generation",
-            "reload": true,
-            "generationId": snapshot.manifest().generation_id.as_str(),
-        })),
-    )
-        .into_response()
-}
-
 fn render_full_page_response(
     state: &AppState,
     page_urls: PageUrls,
     request: PageRequest,
 ) -> Response {
-    let snapshot = current_snapshot_for_request(state);
+    let generation = RequestGeneration::reconcile(state);
+    let snapshot = generation.snapshot();
 
-    let page_state = match resolve_page_state(state, &snapshot, &request) {
+    let page_state = match resolve_page_state(state, snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
-            return render_full_page_error_response(state, page_urls, &snapshot, &request, &error);
+            return render_full_page_error_response(state, page_urls, snapshot, &request, &error);
         }
     };
 
@@ -787,7 +746,7 @@ fn render_full_page_response(
 
         Some(run_search_with_snapshot(
             state,
-            &snapshot,
+            snapshot,
             &page_state,
             offset,
             DEFAULT_LIMIT,
@@ -801,13 +760,13 @@ fn render_full_page_response(
         results_content_for_search(&search_result, search_error.as_deref());
 
     let entry =
-        match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(&snapshot)) {
+        match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(snapshot)) {
             Ok(entry) => entry,
             Err(error) => {
                 return render_full_page_with_entry_error_response(
                     state,
                     page_urls,
-                    &snapshot,
+                    snapshot,
                     &request,
                     &page_state,
                     &search_result,
@@ -826,7 +785,7 @@ fn render_full_page_response(
     let initial_return_metadata = if direct_entry {
         None
     } else {
-        initial_return_metadata(state, &page_urls, &snapshot, &page_state, results_content)
+        initial_return_metadata(state, &page_urls, snapshot, &page_state, results_content)
     };
 
     let markup = templates::layout::render_full_page(templates::layout::FullPageRender {
@@ -834,7 +793,7 @@ fn render_full_page_response(
         request: &request,
         page_state: &page_state,
         page_urls: &page_urls,
-        served_generation: &snapshot,
+        served_generation: snapshot,
         results_content,
         entry: &entry,
         initial_return_metadata: initial_return_metadata.as_ref(),
