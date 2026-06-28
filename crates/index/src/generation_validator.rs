@@ -26,12 +26,7 @@ impl GenerationValidator {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<SearchIndex> {
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
-        validate_generation_id(&generation.manifest)
-            .context("failed to validate supplied index generation manifest id")?;
-        validate_manifest_invariants(&generation.manifest)
-            .context("failed to validate supplied index generation manifest invariants")?;
+        validate_supplied_manifest(&generation.manifest)?;
 
         let index_path = self.store.index_path(&generation.path);
         SearchIndex::open(&index_path)
@@ -42,6 +37,8 @@ impl GenerationValidator {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<StructurallyCompleteGeneration> {
+        validate_supplied_manifest(&generation.manifest)?;
+
         if self.validate_integrity(generation, false).is_ok() {
             let index_path = self.store.index_path(&generation.path);
             let index = SearchIndex::open(&index_path)
@@ -67,8 +64,7 @@ impl GenerationValidator {
         &self,
         generation: &PublishedGeneration,
     ) -> Result<SeoCompleteGeneration> {
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
+        validate_supplied_manifest(&generation.manifest)?;
 
         let sidecar = SeoFactsArtifact::read(generation)?;
         if self.validate_integrity(generation, true).is_ok() {
@@ -123,8 +119,7 @@ impl GenerationValidator {
     }
 
     pub fn require_seo_sidecar_file(&self, generation: &PublishedGeneration) -> Result<()> {
-        validate_index_schema_version(&generation.manifest)
-            .context("failed to validate supplied index generation manifest")?;
+        validate_supplied_manifest(&generation.manifest)?;
 
         let path = SeoFactsArtifact::path(&generation.path);
         let metadata = fs::metadata(&path)
@@ -155,6 +150,15 @@ impl GenerationValidator {
             seo_sidecar_required,
         )
     }
+}
+
+fn validate_supplied_manifest(manifest: &crate::manifest::IndexGenerationManifest) -> Result<()> {
+    validate_index_schema_version(manifest)
+        .context("failed to validate supplied index generation manifest")?;
+    validate_generation_id(manifest)
+        .context("failed to validate supplied index generation manifest id")?;
+    validate_manifest_invariants(manifest)
+        .context("failed to validate supplied index generation manifest invariants")
 }
 
 #[cfg(test)]

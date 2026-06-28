@@ -8,6 +8,7 @@ use nixsearch_config::app::AppConfig;
 use nixsearch_config::source::{RefConfig, SourceConfig, SourceKind};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
+use nixsearch_core::target::RefRole;
 use nixsearch_index::generation_validator::GenerationValidator;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::{
@@ -247,6 +248,7 @@ struct ConfiguredSearchTarget {
     source: String,
     ref_id: String,
     artifact_kind: ArtifactKind,
+    target_role: RefRole,
     entry_kind: IndexedEntryKind,
 }
 
@@ -655,6 +657,8 @@ impl SearchService {
             target.source == expected.source
                 && target.ref_id == expected.ref_id
                 && target.artifact_kind == expected.artifact_kind
+                && target.target_role == expected.target_role
+                && target.indexes_search_documents
         })
     }
 
@@ -1029,6 +1033,7 @@ impl SearchService {
             source: source_id.to_owned(),
             ref_id: ref_id.to_owned(),
             artifact_kind,
+            target_role: ref_config.role,
             entry_kind,
         }))
     }
@@ -1125,7 +1130,9 @@ mod tests {
     use nixsearch_core::artifact::ArtifactKind;
     use nixsearch_core::document::SearchDocument;
     use nixsearch_core::target::RefRole;
-    use nixsearch_index::manifest::{canonical_generation_id, refresh_generation_id};
+    use nixsearch_index::manifest::{
+        IndexTargetManifest, canonical_generation_id, refresh_generation_id,
+    };
     use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult};
     use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::{IndexStore, LeasedPublishedGeneration, PublishedGeneration};
@@ -1433,6 +1440,53 @@ mod tests {
                 ArtifactKind::PackagesJson,
                 1,
             )],
+        );
+
+        let config = Arc::new(app_config(&index_dir));
+        let service = SearchService::open_current(config).unwrap();
+
+        assert!(!service.served_ref_exists(SOURCE_FIXTURES, REF_SMALL));
+
+        let error = service
+            .search_current(SearchRequest {
+                query: "git".to_owned(),
+                source: Some(SOURCE_FIXTURES.to_owned()),
+                ref_id: Some(REF_SMALL.to_owned()),
+                limit: 10,
+                ..SearchRequest::default()
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Resolution(RequestResolutionError::UnservedRef { source_id, ref_id })
+                if source_id == SOURCE_FIXTURES && ref_id == REF_SMALL
+        ));
+    }
+
+    #[test]
+    fn stale_searchable_target_role_does_not_serve_configured_ref() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+        publish_documents_with_manifest_targets(
+            &index_dir,
+            time::OffsetDateTime::now_utc(),
+            vec![option_doc_for(
+                &context,
+                "programs.git.enable",
+                "Git option.",
+            )],
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::IndexOnly,
+                indexes_search_documents: true,
+                document_count: 1,
+                artifact_hash: None,
+                revision: None,
+            }],
         );
 
         let config = Arc::new(app_config(&index_dir));
