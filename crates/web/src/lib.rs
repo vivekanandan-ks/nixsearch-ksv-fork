@@ -707,10 +707,11 @@ mod tests {
     }
 
     fn assert_has_robots(body: &str) {
-        assert!(
-            body.contains(r#"<meta name="robots" content="noindex,follow">"#),
-            "missing noindex robots tag"
+        let tag = format!(
+            r#"<meta name="robots" content="{}">"#,
+            crate::robots::ROBOTS_NOINDEX_FOLLOW
         );
+        assert!(body.contains(&tag), "missing noindex robots tag {tag:?}");
     }
 
     fn assert_no_robots(body: &str) {

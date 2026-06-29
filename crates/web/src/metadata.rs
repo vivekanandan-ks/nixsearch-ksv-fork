@@ -12,6 +12,7 @@ use crate::origin::PageUrls;
 use crate::request::{
     PageRequest, PageState, PublicRoute, SourceFilter, non_empty, normalized_query,
 };
+use crate::robots::ROBOTS_NOINDEX_FOLLOW;
 use crate::source_labels::{source_display_name, source_kind_noun};
 use crate::urls::{canonical_entry_path_for_document, canonical_home_path, canonical_source_path};
 
@@ -19,7 +20,6 @@ const DEFAULT_DESCRIPTION: &str = "Search the Nix ecosystem";
 const META_DESCRIPTION_MAX_GRAPHEMES: usize = 160;
 const META_DESCRIPTION_WORD_BOUNDARY_MIN_GRAPHEMES: usize = 120;
 const DESCRIPTION_ELLIPSIS: &str = "…";
-const ROBOTS_NOINDEX_FOLLOW: &str = "noindex,follow";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

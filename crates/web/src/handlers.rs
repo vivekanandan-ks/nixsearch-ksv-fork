@@ -64,23 +64,14 @@ pub async fn datastar_js() -> impl IntoResponse {
 }
 
 pub async fn robots_txt(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    if !state.config.public_seo_enabled() {
-        return (
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "User-agent: *\nDisallow: /\n",
-        )
-            .into_response();
-    }
+    let public_seo_enabled = state.config.public_seo_enabled();
+    let urls = public_seo_enabled.then(|| page_urls(state.config.as_ref(), &headers, &uri));
+    let body = robots::robots_txt_body(
+        public_seo_enabled,
+        urls.as_ref().map(|urls| urls.origin.as_str()),
+    );
 
-    let urls = page_urls(state.config.as_ref(), &headers, &uri);
-    (
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        format!(
-            "User-agent: *\nAllow: /\nSitemap: {}/sitemap.xml\n",
-            urls.origin
-        ),
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }
 
 pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
