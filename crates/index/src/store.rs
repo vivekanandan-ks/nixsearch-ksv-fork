@@ -1,284 +1,54 @@
-use std::fs;
-use std::io::Write as _;
-
-use anyhow::{Context, Result};
+mod current;
+mod integrity;
+mod layout;
+mod leases;
+mod manifest;
 use camino::{Utf8Path, Utf8PathBuf};
-use time::OffsetDateTime;
 
 use crate::manifest::IndexGenerationManifest;
 
+use self::layout::GenerationLayout;
+pub use self::leases::{GenerationLease, LeasedPublishedGeneration};
+
 #[derive(Debug, Clone)]
 pub struct IndexStore {
-    root: Utf8PathBuf,
+    layout: GenerationLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedGeneration {
+    pub path: Utf8PathBuf,
+    pub manifest: IndexGenerationManifest,
 }
 
 impl IndexStore {
     pub fn new(root: impl AsRef<Utf8Path>) -> Self {
-        let root = root.as_ref().to_owned();
-        Self { root }
+        Self {
+            layout: GenerationLayout::new(root),
+        }
     }
 
     pub fn root(&self) -> &Utf8Path {
-        &self.root
-    }
-
-    pub fn generations_dir(&self) -> Utf8PathBuf {
-        self.root.join("generations")
-    }
-
-    pub fn current_file(&self) -> Utf8PathBuf {
-        self.root.join("CURRENT")
-    }
-
-    pub fn create_generation_path(&self) -> Result<Utf8PathBuf> {
-        fs::create_dir_all(self.generations_dir()).with_context(|| {
-            format!(
-                "failed to create generations dir {}",
-                self.generations_dir().as_str()
-            )
-        })?;
-
-        let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
-
-        for attempt in 0..100 {
-            let path = self.generations_dir().join(format!(
-                "generation-{}-{timestamp}-{attempt}",
-                std::process::id()
-            ));
-
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(path),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to create generation {}", path.as_str()));
-                }
-            }
-        }
-
-        anyhow::bail!(
-            "failed to create unique generation directory in {}",
-            self.generations_dir().as_str()
-        )
-    }
-
-    // Atomically publishes generation_path as CURRENT. Update callers should still use the
-    // update lock to avoid redundant concurrent generation work.
-    pub fn publish(&self, generation_path: &Utf8Path) -> Result<()> {
-        fs::create_dir_all(&self.root)
-            .with_context(|| format!("failed to create index root {}", self.root.as_str()))?;
-
-        let generation_path = self.validate_generation_path(generation_path)?;
-
-        // On Unix, rename atomically replaces CURRENT with this fully written file.
-        let current_tmp = self.create_temp_file(
-            &self.root,
-            "CURRENT.tmp",
-            generation_path.as_str().as_bytes(),
-        )?;
-
-        if let Err(error) = fs::rename(&current_tmp, self.current_file()) {
-            let _ = fs::remove_file(&current_tmp);
-
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to publish current index {}",
-                    self.current_file().as_str()
-                )
-            });
-        }
-
-        Self::sync_dir(&self.root)?;
-
-        Ok(())
-    }
-
-    fn validate_generation_path(&self, generation_path: &Utf8Path) -> Result<Utf8PathBuf> {
-        let generation_path = generation_path
-            .canonicalize_utf8()
-            .with_context(|| format!("failed to canonicalize {generation_path}"))?;
-
-        let generations_dir = self
-            .generations_dir()
-            .canonicalize_utf8()
-            .with_context(|| {
-                format!(
-                    "failed to canonicalize generations dir {}",
-                    self.generations_dir()
-                )
-            })?;
-
-        if !generation_path.starts_with(&generations_dir) {
-            anyhow::bail!(
-                "generation {} is outside generations dir {}",
-                generation_path.as_str(),
-                generations_dir.as_str()
-            );
-        }
-
-        if generation_path.parent() != Some(generations_dir.as_path()) {
-            anyhow::bail!(
-                "generation {} is not a direct child of generations dir {}",
-                generation_path.as_str(),
-                generations_dir.as_str()
-            );
-        }
-
-        if !generation_path.is_dir() {
-            anyhow::bail!("generation {} is not a directory", generation_path.as_str());
-        }
-
-        Ok(generation_path)
-    }
-
-    fn create_temp_file(&self, dir: &Utf8Path, prefix: &str, bytes: &[u8]) -> Result<Utf8PathBuf> {
-        let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
-
-        for attempt in 0..100 {
-            let temp_path = dir.join(format!(
-                "{prefix}.{}.{}.{}",
-                std::process::id(),
-                timestamp,
-                attempt
-            ));
-
-            let mut file = match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
-            {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to create {}", temp_path.as_str()));
-                }
-            };
-
-            if let Err(error) = file.write_all(bytes) {
-                let _ = fs::remove_file(&temp_path);
-
-                return Err(error)
-                    .with_context(|| format!("failed to write {}", temp_path.as_str()));
-            }
-
-            if let Err(error) = file.sync_all() {
-                let _ = fs::remove_file(&temp_path);
-
-                return Err(error)
-                    .with_context(|| format!("failed to sync {}", temp_path.as_str()));
-            }
-
-            return Ok(temp_path);
-        }
-
-        anyhow::bail!(
-            "failed to create unique temporary {prefix} file in {}",
-            dir.as_str()
-        )
-    }
-
-    fn sync_dir(path: &Utf8Path) -> Result<()> {
-        fs::File::open(path)
-            .with_context(|| format!("failed to open directory {}", path.as_str()))?
-            .sync_all()
-            .with_context(|| format!("failed to sync directory {}", path.as_str()))
-    }
-
-    pub fn current_path(&self) -> Result<Utf8PathBuf> {
-        self.try_current_path()?.with_context(|| {
-            format!(
-                "failed to read current index file {}; run `nixsearch update` first",
-                self.current_file().as_str()
-            )
-        })
-    }
-
-    pub fn try_current_path(&self) -> Result<Option<Utf8PathBuf>> {
-        let raw = match fs::read_to_string(self.current_file()) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to read current index file {}",
-                        self.current_file().as_str()
-                    )
-                });
-            }
-        };
-
-        let path = Utf8PathBuf::from(raw);
-
-        if path.as_str().is_empty() {
-            anyhow::bail!("current index file is empty");
-        }
-
-        self.validate_generation_path(&path).map(Some)
-    }
-
-    pub fn manifest_path(&self, generation_path: &Utf8Path) -> Utf8PathBuf {
-        generation_path.join("index-manifest.json")
-    }
-
-    pub fn write_manifest(
-        &self,
-        generation_path: &Utf8Path,
-        manifest: &IndexGenerationManifest,
-    ) -> Result<()> {
-        let generation_path = self.validate_generation_path(generation_path)?;
-        let path = self.manifest_path(&generation_path);
-        let bytes = serde_json::to_vec_pretty(manifest)
-            .context("failed to serialize index generation manifest")?;
-
-        let temp_path =
-            self.create_temp_file(&generation_path, "index-manifest.json.tmp", &bytes)?;
-
-        if let Err(error) = fs::rename(&temp_path, &path) {
-            let _ = fs::remove_file(&temp_path);
-
-            return Err(error)
-                .with_context(|| format!("failed to write index metadata {}", path.as_str()));
-        }
-
-        Self::sync_dir(&generation_path)?;
-
-        Ok(())
-    }
-
-    pub fn read_manifest(&self, generation_path: &Utf8Path) -> Result<IndexGenerationManifest> {
-        let path = self.manifest_path(generation_path);
-        let bytes = fs::read(&path)
-            .with_context(|| format!("failed to read index metadata {}", path.as_str()))?;
-
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed to parse index metadata {}", path.as_str()))
-    }
-
-    pub fn current_manifest(&self) -> Result<IndexGenerationManifest> {
-        let current = self.current_path()?;
-        self.read_manifest(&current)
-    }
-
-    pub fn try_current_manifest(&self) -> Result<Option<IndexGenerationManifest>> {
-        let Some(current) = self.try_current_path()? else {
-            return Ok(None);
-        };
-
-        self.read_manifest(&current).map(Some)
+        self.layout.root()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::mpsc;
+    use std::thread;
 
     use camino::Utf8PathBuf;
     use tempfile::{TempDir, tempdir};
 
     use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::target::RefRole;
 
-    use crate::manifest::{IndexGenerationManifest, IndexTargetManifest};
+    use crate::manifest::{
+        IndexGenerationManifest, IndexTargetManifest, canonical_generation_id,
+        refresh_generation_id,
+    };
     use crate::store::IndexStore;
 
     const SOURCE_FIXTURES: &str = "fixtures";
@@ -290,6 +60,42 @@ mod tests {
 
     fn store_for(tempdir: &TempDir) -> IndexStore {
         IndexStore::new(utf8_path(tempdir.path().to_path_buf()))
+    }
+
+    fn options_manifest(document_count: usize) -> IndexGenerationManifest {
+        IndexGenerationManifest::new(
+            document_count,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
+                document_count,
+                artifact_hash: Some("fixture-hash".to_owned()),
+                revision: None,
+            }],
+        )
+        .unwrap()
+    }
+
+    fn old_schema_manifest(document_count: usize) -> IndexGenerationManifest {
+        let mut manifest = options_manifest(document_count);
+        manifest.schema_version = 2;
+        refresh_generation_id(&mut manifest).unwrap();
+        manifest
+    }
+
+    fn write_raw_manifest(
+        store: &IndexStore,
+        generation: &Utf8PathBuf,
+        manifest: &IndexGenerationManifest,
+    ) {
+        fs::write(
+            store.manifest_path(generation),
+            serde_json::to_vec_pretty(manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -408,6 +214,138 @@ mod tests {
         let error = store.publish(&file).unwrap_err();
 
         assert!(format!("{error:#}").contains("is not a directory"));
+    }
+
+    #[test]
+    fn shared_generation_lease_blocks_exclusive_try_acquire() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let lease = store.acquire_shared_generation_lease(&generation).unwrap();
+
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&generation)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(lease);
+
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(&generation)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn existing_generation_lock_exclusive_try_acquire_respects_shared_lock() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let generation_name = generation.file_name().unwrap();
+        let lease = store.acquire_shared_generation_lease(&generation).unwrap();
+
+        assert!(
+            store
+                .try_acquire_existing_exclusive_generation_lock(generation_name)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(lease);
+
+        assert!(
+            store
+                .try_acquire_existing_exclusive_generation_lock(generation_name)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn shared_generation_lease_revalidates_after_waiting_for_exclusive_lock() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let exclusive = store
+            .try_acquire_exclusive_generation_lease(&generation)
+            .unwrap()
+            .unwrap();
+        let waiter_store = store.clone();
+        let waiter_generation = generation.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+
+        let waiter = thread::spawn(move || {
+            waiter_store.acquire_shared_generation_lease_with_hook(&waiter_generation, || {
+                started_tx.send(()).unwrap();
+            })
+        });
+
+        started_rx.recv().unwrap();
+        fs::remove_dir_all(&generation).unwrap();
+        drop(exclusive);
+
+        let error = waiter.join().unwrap().unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to canonicalize"));
+    }
+
+    #[test]
+    fn existing_generation_lock_exclusive_try_acquire_does_not_create_lock() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+
+        let error = store
+            .try_acquire_existing_exclusive_generation_lock("generation-missing")
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to open generation lease"));
+        assert!(!store.generation_lock_path("generation-missing").exists());
+    }
+
+    #[test]
+    fn existing_generation_lock_exclusive_try_acquire_rejects_invalid_names() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+
+        let error = store
+            .try_acquire_existing_exclusive_generation_lock("../generation-bad")
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid generation name"));
+    }
+
+    #[test]
+    fn shared_generation_lease_rejects_paths_outside_generations_dir() {
+        let tempdir = tempdir().unwrap();
+        let store = IndexStore::new(utf8_path(tempdir.path().join("indexes")));
+        store.create_generation_path().unwrap();
+        let external_generation =
+            Utf8PathBuf::from_path_buf(tempdir.path().join("external-generation")).unwrap();
+        fs::create_dir(&external_generation).unwrap();
+
+        let error = store
+            .acquire_shared_generation_lease(&external_generation)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("is outside generations dir"));
+    }
+
+    #[test]
+    fn shared_generation_lease_rejects_nested_generation_path() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let nested = generation.join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let error = store.acquire_shared_generation_lease(&nested).unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not a direct child"));
     }
 
     #[test]
@@ -540,12 +478,15 @@ mod tests {
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
                 artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
                 document_count: 10,
                 artifact_hash: Some("abc123".into()),
                 revision: None,
             }],
             time::OffsetDateTime::UNIX_EPOCH,
-        );
+        )
+        .unwrap();
 
         store.write_manifest(&generation, &manifest).unwrap();
         store.publish(&generation).unwrap();
@@ -572,6 +513,35 @@ mod tests {
     }
 
     #[test]
+    fn index_store_read_manifest_rejects_unsupported_schema_version() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = old_schema_manifest(1);
+
+        write_raw_manifest(&store, &generation, &manifest);
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
+    fn index_store_current_manifest_rejects_unsupported_schema_version() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = old_schema_manifest(1);
+
+        write_raw_manifest(&store, &generation, &manifest);
+        store.publish(&generation).unwrap();
+
+        let error = store.current_manifest().unwrap_err();
+
+        assert!(format!("{error:#}").contains("unsupported index schema version 2"));
+    }
+
+    #[test]
     fn index_store_write_manifest_rejects_paths_outside_generations_dir() {
         let tempdir = tempdir().unwrap();
         let store = IndexStore::new(utf8_path(tempdir.path().join("indexes")));
@@ -579,7 +549,7 @@ mod tests {
         let external_generation =
             Utf8PathBuf::from_path_buf(tempdir.path().join("external-generation")).unwrap();
         fs::create_dir(&external_generation).unwrap();
-        let manifest = IndexGenerationManifest::new(0, Vec::new());
+        let manifest = IndexGenerationManifest::new(0, Vec::new()).unwrap();
 
         let error = store
             .write_manifest(&external_generation, &manifest)
@@ -595,7 +565,7 @@ mod tests {
         let generation = store.create_generation_path().unwrap();
         let nested = generation.join("nested");
         fs::create_dir(&nested).unwrap();
-        let manifest = IndexGenerationManifest::new(0, Vec::new());
+        let manifest = IndexGenerationManifest::new(0, Vec::new()).unwrap();
 
         let error = store.write_manifest(&nested, &manifest).unwrap_err();
 
@@ -610,5 +580,384 @@ mod tests {
         let manifest = store.try_current_manifest().unwrap();
 
         assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn index_store_loads_current_published_generation_metadata() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = options_manifest(1);
+
+        store.write_manifest(&generation, &manifest).unwrap();
+        store.publish(&generation).unwrap();
+
+        let loaded = store.try_current_generation_metadata().unwrap().unwrap();
+
+        assert_eq!(loaded.path, generation.canonicalize_utf8().unwrap());
+        assert_eq!(loaded.manifest.document_count, 1);
+    }
+
+    #[test]
+    fn index_store_retries_current_generation_metadata_when_current_changes_after_manifest_read() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = options_manifest(1);
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = options_manifest(2);
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_generation_metadata_with(|store, path| {
+                if first_attempt {
+                    first_attempt = false;
+                    assert_eq!(path, old_canonical.as_path());
+                    store.publish(&new_generation).unwrap();
+                }
+
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path, new_canonical);
+        assert_eq!(loaded.manifest.document_count, 2);
+    }
+
+    #[test]
+    fn index_store_loads_current_leased_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+        let manifest = options_manifest(1);
+
+        store.write_manifest(&generation, &manifest).unwrap();
+        store.publish(&generation).unwrap();
+
+        let leased = store.current_leased_generation().unwrap();
+
+        assert_eq!(leased.path(), generation.canonicalize_utf8().unwrap());
+        assert_eq!(leased.manifest().document_count, 1);
+        assert!(
+            store
+                .try_acquire_exclusive_generation_lease(leased.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn index_store_retries_current_leased_generation_when_observed_current_is_deleted_before_lease()
+    {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = options_manifest(1);
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = options_manifest(2);
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_leased_generation_with(
+                |store, path| {
+                    if first_attempt {
+                        first_attempt = false;
+                        assert_eq!(path, old_canonical.as_path());
+                        store.publish(&new_generation).unwrap();
+                        fs::remove_dir_all(&old_generation).unwrap();
+                        anyhow::bail!("simulated stale current generation deletion");
+                    }
+
+                    store.acquire_shared_generation_lease(path)
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path(), new_canonical.as_path());
+        assert_eq!(loaded.manifest().document_count, 2);
+        assert!(!old_generation.exists());
+    }
+
+    #[test]
+    fn index_store_retries_current_leased_generation_when_manifest_read_fails_after_current_changes()
+     {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = options_manifest(1);
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = options_manifest(2);
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_leased_generation_with(
+                |store, path| {
+                    let lease = store.acquire_shared_generation_lease(path)?;
+
+                    if first_attempt {
+                        first_attempt = false;
+                        assert_eq!(path, old_canonical.as_path());
+                        store.publish(&new_generation).unwrap();
+                        fs::remove_file(store.manifest_path(path)).unwrap();
+                    }
+
+                    Ok(lease)
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path(), new_canonical.as_path());
+        assert_eq!(loaded.manifest().document_count, 2);
+    }
+
+    #[test]
+    fn index_store_retries_current_leased_generation_when_current_changes_after_manifest_read() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let old_generation = store.create_generation_path().unwrap();
+        let old_manifest = options_manifest(1);
+        let new_generation = store.create_generation_path().unwrap();
+        let new_manifest = options_manifest(2);
+
+        store
+            .write_manifest(&old_generation, &old_manifest)
+            .unwrap();
+        store.publish(&old_generation).unwrap();
+        store
+            .write_manifest(&new_generation, &new_manifest)
+            .unwrap();
+
+        let old_canonical = old_generation.canonicalize_utf8().unwrap();
+        let new_canonical = new_generation.canonicalize_utf8().unwrap();
+        let mut first_attempt = true;
+
+        let loaded = store
+            .try_current_leased_generation_with(
+                IndexStore::acquire_shared_generation_lease,
+                |store, path| {
+                    if first_attempt {
+                        first_attempt = false;
+                        assert_eq!(path, old_canonical.as_path());
+                        store.publish(&new_generation).unwrap();
+                    }
+
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.path(), new_canonical.as_path());
+        assert_eq!(loaded.manifest().document_count, 2);
+    }
+
+    #[test]
+    fn index_store_reports_missing_current_leased_generation() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+
+        assert!(store.try_current_generation_metadata().unwrap().is_none());
+        assert!(store.try_current_leased_generation().unwrap().is_none());
+        assert!(
+            format!("{:#}", store.current_leased_generation().unwrap_err())
+                .contains("run `nixsearch update` first")
+        );
+    }
+
+    #[test]
+    fn index_store_read_manifest_rejects_missing_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let missing_id = serde_json::json!({
+            "schema_version": 5,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "document_count": 10,
+            "targets": [
+                {
+                    "source": SOURCE_FIXTURES,
+                    "ref_id": REF_SMALL,
+                    "artifact_kind": "options-json",
+                    "target_role": "search",
+                    "indexes_search_documents": true,
+                    "document_count": 10,
+                    "artifact_hash": "abc123",
+                    "revision": null
+                }
+            ]
+        });
+
+        fs::write(
+            store.manifest_path(&generation),
+            serde_json::to_vec_pretty(&missing_id).unwrap(),
+        )
+        .unwrap();
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("missing field `generation_id`"));
+    }
+
+    #[test]
+    fn index_store_write_manifest_stores_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            10,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
+                document_count: 10,
+                artifact_hash: Some("abc123".into()),
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        store.write_manifest(&generation, &manifest).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.manifest_path(&generation)).unwrap()).unwrap();
+        let loaded = store.read_manifest(&generation).unwrap();
+        let stored_id = raw["generation_id"].as_str().unwrap();
+
+        assert!(stored_id.starts_with("sha256:"));
+        assert_eq!(stored_id, canonical_generation_id(&loaded).unwrap());
+    }
+
+    #[test]
+    fn index_store_write_manifest_rejects_mismatched_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let mut manifest = IndexGenerationManifest::with_generated_at(
+            10,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
+                document_count: 10,
+                artifact_hash: Some("abc123".into()),
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        manifest.generation_id = "sha256:wrong".to_owned();
+
+        let error = store.write_manifest(&generation, &manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
+    }
+
+    #[test]
+    fn index_store_write_manifest_rejects_artifact_only_document_counts() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let manifest = IndexGenerationManifest::with_generated_at(
+            1,
+            vec![IndexTargetManifest {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                artifact_kind: ArtifactKind::FlakeInfoJson,
+                target_role: RefRole::ArtifactOnly,
+                indexes_search_documents: false,
+                document_count: 1,
+                artifact_hash: Some("fixture-hash".to_owned()),
+                revision: None,
+            }],
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        let error = store.write_manifest(&generation, &manifest).unwrap_err();
+
+        assert!(format!("{error:#}").contains("non-indexing"));
+    }
+
+    #[test]
+    fn index_store_read_manifest_rejects_mismatched_generation_id() {
+        let tempdir = tempdir().unwrap();
+        let store = store_for(&tempdir);
+        let generation = store.create_generation_path().unwrap();
+
+        let invalid = serde_json::json!({
+            "schema_version": 5,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "generation_id": "sha256:wrong",
+            "document_count": 10,
+            "targets": [
+                {
+                    "source": SOURCE_FIXTURES,
+                    "ref_id": REF_SMALL,
+                    "artifact_kind": "options-json",
+                    "target_role": "search",
+                    "indexes_search_documents": true,
+                    "document_count": 10,
+                    "artifact_hash": "abc123",
+                    "revision": null
+                }
+            ]
+        });
+
+        fs::write(
+            store.manifest_path(&generation),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+
+        let error = store.read_manifest(&generation).unwrap_err();
+
+        assert!(format!("{error:#}").contains("generation_id mismatch"));
     }
 }

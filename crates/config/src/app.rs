@@ -95,14 +95,15 @@ impl AppConfig {
         for (ref_set_id, ref_set) in &self.ref_sets {
             validate_id("ref set id", ref_set_id)?;
 
-            if ref_set.refs.is_empty() {
+            if ref_set.refs.is_empty() && self.sources.values().any(SourceConfig::has_ref_set_refs)
+            {
                 return Err(ConfigError::Validation(format!(
-                    "ref_sets.{ref_set_id} must cover every configured source"
+                    "ref_sets.{ref_set_id} must cover every ref-set eligible source"
                 )));
             }
 
-            for source_id in self.sources.keys() {
-                if !ref_set.refs.contains_key(source_id) {
+            for (source_id, source) in &self.sources {
+                if source.has_ref_set_refs() && !ref_set.refs.contains_key(source_id) {
                     return Err(ConfigError::Validation(format!(
                         "ref_sets.{ref_set_id} is missing source {source_id:?}"
                     )));
@@ -115,6 +116,12 @@ impl AppConfig {
                         "ref_sets.{ref_set_id} contains unknown source {source_id:?}"
                     ))
                 })?;
+
+                if !source.has_ref_set_refs() {
+                    return Err(ConfigError::Validation(format!(
+                        "ref_sets.{ref_set_id} contains source {source_id:?} with no ref-set eligible refs"
+                    )));
+                }
 
                 if ref_ids.is_empty() {
                     return Err(ConfigError::Validation(format!(
@@ -131,9 +138,9 @@ impl AppConfig {
                         )));
                     }
 
-                    if !source.refs.iter().any(|candidate| &candidate.id == ref_id) {
+                    if source.ref_allowed_in_ref_set(ref_id).is_none() {
                         return Err(ConfigError::Validation(format!(
-                            "ref_sets.{ref_set_id}.{source_id} contains unknown ref {ref_id:?}"
+                            "ref_sets.{ref_set_id}.{source_id} contains unknown ref {ref_id:?} or ref cannot appear in ref sets"
                         )));
                     }
                 }
@@ -145,6 +152,10 @@ impl AppConfig {
 
     pub fn default_ref_set(&self) -> Option<&str> {
         self.ref_sets.keys().next().map(String::as_str)
+    }
+
+    pub fn public_seo_enabled(&self) -> bool {
+        self.server.public_url.is_some()
     }
 
     pub fn refs_for_ref_set_source(&self, ref_set_id: &str, source_id: &str) -> Option<&[String]> {
@@ -187,9 +198,9 @@ impl AppConfig {
                     ConfigError::Validation(format!("unknown source {source_id:?}"))
                 })?;
 
-                if !source.refs.iter().any(|candidate| candidate.id == ref_id) {
+                if source.searchable_ref(ref_id).is_none() {
                     return Err(ConfigError::Validation(format!(
-                        "unknown ref {ref_id:?} for source {source_id:?}"
+                        "unknown ref {ref_id:?} for source {source_id:?} or ref is not searchable"
                     )));
                 }
 

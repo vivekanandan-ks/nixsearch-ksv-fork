@@ -1,6 +1,6 @@
 use crate::DEFAULT_LIMIT;
 use crate::RESULTS_SLICE_URL;
-use crate::request::LinkOrigin;
+use crate::request::QuerySource;
 
 const DEFAULT_LIMIT_PLACEHOLDER: &str = "__DEFAULT_LIMIT__";
 const RESULTS_SLICE_URL_PLACEHOLDER: &str = "__RESULTS_SLICE_URL__";
@@ -13,6 +13,7 @@ pub fn datastar_script() -> &'static str {
     ))
 }
 
+#[cfg(test)]
 pub fn dialog_reconcile_script() -> &'static str {
     include_str!("scripts/dialog-reconcile.js")
 }
@@ -21,7 +22,7 @@ pub fn navigation_script() -> String {
     include_str!("scripts/navigation.js")
         .replace(RESULTS_SLICE_URL_PLACEHOLDER, RESULTS_SLICE_URL)
         .replace(DEFAULT_LIMIT_PLACEHOLDER, &DEFAULT_LIMIT.to_string())
-        .replace(SOURCE_ALL_VALUE_PLACEHOLDER, LinkOrigin::All.as_str())
+        .replace(SOURCE_ALL_VALUE_PLACEHOLDER, QuerySource::All.as_str())
 }
 
 #[cfg(test)]
@@ -121,6 +122,225 @@ mod tests {
         assert!(script.contains(r#"if (evt.key !== "[" && evt.key !== "]") return false;"#));
         assert!(script.contains("return evt.ctrlKey || !isEditableTarget(evt.target);"));
         assert!(script.contains("if (isSourceCycleShortcut(evt))"));
+    }
+
+    #[test]
+    fn navigation_script_stores_head_metadata_in_history_state() {
+        let script = navigation_script();
+
+        assert!(!script.contains("headMetadataCache"));
+        assert!(!script.contains("syncTitle"));
+        assert!(script.contains("nixsearchHeadMetadata"));
+        assert!(script.contains("nixsearchHeadMetadataUrl"));
+        assert!(script.contains("nixsearchHeadMetadataPendingUrl"));
+        assert!(script.contains("nixsearchReturnHeadMetadata"));
+        assert!(script.contains("nixsearchReturnHeadMetadataUrl"));
+        assert!(script.contains("initial-history-metadata"));
+        assert!(script.contains("returnHeadMetadata"));
+        assert!(script.contains("returnHeadMetadataUrl"));
+        assert!(script.contains("function publicUrlKey"));
+        assert!(script.contains("exactHeadMetadataFromState"));
+        assert!(script.contains("pendingHistoryState"));
+        assert!(script.contains("history.replaceState("));
+        assert!(script.contains("history.pushState(nextState"));
+        assert!(script.contains("publicUrlKey(targetUrl) !== publicUrlKey()"));
+    }
+
+    #[test]
+    fn navigation_script_routes_close_links_through_modal_close() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"link.matches(".modal-backdrop, [data-role='entry-close']")"#));
+        assert!(script.contains("closeEntryModal(dialog)"));
+        assert!(script.contains("const returnMetadataUrl = state.nixsearchReturnHeadMetadataUrl;"));
+        assert!(script.contains("returnMetadataUrl === closeTargetKey"));
+        assert!(script.contains("reconcileMode: \"unless-restored\""));
+        assert!(script.contains("reconcileSameUrl: true"));
+        assert!(script.contains("optimisticallyRemoveEntryModal()"));
+        assert!(script.contains("container.innerHTML = \"\";"));
+        assert!(script.contains("classList.remove(\"modal-open\")"));
+    }
+
+    #[test]
+    fn navigation_script_guards_modal_patches_by_target_url() {
+        let script = navigation_script();
+
+        assert!(script.contains("window.nixsearchApplyModalPatch = applyModalPatch;"));
+        assert!(script.contains("publicUrlKey(targetUrl) !== publicUrlKey()"));
+        assert!(script.contains("modalContainerFromHtml(html)"));
+        assert!(script.contains("existing.replaceWith(parsed)"));
+    }
+
+    #[test]
+    fn navigation_script_routes_page_replacements_through_navigation() {
+        let script = navigation_script();
+
+        assert!(script.contains("navigate(target, { push: false });"));
+        assert!(!script.contains("history.replaceState(historyStateWithMetadata"));
+    }
+
+    #[test]
+    fn navigation_script_reads_generation_state() {
+        let script = navigation_script();
+
+        assert!(script.contains("generation-state"));
+        assert!(script.contains("function readGenerationId()"));
+        assert!(script.contains("window.nixsearchGenerationId = currentGenerationId;"));
+    }
+
+    #[test]
+    fn navigation_script_sends_generation_with_slice_requests() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"params.set("generation_id", requestGenerationId);"#));
+        assert!(script.contains("fetchResultSlice("));
+    }
+
+    #[test]
+    fn navigation_script_uses_generation_in_virtual_cache_keys() {
+        let script = navigation_script();
+
+        assert!(script.contains(
+            "function virtualSliceCacheKey(requestGenerationId, requestUrl, offset, limit)"
+        ));
+        assert!(
+            script.contains("JSON.stringify([requestGenerationId, requestUrl, offset, limit])")
+        );
+    }
+
+    #[test]
+    fn navigation_script_has_target_guarded_results_patch() {
+        let script = navigation_script();
+
+        assert!(script.contains("function applyResultsPatch(html, targetUrl)"));
+        assert!(script.contains("publicUrlKey(targetUrl) !== publicUrlKey()"));
+        assert!(script.contains("window.nixsearchApplyResultsPatch = applyResultsPatch;"));
+    }
+
+    #[test]
+    fn navigation_script_applies_generation_change_atomically_after_target_check() {
+        let script = navigation_script();
+
+        let apply = script
+            .find("function applyGenerationChange(payload)")
+            .unwrap();
+        let target_type_guard = script[apply..]
+            .find(r#"typeof payload.targetUrl !== "string""#)
+            .unwrap();
+        let target_guard = script[apply..]
+            .find("publicUrlKey(payload.targetUrl) !== publicUrlKey()")
+            .unwrap();
+        let generation_html_guard = script[apply..]
+            .find(r#"typeof payload.generationStateHtml !== "string""#)
+            .unwrap();
+        let results_html_guard = script[apply..]
+            .find(r#"typeof payload.resultsHtml !== "string""#)
+            .unwrap();
+        let parse_generation = script[apply..]
+            .find("const generationState = parsedElementFromHtml(")
+            .unwrap();
+        let parse_results = script[apply..]
+            .find("const results = parsedElementFromHtml(payload.resultsHtml, \"#results\");")
+            .unwrap();
+        let begin = script[apply..].find("beginGenerationChange();").unwrap();
+        let replace_generation = script[apply..]
+            .find("replaceParsedElement(generationState, \"#generation-state\")")
+            .unwrap();
+        let replace_results = script[apply..]
+            .find("replaceResultsElement(results)")
+            .unwrap();
+        let finally = script[apply..].find("finally").unwrap();
+        let finish = script[apply..].find("finishGenerationChange();").unwrap();
+
+        assert!(target_type_guard < target_guard);
+        assert!(target_guard < generation_html_guard);
+        assert!(generation_html_guard < results_html_guard);
+        assert!(results_html_guard < parse_generation);
+        assert!(parse_generation < parse_results);
+        assert!(parse_results < begin);
+        assert!(begin < replace_generation);
+        assert!(replace_generation < replace_results);
+        assert!(replace_results < finally);
+        assert!(finally < finish);
+        assert!(script.contains("window.nixsearchApplyGenerationChange = applyGenerationChange;"));
+    }
+
+    #[test]
+    fn navigation_script_does_not_route_generation_change_through_normal_results_patch() {
+        let script = navigation_script();
+
+        let apply = script
+            .find("function applyGenerationChange(payload)")
+            .unwrap();
+        let end = script[apply..]
+            .find("window.nixsearchBeginGenerationChange")
+            .map(|offset| apply + offset)
+            .unwrap_or(script.len());
+        let apply_generation_change = &script[apply..end];
+
+        assert!(!apply_generation_change.contains("applyResultsPatch("));
+        assert!(apply_generation_change.contains("replaceResultsElement(results)"));
+    }
+
+    #[test]
+    fn navigation_script_parses_results_before_resetting_virtual_state() {
+        let script = navigation_script();
+
+        let apply = script
+            .find("function applyResultsPatch(html, targetUrl)")
+            .unwrap();
+        let parse = script[apply..]
+            .find("const results = parsedElementFromHtml(html, \"#results\");")
+            .unwrap();
+        let reset = script[apply..]
+            .find("resetVirtualStateForPatch();")
+            .unwrap();
+
+        assert!(parse < reset);
+    }
+
+    #[test]
+    fn navigation_script_directly_updates_generation_id_from_payload() {
+        let script = navigation_script();
+
+        assert!(script.contains(r#"typeof payload.generationId === "string""#));
+        assert!(script.contains("generationId = payload.generationId;"));
+    }
+
+    #[test]
+    fn navigation_script_handles_stale_generation_before_applying_slice() {
+        let script = navigation_script();
+
+        let stale = script.find(r#"data.error === "stale_generation""#).unwrap();
+        let remember = script
+            .find("rememberVirtualSlice(cacheKey, data);")
+            .unwrap();
+        let apply = script
+            .find("applyVirtualSlice(data, mode, normalizedOffset)")
+            .unwrap();
+
+        assert!(stale < remember);
+        assert!(stale < apply);
+        assert!(script.contains("function beginStaleGenerationReconcile()"));
+        assert!(script.contains("beginGenerationChange();"));
+    }
+
+    #[test]
+    fn navigation_script_gates_virtual_loading_during_generation_change() {
+        let script = navigation_script();
+
+        assert!(script.contains("let generationChanging = false;"));
+        assert!(script.contains("function beginGenerationChange()"));
+        assert!(script.contains("function finishGenerationChange()"));
+        assert!(script.contains("let generationChangeWatchdog = null;"));
+        assert!(script.contains("clearGenerationChangeWatchdog();"));
+        assert!(script.contains("resetVirtualStateForPatch();"));
+        assert!(script.contains("virtualSliceCache.clear();"));
+        assert!(script.contains("virtualRequestEpoch += 1;"));
+        assert!(script.contains("window.nixsearchApplyGenerationChange = applyGenerationChange;"));
+        assert!(script.contains(
+            "if (generationChanging || !virtualResults || virtualLoadScheduled) return;"
+        ));
     }
 
     #[test]

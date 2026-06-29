@@ -1,9 +1,11 @@
 use camino::Utf8PathBuf;
 use tempfile::tempdir;
 
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
+use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::search::{
-    EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions, SearchScope,
+    EntryFactsStatus, EntryLookup, EntryLookupResult, SearchHit, SearchIndex, SearchOptions,
+    SearchScope,
 };
 
 use nixsearch_test_support::{
@@ -19,9 +21,16 @@ fn build_index(docs: Vec<SearchDocument>) -> (tempfile::TempDir, SearchIndex) {
 
     let index = SearchIndex::create_or_replace(&index_path).unwrap();
     let mut writer = index.writer().unwrap();
+    let mut annotations = EntryAnnotationIndex::new();
 
     for doc in &docs {
-        writer.add_document(doc).unwrap();
+        annotations.observe(doc);
+    }
+
+    for doc in &docs {
+        writer
+            .add_document(doc, &annotations.annotation_for(doc))
+            .unwrap();
     }
 
     writer.commit().unwrap();
@@ -438,6 +447,27 @@ fn package_main_program_query_finds_package() {
 }
 
 #[test]
+fn package_program_query_finds_package_by_non_main_executable() {
+    let context = ingest_context_for(SOURCE_NIXPKGS, REF_SMALL);
+    let mut git = package_doc_with_main_program(&context, "git", "Git package.", "git");
+    let SearchDocument::Package(package) = &mut git else {
+        panic!("expected package document");
+    };
+    package.programs = vec!["git-shell".to_owned()];
+    let description_only = package_doc_for(
+        &context,
+        "git-shell-docs",
+        "Package whose description mentions git-shell.",
+    );
+    let (_tempdir, index) = build_index(vec![git, description_only]);
+
+    let hits = search(&index, "git-shell");
+
+    assert_contains(&hits, "git");
+    assert_ranks_before(&hits, "git", "git-shell-docs");
+}
+
+#[test]
 fn natural_language_query_uses_text_relevance_without_path_penalty() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
     let docs = vec![
@@ -529,14 +559,17 @@ fn all_scope_search_surfaces_relevant_options_among_package_results() {
                 SearchScope {
                     source: SOURCE_NIXPKGS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    entry_kind: IndexedEntryKind::Package,
                 },
                 SearchScope {
                     source: SOURCE_NIXOS.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    entry_kind: IndexedEntryKind::Option,
                 },
                 SearchScope {
                     source: SOURCE_HOME_MANAGER.to_owned(),
                     ref_id: REF_SMALL.to_owned(),
+                    entry_kind: IndexedEntryKind::Option,
                 },
             ],
             ..Default::default()
@@ -797,10 +830,12 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
                 SearchScope {
                     source: "nixos".to_owned(),
                     ref_id: "stable".to_owned(),
+                    entry_kind: IndexedEntryKind::Option,
                 },
                 SearchScope {
                     source: "home-manager".to_owned(),
                     ref_id: "unstable".to_owned(),
+                    entry_kind: IndexedEntryKind::Option,
                 },
             ],
             ..Default::default()
@@ -821,6 +856,36 @@ fn multiple_scopes_are_ored_by_source_ref_pair() {
     assert_eq!(pairs.len(), 2);
     assert!(pairs.contains(&("nixos", "stable")));
     assert!(pairs.contains(&("home-manager", "unstable")));
+}
+
+#[test]
+fn scope_entry_kind_filters_matching_source_ref_documents() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![
+        package_doc_for(&context, "git", "Git package."),
+        option_doc_for(&context, "git", "Git option."),
+    ]);
+
+    let result = index
+        .search(SearchOptions {
+            query: "git".to_owned(),
+            limit: 10,
+            scopes: vec![SearchScope {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                entry_kind: IndexedEntryKind::Package,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(!result.hits.is_empty());
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|hit| hit.document.kind() == &DocumentKind::Package)
+    );
 }
 
 #[test]
@@ -866,8 +931,8 @@ fn finds_entry_by_source_ref_name() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Option,
             name: OPTION_GIT_ENABLE.to_owned(),
-            kind: Some(DocumentKind::Option),
         })
         .unwrap();
 
@@ -889,8 +954,8 @@ fn find_entry_returns_not_found() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Option,
             name: "missing.entry".to_owned(),
-            kind: None,
         })
         .unwrap();
 
@@ -898,7 +963,7 @@ fn find_entry_returns_not_found() {
 }
 
 #[test]
-fn find_entry_uses_kind_to_disambiguate() {
+fn find_entry_uses_exact_entry_kind_to_disambiguate() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
 
     let docs = vec![
@@ -912,8 +977,8 @@ fn find_entry_uses_kind_to_disambiguate() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Package,
             name: "git".to_owned(),
-            kind: Some(DocumentKind::Package),
         })
         .unwrap();
 
@@ -926,13 +991,79 @@ fn find_entry_uses_kind_to_disambiguate() {
 }
 
 #[test]
-fn find_entry_returns_ambiguous_without_kind() {
+fn search_hits_annotate_cross_kind_duplicates_as_unique_within_kind() {
     let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
-
     let docs = vec![
         option_doc_for(&context, "git", "Git option."),
         package_doc_for(&context, "git", "Git package."),
+        package_doc_for(&context, "ripgrep", "Ripgrep package."),
     ];
+
+    let (_tempdir, index) = build_index(docs);
+    let hits = search(&index, "*");
+
+    let package_git = hits
+        .iter()
+        .find(|hit| hit.document.name() == "git" && hit.document.kind() == &DocumentKind::Package)
+        .expect("missing package git hit");
+    let option_git = hits
+        .iter()
+        .find(|hit| hit.document.name() == "git" && hit.document.kind() == &DocumentKind::Option)
+        .expect("missing option git hit");
+    let ripgrep = hits
+        .iter()
+        .find(|hit| hit.document.name() == "ripgrep")
+        .expect("missing ripgrep hit");
+
+    assert!(package_git.annotation.unique_within_kind);
+    assert!(option_git.annotation.unique_within_kind);
+    assert!(ripgrep.annotation.unique_within_kind);
+}
+
+#[test]
+fn search_hits_annotate_same_kind_duplicates_as_not_unique_within_kind() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = vec![
+        option_doc_for(&context, "duplicate.entry", "First duplicate option."),
+        option_doc_for(&context, "duplicate.entry", "Second duplicate option."),
+    ];
+
+    let (_tempdir, index) = build_index(docs);
+    let hits = search(&index, "*");
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| !hit.annotation.unique_within_kind));
+}
+
+#[test]
+fn entry_facts_count_more_than_ten_exactly() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = (0..11)
+        .map(|_| option_doc_for(&context, "duplicate.entry", "Duplicate option."))
+        .collect();
+
+    let (_tempdir, index) = build_index(docs);
+
+    let facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Option,
+            name: "duplicate.entry".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(facts.count, 11);
+    assert_eq!(facts.status(), EntryFactsStatus::Ambiguous);
+    assert!(facts.representative.is_none());
+}
+
+#[test]
+fn find_entry_ambiguity_uses_exact_counts_not_top_docs_limit() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let docs = (0..11)
+        .map(|_| option_doc_for(&context, "duplicate.entry", "Duplicate option."))
+        .collect();
 
     let (_tempdir, index) = build_index(docs);
 
@@ -940,8 +1071,8 @@ fn find_entry_returns_ambiguous_without_kind() {
         .find_entry(EntryLookup {
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
-            name: "git".to_owned(),
-            kind: None,
+            entry_kind: IndexedEntryKind::Option,
+            name: "duplicate.entry".to_owned(),
         })
         .unwrap();
 
@@ -949,12 +1080,121 @@ fn find_entry_returns_ambiguous_without_kind() {
         panic!("expected ambiguous entry lookup");
     };
 
-    let kinds = documents
-        .iter()
-        .map(|document| document.kind())
-        .collect::<Vec<_>>();
+    assert_eq!(documents.len(), 11);
+}
 
-    assert_eq!(documents.len(), 2);
-    assert!(kinds.contains(&&DocumentKind::Option));
-    assert!(kinds.contains(&&DocumentKind::Package));
+#[test]
+fn find_entry_with_facts_rejects_mismatched_lookup_identity() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![option_doc_for(
+        &context,
+        "programs.git.enable",
+        "Git option.",
+    )]);
+
+    let facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Option,
+            name: "programs.git.enable".to_owned(),
+        })
+        .unwrap();
+    let error = index
+        .find_entry_with_facts(
+            EntryLookup {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                entry_kind: IndexedEntryKind::Option,
+                name: "programs.openssh.enable".to_owned(),
+            },
+            &facts,
+        )
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("entry facts identity does not match"));
+}
+
+#[test]
+fn entry_facts_exposes_unique_package_and_option_representatives() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+    let (_tempdir, index) = build_index(vec![
+        option_doc_for(&context, "programs.git.enable", "Git option."),
+        package_doc_for(&context, "git", "Git package."),
+    ]);
+
+    let option_facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Option,
+            name: "programs.git.enable".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(option_facts.status(), EntryFactsStatus::Unique);
+    assert_eq!(option_facts.seo_eligible(), Some(true));
+    assert_eq!(
+        option_facts
+            .representative
+            .as_ref()
+            .map(|representative| representative.document.name()),
+        Some("programs.git.enable")
+    );
+
+    let package_facts = index
+        .entry_facts(EntryLookup {
+            source: SOURCE_FIXTURES.to_owned(),
+            ref_id: REF_SMALL.to_owned(),
+            entry_kind: IndexedEntryKind::Package,
+            name: "git".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(package_facts.status(), EntryFactsStatus::Unique);
+    assert_eq!(package_facts.seo_eligible(), Some(true));
+    assert_eq!(
+        package_facts
+            .representative
+            .as_ref()
+            .map(|representative| representative.document.name()),
+        Some("git")
+    );
+}
+
+#[test]
+fn internal_and_hidden_options_are_not_seo_eligible() {
+    let context = ingest_context_for(SOURCE_FIXTURES, REF_SMALL);
+
+    let mut internal = match option_doc_for(&context, "internal.entry", "Internal option.") {
+        SearchDocument::Option(option) => option,
+        SearchDocument::Package(_) => unreachable!(),
+    };
+    internal.internal = Some(true);
+
+    let mut hidden = match option_doc_for(&context, "hidden.entry", "Hidden option.") {
+        SearchDocument::Option(option) => option,
+        SearchDocument::Package(_) => unreachable!(),
+    };
+    hidden.visible = Some(false);
+
+    let (_tempdir, index) = build_index(vec![
+        SearchDocument::Option(internal),
+        SearchDocument::Option(hidden),
+    ]);
+
+    for name in ["internal.entry", "hidden.entry"] {
+        let facts = index
+            .entry_facts(EntryLookup {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                entry_kind: IndexedEntryKind::Option,
+                name: name.to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(facts.status(), EntryFactsStatus::Unique);
+        assert_eq!(facts.seo_eligible(), Some(false));
+        assert!(facts.representative.is_some());
+    }
 }

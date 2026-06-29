@@ -13,6 +13,7 @@ use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::{DocText, OptionDoc, PackageDoc, SearchDocument};
 use nixsearch_core::ingest::IngestContext;
 use nixsearch_core::source_link::{Declaration, SourceLinkConfig};
+use nixsearch_core::target::RefRole;
 
 pub const SOURCE_FIXTURES: &str = "fixtures";
 pub const SOURCE_NIXOS: &str = "nixos";
@@ -20,6 +21,7 @@ pub const SOURCE_NIXPKGS: &str = "nixpkgs";
 pub const REF_SMALL: &str = "small";
 pub const REF_STABLE: &str = "stable";
 pub const REF_UNSTABLE: &str = "unstable";
+pub const TEST_PUBLIC_ORIGIN: &str = "https://search.example.com";
 
 pub const OPTION_GIT_ENABLE: &str = "programs.git.enable";
 pub const OPTION_NGINX_ENABLE: &str = "services.nginx.enable";
@@ -186,6 +188,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
                 default_ref: Some(REF_SMALL.to_owned()),
                 refs: vec![RefConfig {
                     id: REF_SMALL.to_owned(),
+                    role: RefRole::Search,
                     source_links: Some(SourceLinkConfig::Github {
                         owner: "example".to_owned(),
                         repo: "repo".to_owned(),
@@ -207,6 +210,7 @@ pub fn app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
 pub fn existing_file_ref_config(id: &str) -> RefConfig {
     RefConfig {
         id: id.to_owned(),
+        role: RefRole::Search,
         producer: ProducerConfig::ExistingFile {
             path: PathBuf::from("unused.json"),
             artifact: ArtifactKind::OptionsJson,
@@ -245,6 +249,18 @@ pub fn multi_ref_app_config(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
     ]
     .into();
 
+    config
+}
+
+pub fn app_config_with_public_url(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
+    let mut config = app_config(index_dir);
+    config.server.public_url = Some(TEST_PUBLIC_ORIGIN.to_owned());
+    config
+}
+
+pub fn multi_ref_app_config_with_public_url(index_dir: impl AsRef<Utf8Path>) -> AppConfig {
+    let mut config = multi_ref_app_config(index_dir);
+    config.server.public_url = Some(TEST_PUBLIC_ORIGIN.to_owned());
     config
 }
 

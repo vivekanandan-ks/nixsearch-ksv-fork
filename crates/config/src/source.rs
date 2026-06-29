@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::source_link::SourceLinkConfig;
+pub use nixsearch_core::target::{RefRole, TargetCapabilities};
 
 use crate::error::{ConfigError, Result};
 use crate::producer::{
     EvalModuleConfig, EvalModuleRefConfig, ProducerConfig, default_flake_file_fallback_inputs,
 };
-use crate::validation::{validate_hex_color, validate_id};
+use crate::validation::{validate_hex_color, validate_id, validate_source_id};
 
 pub(crate) const NIXPKGS_COLOR: &str = "#4ade80";
 pub(crate) const NIXOS_COLOR: &str = "#60a5fa";
@@ -35,6 +36,8 @@ pub(crate) struct RawSourceConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRefConfig {
+    #[serde(default)]
+    pub role: Option<RefRole>,
     pub producer: ProducerConfig,
     #[serde(default)]
     pub source_links: Option<SourceLinkConfig>,
@@ -42,8 +45,13 @@ struct RawRefConfig {
 
 impl RawRefConfig {
     fn into_ref_config(self, id: String) -> RefConfig {
+        let role = self
+            .role
+            .unwrap_or_else(|| RefRole::default_for_artifact_kind(self.producer.artifact_kind()));
+
         RefConfig {
             id,
+            role,
             producer: self.producer,
             source_links: self.source_links,
         }
@@ -128,6 +136,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(nixpkgs_source_links(&ref_id)),
                 producer: ProducerConfig::ChannelPackagesJson {
                     channel: ref_id,
@@ -155,6 +164,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(nixpkgs_source_links(&ref_id)),
                 producer: ProducerConfig::ChannelOptionsJson {
                     channel: ref_id,
@@ -190,6 +200,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(home_manager_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:nix-community/home-manager/{ref_id}"),
@@ -228,6 +239,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(nix_darwin_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:nix-darwin/nix-darwin/{ref_id}"),
@@ -258,6 +270,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(hjem_source_links(&ref_id)),
                 producer: ProducerConfig::FlakeFile {
                     source_ref: format!("github:feel-co/hjem/{ref_id}"),
@@ -293,6 +306,7 @@ impl RawSourceConfig {
             .into_iter()
             .map(|ref_id| RefConfig {
                 id: ref_id.clone(),
+                role: RefRole::Search,
                 source_links: Some(hjem_rum_source_links(&ref_id)),
                 producer: ProducerConfig::EvalModules {
                     source_ref: format!("github:snugnug/hjem-rum/{ref_id}"),
@@ -409,22 +423,22 @@ fn effective_default_ref(
     if let Some(configured) = configured {
         validate_id("default_ref", &configured)?;
 
-        if !refs.iter().any(|ref_config| ref_config.id == configured) {
+        if !refs
+            .iter()
+            .any(|ref_config| ref_config.id == configured && ref_config.is_searchable())
+        {
             return Err(ConfigError::Validation(format!(
-                "sources.{source_id}.default_ref {configured:?} does not match any configured ref"
+                "sources.{source_id}.default_ref {configured:?} does not match any searchable configured ref"
             )));
         }
 
         return Ok(Some(configured));
     }
 
-    if refs.len() > 1 {
-        return Err(ConfigError::Validation(format!(
-            "sources.{source_id}: default_ref is required when multiple refs are configured"
-        )));
-    }
-
-    Ok(refs.first().map(|ref_config| ref_config.id.clone()))
+    Ok(refs
+        .iter()
+        .find(|ref_config| ref_config.is_searchable())
+        .map(|ref_config| ref_config.id.clone()))
 }
 
 fn default_strip_prefixes(configured: Option<Vec<String>>, default_prefix: &str) -> Vec<String> {
@@ -461,7 +475,7 @@ pub struct SourceConfig {
 
 impl SourceConfig {
     pub(crate) fn validate(&self, source_id: &str) -> Result<()> {
-        validate_id("source id", source_id)?;
+        validate_source_id("source id", source_id)?;
 
         if let Some(color) = &self.color {
             validate_hex_color(&format!("sources.{source_id}.color"), color)?;
@@ -471,6 +485,7 @@ impl SourceConfig {
 
         for ref_config in &self.refs {
             ref_config.validate(source_id)?;
+            validate_source_ref_artifact_kind(source_id, self.kind, ref_config)?;
         }
 
         if let Some(default_ref) = &self.default_ref {
@@ -479,15 +494,67 @@ impl SourceConfig {
             if !self
                 .refs
                 .iter()
-                .any(|ref_config| &ref_config.id == default_ref)
+                .any(|ref_config| &ref_config.id == default_ref && ref_config.is_searchable())
             {
                 return Err(ConfigError::Validation(format!(
-                    "sources.{source_id}.default_ref {default_ref:?} does not match any configured ref"
+                    "sources.{source_id}.default_ref {default_ref:?} does not match any searchable configured ref"
                 )));
             }
         }
 
         Ok(())
+    }
+}
+
+fn validate_source_ref_artifact_kind(
+    source_id: &str,
+    source_kind: SourceKind,
+    ref_config: &RefConfig,
+) -> Result<()> {
+    let artifact_kind = ref_config.producer.artifact_kind();
+    let valid = source_kind.accepts_artifact_kind(artifact_kind);
+
+    if !valid {
+        return Err(ConfigError::Validation(format!(
+            "sources.{source_id}.refs.{} producer artifact kind {} is incompatible with source kind {}",
+            ref_config.id,
+            artifact_kind.as_str(),
+            source_kind.as_str()
+        )));
+    }
+
+    Ok(())
+}
+
+impl SourceConfig {
+    pub fn searchable_refs(&self) -> impl Iterator<Item = &RefConfig> {
+        self.refs
+            .iter()
+            .filter(|ref_config| ref_config.is_searchable())
+    }
+
+    pub fn has_searchable_refs(&self) -> bool {
+        self.searchable_refs().next().is_some()
+    }
+
+    pub fn searchable_ref(&self, ref_id: &str) -> Option<&RefConfig> {
+        self.searchable_refs()
+            .find(|ref_config| ref_config.id == ref_id)
+    }
+
+    pub fn refs_allowed_in_ref_sets(&self) -> impl Iterator<Item = &RefConfig> {
+        self.refs
+            .iter()
+            .filter(|ref_config| ref_config.can_appear_in_ref_set())
+    }
+
+    pub fn has_ref_set_refs(&self) -> bool {
+        self.refs_allowed_in_ref_sets().next().is_some()
+    }
+
+    pub fn ref_allowed_in_ref_set(&self, ref_id: &str) -> Option<&RefConfig> {
+        self.refs_allowed_in_ref_sets()
+            .find(|ref_config| ref_config.id == ref_id)
     }
 }
 
@@ -500,6 +567,27 @@ pub enum SourceKind {
     Apps,
     Services,
     Mixed,
+}
+
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Options => "options",
+            Self::Packages => "packages",
+            Self::Apps => "apps",
+            Self::Services => "services",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    pub fn accepts_artifact_kind(self, artifact_kind: ArtifactKind) -> bool {
+        match self {
+            Self::Options => artifact_kind == ArtifactKind::OptionsJson,
+            Self::Packages => artifact_kind == ArtifactKind::PackagesJson,
+            Self::Apps | Self::Services => artifact_kind == ArtifactKind::FlakeInfoJson,
+            Self::Mixed => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,14 +604,57 @@ pub enum SourcePreset {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefConfig {
     pub id: String,
+    #[serde(default)]
+    pub role: RefRole,
     pub producer: ProducerConfig,
     #[serde(default)]
     pub source_links: Option<SourceLinkConfig>,
 }
 
 impl RefConfig {
+    pub fn artifact_kind(&self) -> ArtifactKind {
+        self.producer.artifact_kind()
+    }
+
+    pub fn capabilities(&self) -> TargetCapabilities {
+        TargetCapabilities::new(self.role, self.artifact_kind())
+    }
+
+    pub fn is_searchable(&self) -> bool {
+        self.capabilities().is_searchable()
+    }
+
+    pub fn can_appear_in_ref_set(&self) -> bool {
+        self.capabilities().can_appear_in_ref_set()
+    }
+
+    pub fn is_artifact_only(&self) -> bool {
+        self.capabilities().is_artifact_only()
+    }
+
+    pub fn indexes_search_documents(&self) -> bool {
+        self.capabilities().indexes_search_documents()
+    }
+
+    pub fn indexed_entry_kind(&self) -> Option<nixsearch_core::document::IndexedEntryKind> {
+        self.capabilities().indexed_entry_kind()
+    }
+
     fn validate(&self, source_id: &str) -> Result<()> {
         validate_id("ref id", &self.id)?;
-        self.producer.validate(source_id, &self.id)
+        self.producer.validate(source_id, &self.id)?;
+
+        if matches!(self.role, RefRole::Search | RefRole::IndexOnly)
+            && self.artifact_kind().indexed_document_kind().is_none()
+        {
+            return Err(ConfigError::Validation(format!(
+                "sources.{source_id}.refs.{} role {} requires an artifact kind that can produce indexed search documents, got {}",
+                self.id,
+                self.role.as_str(),
+                self.artifact_kind().as_str()
+            )));
+        }
+
+        Ok(())
     }
 }

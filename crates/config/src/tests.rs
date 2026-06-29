@@ -6,6 +6,7 @@ use tempfile::{TempDir, tempdir};
 
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::source_link::SourceLinkConfig;
+use nixsearch_core::target::RefRole;
 
 use crate::app::AppConfig;
 use crate::producer::{DownloadCompression, EvalModuleConfig, ProducerConfig, ProducerKind};
@@ -136,6 +137,7 @@ fn assert_error_contains(error: &str, expected: &str) {
 fn default_config_is_valid() {
     let config = AppConfig::load(None).unwrap();
 
+    config.validate().unwrap();
     assert_eq!(config.data.artifact_url, "file://./data/artifacts");
     assert_eq!(config.data.index_dir, Utf8PathBuf::from("./data/indexes"));
     assert_eq!(config.server.listen, "127.0.0.1:3000");
@@ -293,6 +295,10 @@ fn loads_example_config_file() {
 
     let config = AppConfig::load(Some(&path)).unwrap();
 
+    assert_eq!(
+        config.server.public_url.as_deref(),
+        Some("https://nixsearch.example.com")
+    );
     assert!(config.sources.contains_key("eval-fixture"));
     assert_eq!(config.default_ref_set(), Some("unstable"));
     assert_eq!(
@@ -370,6 +376,188 @@ fn loads_existing_file_producer() {
         }
         other => panic!("unexpected producer: {other:?}"),
     }
+}
+
+#[test]
+fn source_kind_accepts_expected_artifact_kinds() {
+    let cases = [
+        (SourceKind::Options, ArtifactKind::OptionsJson, true),
+        (SourceKind::Options, ArtifactKind::PackagesJson, false),
+        (SourceKind::Options, ArtifactKind::FlakeInfoJson, false),
+        (SourceKind::Packages, ArtifactKind::OptionsJson, false),
+        (SourceKind::Packages, ArtifactKind::PackagesJson, true),
+        (SourceKind::Packages, ArtifactKind::FlakeInfoJson, false),
+        (SourceKind::Apps, ArtifactKind::OptionsJson, false),
+        (SourceKind::Apps, ArtifactKind::PackagesJson, false),
+        (SourceKind::Apps, ArtifactKind::FlakeInfoJson, true),
+        (SourceKind::Services, ArtifactKind::OptionsJson, false),
+        (SourceKind::Services, ArtifactKind::PackagesJson, false),
+        (SourceKind::Services, ArtifactKind::FlakeInfoJson, true),
+        (SourceKind::Mixed, ArtifactKind::OptionsJson, true),
+        (SourceKind::Mixed, ArtifactKind::PackagesJson, true),
+        (SourceKind::Mixed, ArtifactKind::FlakeInfoJson, true),
+    ];
+
+    for (source_kind, artifact_kind, expected) in cases {
+        assert_eq!(
+            source_kind.accepts_artifact_kind(artifact_kind),
+            expected,
+            "unexpected compatibility for {source_kind:?} and {artifact_kind:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_source_kind_and_producer_artifact_kind_mismatch() {
+    let error = load_toml_error(
+        r#"
+        [sources.fixtures]
+        kind = "options"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/packages.json"
+        artifact = "packages-json"
+        "#,
+    );
+
+    assert_error_contains(
+        &error,
+        "sources.fixtures.refs.small producer artifact kind packages-json is incompatible with source kind options",
+    );
+}
+
+#[test]
+fn mixed_source_kind_allows_any_producer_artifact_kind() {
+    let config = load_toml(
+        r#"
+        [sources.fixtures]
+        kind = "mixed"
+        default_ref = "options"
+
+        [sources.fixtures.refs.options.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+
+        [sources.fixtures.refs.packages.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/packages.json"
+        artifact = "packages-json"
+
+        [sources.fixtures.refs.apps]
+        role = "artifact-only"
+
+        [sources.fixtures.refs.apps.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/flake-info.json"
+        artifact = "flake-info-json"
+        "#,
+    );
+
+    assert_eq!(config.sources[FIXTURES_SOURCE].kind, SourceKind::Mixed);
+    assert_eq!(config.sources[FIXTURES_SOURCE].refs.len(), 3);
+}
+
+#[test]
+fn artifact_only_options_ref_is_not_searchable_and_has_no_default_ref() {
+    let config = load_toml(
+        r#"
+        [sources.fixtures]
+        kind = "options"
+
+        [sources.fixtures.refs.small]
+        role = "artifact-only"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+        "#,
+    );
+
+    let source = &config.sources[FIXTURES_SOURCE];
+    let ref_config = &source.refs[0];
+    assert_eq!(ref_config.role, RefRole::ArtifactOnly);
+    assert!(!ref_config.is_searchable());
+    assert!(!ref_config.can_appear_in_ref_set());
+    assert!(!ref_config.indexes_search_documents());
+    assert_eq!(source.default_ref, None);
+}
+
+#[test]
+fn index_only_options_ref_indexes_documents_but_is_not_searchable() {
+    let config = load_toml(
+        r#"
+        [sources.fixtures]
+        kind = "options"
+
+        [sources.fixtures.refs.small]
+        role = "index-only"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+        "#,
+    );
+
+    let source = &config.sources[FIXTURES_SOURCE];
+    let ref_config = &source.refs[0];
+    assert_eq!(ref_config.role, RefRole::IndexOnly);
+    assert!(!ref_config.is_searchable());
+    assert!(!ref_config.can_appear_in_ref_set());
+    assert!(ref_config.indexes_search_documents());
+    assert_eq!(source.default_ref, None);
+}
+
+#[test]
+fn rejects_search_role_for_non_indexable_artifact_kind() {
+    let error = load_toml_error(
+        r#"
+        [sources.fixtures]
+        kind = "mixed"
+
+        [sources.fixtures.refs.apps]
+        role = "search"
+
+        [sources.fixtures.refs.apps.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/flake-info.json"
+        artifact = "flake-info-json"
+        "#,
+    );
+
+    assert_error_contains(&error, "role search requires an artifact kind");
+    assert_error_contains(&error, "flake-info-json");
+}
+
+#[test]
+fn rejects_ref_set_ref_that_cannot_appear_in_ref_sets() {
+    let error = load_toml_error(
+        r#"
+        [ref_sets.unstable]
+        fixtures = ["small"]
+
+        [sources.fixtures]
+        kind = "options"
+
+        [sources.fixtures.refs.small]
+        role = "artifact-only"
+
+        [sources.fixtures.refs.small.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+
+        [sources.fixtures.refs.stable.producer]
+        type = "existing-file"
+        path = "fixtures/search-small/options.json"
+        artifact = "options-json"
+        "#,
+    );
+
+    assert_error_contains(&error, "cannot appear in ref sets");
 }
 
 #[test]
@@ -682,8 +870,8 @@ fn loads_flake_file_producer_with_empty_fallback_inputs() {
 }
 
 #[test]
-fn loads_flake_info_producer() {
-    let config = load_toml(
+fn rejects_flake_info_producer() {
+    let error = load_toml_error(
         r#"
         [sources.fixtures]
         name = "Fixtures"
@@ -695,16 +883,7 @@ fn loads_flake_info_producer() {
         "#,
     );
 
-    let producer = &config.sources[FIXTURES_SOURCE].refs[0].producer;
-
-    assert_eq!(producer.kind(), ProducerKind::FlakeInfo);
-
-    match producer {
-        ProducerConfig::FlakeInfo { source_ref } => {
-            assert_eq!(source_ref, "github:example/project/main");
-        }
-        other => panic!("unexpected producer: {other:?}"),
-    }
+    assert_error_contains(&error, "producer type flake-info is not implemented yet");
 }
 
 #[test]
@@ -717,7 +896,44 @@ fn rejects_invalid_source_ids() {
         "#,
     );
 
-    assert_error_contains(&error, "must not contain '/'");
+    assert_error_contains(&error, "must contain only ASCII letters");
+}
+
+#[test]
+fn rejects_reserved_source_ids() {
+    for source_id in [
+        "-",
+        "robots.txt",
+        "sitemap.xml",
+        "sitemaps",
+        "favicon.ico",
+        "apple-touch-icon.png",
+    ] {
+        let error = load_toml_error(&format!(
+            r#"
+            [sources."{source_id}"]
+            name = "Reserved"
+            kind = "options"
+            "#
+        ));
+
+        assert_error_contains(&error, "reserved for web routing");
+    }
+}
+
+#[test]
+fn rejects_dot_segment_ids() {
+    for source_id in [".", ".."] {
+        let error = load_toml_error(&format!(
+            r#"
+            [sources."{source_id}"]
+            name = "Reserved"
+            kind = "options"
+            "#
+        ));
+
+        assert_error_contains(&error, "must not be a dot path segment");
+    }
 }
 
 #[test]
@@ -738,7 +954,7 @@ fn validates_nix_build_options_required_fields_by_deserialization() {
 }
 
 #[test]
-fn validates_custom_command_is_not_empty() {
+fn rejects_custom_command_producer() {
     let error = load_toml_error(
         r#"
         [sources.custom]
@@ -752,7 +968,10 @@ fn validates_custom_command_is_not_empty() {
         "#,
     );
 
-    assert_error_contains(&error, "command must not be empty");
+    assert_error_contains(
+        &error,
+        "producer type custom-command is not implemented yet",
+    );
 }
 
 #[test]
@@ -1328,12 +1547,12 @@ fn infers_default_ref_from_single_ref() {
 }
 
 #[test]
-fn rejects_missing_default_ref_with_multiple_refs() {
-    let error = load_toml_error(&fixture_two_ref_source_toml(None));
+fn infers_default_ref_from_first_searchable_ref_with_multiple_refs() {
+    let config = load_toml(&fixture_two_ref_source_toml(None));
 
-    assert_error_contains(
-        &error,
-        "default_ref is required when multiple refs are configured",
+    assert_eq!(
+        config.sources[FIXTURES_SOURCE].default_ref.as_deref(),
+        Some("stable"),
     );
 }
 
@@ -1364,7 +1583,7 @@ fn rejects_unknown_default_ref() {
     );
 
     assert_error_contains(&error, "default_ref");
-    assert_error_contains(&error, "does not match any configured ref");
+    assert_error_contains(&error, "does not match any searchable configured ref");
 }
 
 #[test]

@@ -1,15 +1,14 @@
 use std::convert::Infallible;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::response::{Html, IntoResponse, Sse, sse::Event};
 use datastar::prelude::{ExecuteScript, PatchElements};
 use futures_util::stream;
-use serde::Deserialize;
 
-use nixsearch_index::search::{EntryLookupResult, SearchResult};
+use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult, SearchResult};
 use nixsearch_service::{
     EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
     ServiceResult,
@@ -17,28 +16,27 @@ use nixsearch_service::{
 
 use crate::AppState;
 use crate::DEFAULT_LIMIT;
-use crate::origin::{PageUrls, page_urls, page_urls_for_public_uri};
+use crate::entry::{AnnotatedEntryDocument, EntryData};
+use crate::metadata::{self, PageHeadMetadataInput, PageMetadata};
+use crate::origin::{PageUrls, page_urls, page_urls_for_public_uri, public_path_and_query};
+use crate::reconciliation::RequestGeneration;
 use crate::request::{
-    PageQuery, PageRequest, PageState, SourceFilter, decode_path_value, non_empty,
-    normalized_query, page_request_from_public_uri, page_request_from_public_url, page_state,
-    parse_document_kind, public_uri,
+    PageRequest, PageState, PublicRoute, SourceFilter, normalized_query,
+    page_request_from_public_uri, page_state, public_uri,
 };
-use crate::scripts::{datastar_script, dialog_reconcile_script};
-use crate::templates::layout::{ResultsContent, head_metadata_script};
-use crate::templates::{self, modal::EntryData};
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StateQuery {
-    url: String,
-    previous_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SliceQuery {
-    url: String,
-    offset: usize,
-    limit: Option<usize>,
-}
+use crate::robots;
+use crate::scripts::datastar_script;
+use crate::sitemap::{
+    SitemapDocument, SitemapRenderError, protocol_sitemap_limits, render_sitemap_entrypoint,
+};
+use crate::templates;
+use crate::templates::layout::{
+    InitialReturnMetadata, ResultsContent, generation_change_script, head_metadata_script,
+    modal_patch_script, results_patch_script,
+};
+use crate::urls::{
+    canonical_home_path, canonical_source_path, close_url_for_state, sitemap_candidate_path,
+};
 
 pub async fn health() -> &'static str {
     "ok"
@@ -65,104 +63,230 @@ pub async fn datastar_js() -> impl IntoResponse {
     )
 }
 
-pub async fn root_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
-    render_full_page_response(
-        &state,
-        page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: None,
-            entry: None,
-            query,
-        },
-    )
+pub async fn robots_txt(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let public_seo_enabled = state.config.public_seo_enabled();
+    let urls = public_seo_enabled.then(|| page_urls(state.config.as_ref(), &headers, &uri));
+    let body = robots::robots_txt_body(
+        public_seo_enabled,
+        urls.as_ref().map(|urls| urls.origin.as_str()),
+    );
+
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }
 
-pub async fn source_page(
-    State(state): State<AppState>,
-    Path(source): Path<String>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
-    render_full_page_response(
-        &state,
-        page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: Some(source),
-            entry: None,
-            query,
-        },
-    )
-}
+pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    if !state.config.public_seo_enabled() {
+        return sitemaps_not_found().await;
+    }
 
-pub async fn entry_page(
-    State(state): State<AppState>,
-    Path((source, entry)): Path<(String, String)>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(query): Query<PageQuery>,
-) -> impl IntoResponse {
-    let entry = decode_path_value(&entry).unwrap_or(entry);
+    let urls = page_urls(state.config.as_ref(), &headers, &uri);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
 
-    render_full_page_response(
-        &state,
-        page_urls(state.config.as_ref(), &headers, &uri),
-        PageRequest {
-            source: Some(source),
-            entry: Some(entry),
-            query,
-        },
-    )
-}
+    let mut paths = vec![canonical_home_path()];
+    if let Ok(candidates) = state.search.sitemap_candidates(snapshot) {
+        paths.extend(candidates.iter().map(sitemap_candidate_path));
+    }
+    for (source_id, source) in &state.config.sources {
+        let Some(ref_id) = source.default_ref.as_deref() else {
+            continue;
+        };
+        if state
+            .search
+            .source_has_indexable_entries(snapshot, source_id, ref_id)
+            .unwrap_or(false)
+        {
+            paths.push(canonical_source_path(&state.config, source_id, ref_id));
+        }
+    }
 
-pub async fn state_events(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<StateQuery>,
-) -> Response {
-    let target_uri = match public_uri(&query.url) {
-        Ok(uri) => uri,
-        Err(error) => {
-            let page_urls = page_urls(&state.config, &headers, &Uri::from_static("/"));
-            return sse_error_response(&page_urls, &error);
+    let body = match render_sitemap_entrypoint(
+        &urls.origin,
+        paths,
+        uri.query(),
+        protocol_sitemap_limits(),
+    ) {
+        Ok(SitemapDocument::Urlset(body) | SitemapDocument::Index(body)) => body,
+        Err(
+            SitemapRenderError::MalformedQuery(_)
+            | SitemapRenderError::ShardNotAvailable
+            | SitemapRenderError::ShardOutOfRange,
+        ) => return sitemaps_not_found().await,
+        Err(
+            error @ (SitemapRenderError::IndexTooLarge | SitemapRenderError::NoRepresentableUrls),
+        ) => {
+            tracing::error!(?error, "failed to render protocol-compliant sitemap");
+            return sitemap_internal_error();
         }
     };
+
+    (
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+pub async fn sitemaps_not_found() -> Response {
+    robots::add_noindex_header(
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "not found",
+        )
+            .into_response(),
+    )
+    .await
+}
+
+fn sitemap_internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "sitemap rendering failed",
+    )
+        .into_response()
+}
+
+pub async fn public_page(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    match normalized_public_uri(&uri) {
+        Ok(Some(target)) => {
+            return (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, target)]).into_response();
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let page_urls = page_urls(state.config.as_ref(), &headers, &uri);
+            return render_parse_error_response(&state, page_urls, &error);
+        }
+    }
+
+    let request = match page_request_from_public_uri(&uri) {
+        Ok(request) => request,
+        Err(error) => {
+            let page_urls = page_urls(state.config.as_ref(), &headers, &uri);
+            return render_parse_error_response(&state, page_urls, &error.to_string());
+        }
+    };
+
+    render_full_page_response(
+        &state,
+        page_urls(state.config.as_ref(), &headers, &uri),
+        request,
+    )
+}
+
+fn normalized_public_uri(uri: &Uri) -> std::result::Result<Option<String>, String> {
+    let path = uri.path();
+    if path.starts_with("//") {
+        return Err("public URL must not be protocol-relative".to_owned());
+    }
+    if path != "/" && path.contains("//") {
+        return Err("path must not contain empty segments".to_owned());
+    }
+
+    let mut normalized_path = path.to_owned();
+    if normalized_path != "/" {
+        while normalized_path.ends_with('/') {
+            normalized_path.pop();
+        }
+    }
+
+    let normalized = match uri.query() {
+        Some(query) => format!("{normalized_path}?{query}"),
+        None => normalized_path,
+    };
+    let current = match uri.query() {
+        Some(query) => format!("{}?{query}", uri.path()),
+        None => uri.path().to_owned(),
+    };
+
+    if normalized == current {
+        Ok(None)
+    } else {
+        Ok(Some(normalized))
+    }
+}
+
+pub async fn state_events(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let query = match crate::request::state_events_query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                error.to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let target_uri = query.url;
+    let target_public_url = public_path_and_query(&target_uri);
     let page_urls = page_urls_for_public_uri(&state.config, &headers, &target_uri);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
+
+    if generation.client_generation_changed(query.generation_id.as_deref()) {
+        return generation_change_response(
+            &state,
+            &target_uri,
+            &target_public_url,
+            &page_urls,
+            snapshot,
+        );
+    }
 
     let request = match page_request_from_public_uri(&target_uri) {
         Ok(request) => request,
         Err(error) => {
-            return sse_error_response(&page_urls, &error);
+            return sse_error_response(
+                state.config.public_seo_enabled(),
+                &page_urls,
+                &error.to_string(),
+                Some(&target_public_url),
+            );
         }
     };
 
-    let snapshot = state.search.snapshot();
-    let page_state = match resolve_page_state(&state, &snapshot, &request) {
+    let page_state = match resolve_page_state(&state, snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
-            return sse_error_response(&page_urls, &error.to_string());
+            return sse_error_response(
+                state.config.public_seo_enabled(),
+                &page_urls,
+                &error.to_string(),
+                Some(&target_public_url),
+            );
         }
     };
 
-    let navigation = state_events_navigation(
-        &state,
-        &snapshot,
-        query.previous_url.as_deref(),
-        &page_state,
-    );
+    let previous_request = query
+        .previous_url
+        .as_ref()
+        .and_then(|uri| page_request_from_public_uri(uri).ok());
+    let navigation =
+        state_events_navigation(&state, snapshot, previous_request.as_ref(), &page_state);
     let has_entry_detail = page_state.detail.is_some();
+    let direct_entry = request.is_direct_entry();
 
     let search_result = if navigation.needs_search_result(&page_state) {
+        let offset = match search_offset(&request) {
+            Ok(offset) => offset,
+            Err(error) => {
+                return sse_error_response(
+                    state.config.public_seo_enabled(),
+                    &page_urls,
+                    &error,
+                    Some(&target_public_url),
+                );
+            }
+        };
+
         Some(run_search_with_snapshot(
             &state,
-            &snapshot,
+            snapshot,
             &page_state,
-            search_offset(&request),
+            offset,
             DEFAULT_LIMIT,
         ))
     } else {
@@ -170,23 +294,28 @@ pub async fn state_events(
     };
 
     if let Some(Err(ServiceError::Resolution(error))) = &search_result {
-        return sse_error_response(&page_urls, &error.to_string());
+        return sse_error_response(
+            state.config.public_seo_enabled(),
+            &page_urls,
+            &error.to_string(),
+            Some(&target_public_url),
+        );
     }
 
     let search_error = search_error_message(&search_result);
     let results_content = results_content_for_search(&search_result, search_error.as_deref());
 
-    let results_html = if navigation.patch_results {
+    let context_results_html = if !direct_entry && navigation.patch_results {
         Some(match &search_result {
             Some(Ok(result)) => {
                 templates::results::render(&page_state, &result.hits, result.total, &state.config)
                     .into_string()
             }
             Some(Err(error)) => {
-                templates::results::render_error("Search failed", &format!("{error:#}"))
+                templates::results::render_status_error("Search failed", &format!("{error:#}"))
                     .into_string()
             }
-            None => templates::home::render(&state, &request, &page_state, &snapshot).into_string(),
+            None => templates::home::render(&state, &request, &page_state, snapshot).into_string(),
         })
     } else {
         None
@@ -195,7 +324,7 @@ pub async fn state_events(
     let entry = match load_entry_data_from_snapshot(
         &state,
         &page_state,
-        has_entry_detail.then_some(&snapshot),
+        has_entry_detail.then_some(snapshot),
     ) {
         Ok(entry) => entry,
         Err(error) => {
@@ -205,111 +334,286 @@ pub async fn state_events(
                     request: &request,
                     page_state: &page_state,
                     page_urls: &page_urls,
-                    snapshot: &snapshot,
-                    results_html,
+                    snapshot,
+                    results_html: context_results_html,
                     results_content,
+                    target_public_url: &target_public_url,
                 },
                 &error,
             );
         }
     };
-    let modal_html = templates::modal::render(&state.config, &page_state, &entry).into_string();
+    let results_html = if direct_entry {
+        Some(templates::results::render_entry(&state.config, &page_state, &entry).into_string())
+    } else {
+        context_results_html
+    };
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
+    let modal_html =
+        templates::modal::render(&state.config, &page_state, modal_entry).into_string();
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 
     if let Some(results_html) = results_html {
-        events.push(Ok(
-            PatchElements::new(results_html).write_as_axum_sse_event()
-        ));
+        events.push(Ok(ExecuteScript::new(results_patch_script(
+            &results_html,
+            &target_public_url,
+        ))
+        .write_as_axum_sse_event()));
     }
 
-    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
-    events.push(Ok(
-        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
-    ));
+    events.push(Ok(ExecuteScript::new(modal_patch_script(
+        &modal_html,
+        &target_public_url,
+    ))
+    .write_as_axum_sse_event()));
 
-    let metadata = templates::layout::page_head_metadata(
-        &state,
-        &request,
-        &page_state,
-        &page_urls,
-        &snapshot,
-        results_content,
-        &entry,
-    );
+    if navigation.has_complete_metadata(&page_state, &search_result, &entry) {
+        let metadata = metadata::page_head_metadata(PageHeadMetadataInput {
+            state: &state,
+            request: &request,
+            page_state: &page_state,
+            page_urls: &page_urls,
+            snapshot,
+            content: results_content.metadata_content(),
+            entry: &entry,
+        });
 
-    events.push(Ok(
-        ExecuteScript::new(head_metadata_script(&metadata)).write_as_axum_sse_event()
-    ));
+        events.push(Ok(ExecuteScript::new(head_metadata_script(
+            &metadata,
+            Some(&target_public_url),
+        ))
+        .write_as_axum_sse_event()));
+    }
 
     Sse::new(stream::iter(events)).into_response()
 }
 
+struct GenerationChangeContent {
+    results_html: String,
+    modal_html: String,
+    metadata: PageMetadata,
+}
+
+struct GenerationChangeError {
+    message: String,
+}
+
+impl GenerationChangeError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+fn generation_change_response(
+    state: &AppState,
+    target_uri: &Uri,
+    target_public_url: &str,
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+) -> Response {
+    let content = match generation_change_content(state, target_uri, page_urls, snapshot) {
+        Ok(content) => content,
+        Err(error) => generation_change_error_content(state, page_urls, error),
+    };
+
+    generation_change_events_response(snapshot, content, target_public_url)
+}
+
+fn generation_change_content(
+    state: &AppState,
+    target_uri: &Uri,
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+) -> Result<GenerationChangeContent, GenerationChangeError> {
+    let request = page_request_from_public_uri(target_uri)
+        .map_err(|error| GenerationChangeError::new(error.to_string()))?;
+
+    let page_state = resolve_page_state(state, snapshot, &request)
+        .map_err(|error| GenerationChangeError::new(error.to_string()))?;
+
+    let search_result = if normalized_query(&request.query).is_some() {
+        let offset = search_offset(&request).map_err(GenerationChangeError::new)?;
+
+        Some(run_search_with_snapshot(
+            state,
+            snapshot,
+            &page_state,
+            offset,
+            DEFAULT_LIMIT,
+        ))
+    } else {
+        None
+    };
+
+    if let Some(Err(ServiceError::Resolution(error))) = &search_result {
+        return Err(GenerationChangeError::new(error.to_string()));
+    }
+
+    let search_error = search_error_message(&search_result);
+    let search_results_content =
+        results_content_for_search(&search_result, search_error.as_deref());
+    let entry_snapshot = page_state.detail.is_some().then_some(snapshot);
+    let entry = match load_entry_data_from_snapshot(state, &page_state, entry_snapshot) {
+        Ok(entry) => entry,
+        Err(error) => entry_data_for_load_error(&error),
+    };
+
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
+    } else {
+        search_results_content
+    };
+    let results_html = if direct_entry {
+        templates::results::render_entry(&state.config, &page_state, &entry).into_string()
+    } else {
+        render_navigation_results_html(state, &request, &page_state, snapshot, &search_result)
+    };
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
+    let modal_html =
+        templates::modal::render(&state.config, &page_state, modal_entry).into_string();
+    let metadata = metadata::page_head_metadata(PageHeadMetadataInput {
+        state,
+        request: &request,
+        page_state: &page_state,
+        page_urls,
+        snapshot,
+        content: results_content.metadata_content(),
+        entry: &entry,
+    });
+
+    Ok(GenerationChangeContent {
+        results_html,
+        modal_html,
+        metadata,
+    })
+}
+
+fn render_navigation_results_html(
+    state: &AppState,
+    request: &PageRequest,
+    page_state: &PageState,
+    snapshot: &ServedGenerationSnapshot,
+    search_result: &Option<ServiceResult<SearchResult>>,
+) -> String {
+    match search_result {
+        Some(Ok(result)) => {
+            templates::results::render(page_state, &result.hits, result.total, &state.config)
+                .into_string()
+        }
+        Some(Err(error)) => {
+            templates::results::render_status_error("Search failed", &format!("{error:#}"))
+                .into_string()
+        }
+        None => templates::home::render(state, request, page_state, snapshot).into_string(),
+    }
+}
+
+fn generation_change_error_content(
+    state: &AppState,
+    page_urls: &PageUrls,
+    error: GenerationChangeError,
+) -> GenerationChangeContent {
+    let message = error.message;
+    let results_html =
+        templates::results::render_status_error("Request failed", &message).into_string();
+    let modal_html = templates::modal::render_empty_container().into_string();
+    let metadata = metadata::noindex_head_metadata(
+        state.config.public_seo_enabled(),
+        page_urls,
+        "Request failed",
+        &message,
+    );
+
+    GenerationChangeContent {
+        results_html,
+        modal_html,
+        metadata,
+    }
+}
+
+fn generation_change_events_response(
+    snapshot: &ServedGenerationSnapshot,
+    content: GenerationChangeContent,
+    target_public_url: &str,
+) -> Response {
+    let event = ExecuteScript::new(generation_change_script(
+        &snapshot.manifest().generation_id,
+        &content.results_html,
+        &content.modal_html,
+        &content.metadata,
+        target_public_url,
+    ))
+    .write_as_axum_sse_event();
+
+    Sse::new(stream::iter([Ok::<Event, Infallible>(event)])).into_response()
+}
+
 struct StateEventsNavigation {
     patch_results: bool,
-    previous_state: Option<PageState>,
 }
 
 impl StateEventsNavigation {
-    fn is_modal_close(&self, next_state: &PageState) -> bool {
-        self.previous_state
-            .as_ref()
-            .is_some_and(|state| state.detail.is_some())
-            && next_state.detail.is_none()
+    fn needs_search_result(&self, next_state: &PageState) -> bool {
+        next_state.q.is_some() && (self.patch_results || next_state.detail.is_none())
     }
 
-    fn needs_search_result(&self, next_state: &PageState) -> bool {
-        next_state.q.is_some()
-            && (self.patch_results
-                || (next_state.detail.is_none() && !self.is_modal_close(next_state)))
+    fn has_complete_metadata(
+        &self,
+        next_state: &PageState,
+        search_result: &Option<ServiceResult<SearchResult>>,
+        entry: &EntryData,
+    ) -> bool {
+        if next_state.q.is_some()
+            && next_state.detail.is_none()
+            && search_result.is_none()
+            && matches!(entry, EntryData::Empty)
+        {
+            return false;
+        }
+
+        true
     }
 }
 
 fn state_events_navigation(
     state: &AppState,
     snapshot: &ServedGenerationSnapshot,
-    previous_url: Option<&str>,
+    previous_request: Option<&PageRequest>,
     next_state: &PageState,
 ) -> StateEventsNavigation {
-    let Some(previous_url) = previous_url.and_then(non_empty) else {
+    let Some(previous_request) = previous_request else {
         return StateEventsNavigation {
             patch_results: true,
-            previous_state: None,
         };
     };
 
-    match page_request_from_public_url(previous_url) {
-        Ok(previous_request) => {
-            let previous_state = match resolve_page_state(state, snapshot, &previous_request) {
-                Ok(previous_state) => previous_state,
-                Err(_) => {
-                    return StateEventsNavigation {
-                        patch_results: true,
-                        previous_state: None,
-                    };
-                }
-            };
-
+    match resolve_page_state(state, snapshot, previous_request) {
+        Ok(previous_state) => {
             let patch_results = previous_state.q != next_state.q
+                || previous_state.page != next_state.page
                 || previous_state.source_filter != next_state.source_filter
                 || previous_state.source_ref != next_state.source_ref
                 || previous_state.active_ref_set() != next_state.active_ref_set();
 
-            StateEventsNavigation {
-                patch_results,
-                previous_state: Some(previous_state),
-            }
+            StateEventsNavigation { patch_results }
         }
         Err(_) => StateEventsNavigation {
             patch_results: true,
-            previous_state: None,
         },
     }
 }
 
-fn search_offset(request: &PageRequest) -> usize {
-    let page = request.query.page.unwrap_or(1).max(1);
-    (page - 1) * DEFAULT_LIMIT
+fn search_offset(request: &PageRequest) -> std::result::Result<usize, String> {
+    let page = request.query.page.unwrap_or(1);
+    page.checked_sub(1)
+        .and_then(|page_index| page_index.checked_mul(DEFAULT_LIMIT))
+        .ok_or_else(|| "page offset overflow".to_owned())
 }
 
 fn search_error_message(search_result: &Option<ServiceResult<SearchResult>>) -> Option<String> {
@@ -335,24 +639,57 @@ fn results_content_for_search<'a>(
 
 pub async fn results_slice(
     State(state): State<AppState>,
-    Query(query): Query<SliceQuery>,
+    _headers: HeaderMap,
+    uri: Uri,
 ) -> Response {
-    let request = match page_request_from_public_url(&query.url) {
-        Ok(request) => request,
+    let query = match crate::request::slice_query_from_uri(&uri) {
+        Ok(query) => query,
         Err(error) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &error);
+            return json_error_response(StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
 
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .clamp(1, DEFAULT_LIMIT * 4);
-    let search_result = run_search(&state, &request, query.offset, limit);
+    let generation = RequestGeneration::reconcile(&state);
+    let snapshot = generation.snapshot();
+
+    if generation.client_generation_changed(query.generation_id.as_deref()) {
+        return generation.stale_json_response();
+    }
+
+    let uri = query.url;
+    let request = match page_request_from_public_uri(&uri) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+    };
+
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
+    if normalized_query(&request.query).is_none() {
+        return json_error_response(StatusCode::BAD_REQUEST, "result slice requires q");
+    }
+
+    let page_state = match resolve_page_state(&state, snapshot, &request) {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            return json_error_response(status_for_resolution_error(&error), &error.to_string());
+        }
+    };
+    let search_result =
+        run_search_with_snapshot(&state, snapshot, &page_state, query.offset, limit);
 
     match search_result {
         Ok(result) => {
             let count = result.hits.len();
+            let end_offset = match query.offset.checked_add(count) {
+                Some(end_offset) => end_offset,
+                None => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "result slice offset overflow",
+                    );
+                }
+            };
             let rows_html = templates::results::render_rows_only(
                 &request,
                 &result.hits,
@@ -365,7 +702,7 @@ pub async fn results_slice(
                 "offset": query.offset,
                 "limit": limit,
                 "count": count,
-                "endOffset": query.offset + count,
+                "endOffset": end_offset,
             }))
             .into_response()
         }
@@ -378,12 +715,13 @@ fn render_full_page_response(
     page_urls: PageUrls,
     request: PageRequest,
 ) -> Response {
-    let snapshot = state.search.snapshot();
+    let generation = RequestGeneration::reconcile(state);
+    let snapshot = generation.snapshot();
 
-    let page_state = match resolve_page_state(state, &snapshot, &request) {
+    let page_state = match resolve_page_state(state, snapshot, &request) {
         Ok(page_state) => page_state,
         Err(error) => {
-            return render_full_page_error_response(state, page_urls, &snapshot, &request, &error);
+            return render_full_page_error_response(state, page_urls, snapshot, &request, &error);
         }
     };
 
@@ -391,11 +729,16 @@ fn render_full_page_response(
     let needs_entry = page_state.detail.is_some();
 
     let search_result = if needs_search {
+        let offset = match search_offset(&request) {
+            Ok(offset) => offset,
+            Err(error) => return render_parse_error_response(state, page_urls, &error),
+        };
+
         Some(run_search_with_snapshot(
             state,
-            &snapshot,
+            snapshot,
             &page_state,
-            search_offset(&request),
+            offset,
             DEFAULT_LIMIT,
         ))
     } else {
@@ -403,16 +746,17 @@ fn render_full_page_response(
     };
 
     let search_error = search_error_message(&search_result);
-    let results_content = results_content_for_search(&search_result, search_error.as_deref());
+    let search_results_content =
+        results_content_for_search(&search_result, search_error.as_deref());
 
     let entry =
-        match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(&snapshot)) {
+        match load_entry_data_from_snapshot(state, &page_state, needs_entry.then_some(snapshot)) {
             Ok(entry) => entry,
             Err(error) => {
                 return render_full_page_with_entry_error_response(
                     state,
                     page_urls,
-                    &snapshot,
+                    snapshot,
                     &request,
                     &page_state,
                     &search_result,
@@ -421,15 +765,29 @@ fn render_full_page_response(
             }
         };
 
-    let markup = templates::layout::render_full_page(
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
+    } else {
+        search_results_content
+    };
+
+    let initial_return_metadata = if direct_entry {
+        None
+    } else {
+        initial_return_metadata(state, &page_urls, snapshot, &page_state, results_content)
+    };
+
+    let markup = templates::layout::render_full_page(templates::layout::FullPageRender {
         state,
-        &request,
-        &page_state,
-        &page_urls,
-        &snapshot,
+        request: &request,
+        page_state: &page_state,
+        page_urls: &page_urls,
+        served_generation: snapshot,
         results_content,
-        &entry,
-    );
+        entry: &entry,
+        initial_return_metadata: initial_return_metadata.as_ref(),
+    });
 
     Html(markup.into_string()).into_response()
 }
@@ -444,18 +802,19 @@ fn render_full_page_error_response(
     let page_state = page_state(&state.config, request);
     let message = error.to_string();
 
-    let markup = templates::layout::render_full_page(
+    let markup = templates::layout::render_full_page(templates::layout::FullPageRender {
         state,
         request,
-        &page_state,
-        &page_urls,
-        snapshot,
-        ResultsContent::Error {
+        page_state: &page_state,
+        page_urls: &page_urls,
+        served_generation: snapshot,
+        results_content: ResultsContent::Error {
             title: "Page unavailable",
             message: &message,
         },
-        &EntryData::Empty,
-    );
+        entry: &EntryData::Empty,
+        initial_return_metadata: None,
+    });
 
     (
         status_for_resolution_error(error),
@@ -464,10 +823,31 @@ fn render_full_page_error_response(
         .into_response()
 }
 
+fn render_parse_error_response(state: &AppState, page_urls: PageUrls, message: &str) -> Response {
+    let snapshot = state.search.snapshot();
+    let request = PageRequest::default();
+    let page_state = page_state(&state.config, &request);
+
+    let markup = templates::layout::render_full_page(templates::layout::FullPageRender {
+        state,
+        request: &request,
+        page_state: &page_state,
+        page_urls: &page_urls,
+        served_generation: &snapshot,
+        results_content: ResultsContent::Error {
+            title: "Bad request",
+            message,
+        },
+        entry: &EntryData::Empty,
+        initial_return_metadata: None,
+    });
+
+    (StatusCode::BAD_REQUEST, Html(markup.into_string())).into_response()
+}
+
 #[derive(Debug)]
 enum EntryLoadError {
     NotFound { entry: String },
-    InvalidKind(String),
     IndexUnavailable,
     Lookup(ServiceError),
 }
@@ -476,7 +856,6 @@ impl EntryLoadError {
     fn status(&self) -> StatusCode {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
-            Self::InvalidKind(_) => StatusCode::BAD_REQUEST,
             Self::IndexUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Lookup(error) => status_for_service_error(error),
         }
@@ -485,7 +864,6 @@ impl EntryLoadError {
     fn message(&self) -> String {
         match self {
             Self::NotFound { entry } => format!("Entry {entry:?} was not found."),
-            Self::InvalidKind(error) => error.clone(),
             Self::IndexUnavailable => "search index was not opened".to_owned(),
             Self::Lookup(error) => format!("{error:#}"),
         }
@@ -502,18 +880,32 @@ fn render_full_page_with_entry_error_response(
     error: &EntryLoadError,
 ) -> Response {
     let search_error = search_error_message(search_result);
-    let results_content = results_content_for_search(search_result, search_error.as_deref());
+    let search_results_content = results_content_for_search(search_result, search_error.as_deref());
     let entry = entry_data_for_load_error(error);
 
-    let markup = templates::layout::render_full_page(
+    let direct_entry = request.is_direct_entry();
+    let results_content = if direct_entry {
+        ResultsContent::DirectEntry(&entry)
+    } else {
+        search_results_content
+    };
+
+    let initial_return_metadata = if direct_entry {
+        None
+    } else {
+        initial_return_metadata(state, &page_urls, snapshot, page_state, results_content)
+    };
+
+    let markup = templates::layout::render_full_page(templates::layout::FullPageRender {
         state,
         request,
         page_state,
-        &page_urls,
-        snapshot,
+        page_urls: &page_urls,
+        served_generation: snapshot,
         results_content,
-        &entry,
-    );
+        entry: &entry,
+        initial_return_metadata: initial_return_metadata.as_ref(),
+    });
 
     (error.status(), Html(markup.into_string())).into_response()
 }
@@ -523,10 +915,46 @@ fn entry_data_for_load_error(error: &EntryLoadError) -> EntryData {
         EntryLoadError::NotFound { entry } => EntryData::NotFound {
             entry: entry.clone(),
         },
-        EntryLoadError::InvalidKind(_)
-        | EntryLoadError::IndexUnavailable
-        | EntryLoadError::Lookup(_) => EntryData::Error(error.message()),
+        EntryLoadError::IndexUnavailable | EntryLoadError::Lookup(_) => {
+            EntryData::Error(error.message())
+        }
     }
+}
+
+fn initial_return_metadata(
+    state: &AppState,
+    page_urls: &PageUrls,
+    snapshot: &ServedGenerationSnapshot,
+    page_state: &PageState,
+    results_content: ResultsContent<'_>,
+) -> Option<InitialReturnMetadata> {
+    page_state.detail.as_ref()?;
+
+    let close_url = close_url_for_state(&state.config, page_state);
+    let close_uri = public_uri(&close_url).ok()?;
+    let close_request = page_request_from_public_uri(&close_uri).ok()?;
+    let close_state = resolve_page_state(state, snapshot, &close_request).ok()?;
+    let close_path = public_path_and_query(&close_uri);
+    let close_page_urls = PageUrls {
+        current_url: page_urls.absolute_url(&close_path),
+        image_url: page_urls.image_url.clone(),
+        origin: page_urls.origin.clone(),
+    };
+
+    let metadata = metadata::page_head_metadata(PageHeadMetadataInput {
+        state,
+        request: &close_request,
+        page_state: &close_state,
+        page_urls: &close_page_urls,
+        snapshot,
+        content: results_content.metadata_content(),
+        entry: &EntryData::Empty,
+    });
+
+    Some(InitialReturnMetadata {
+        metadata,
+        url: close_path,
+    })
 }
 
 fn resolve_page_state(
@@ -550,7 +978,7 @@ fn validate_page_request(
 
     match &page_state.source_filter {
         SourceFilter::All => {
-            let all_source_ref = if request.entry.is_some() {
+            let all_source_ref = if matches!(&request.route, PublicRoute::Entry { .. }) {
                 None
             } else {
                 raw_ref
@@ -570,9 +998,7 @@ fn validate_page_request(
         }
     }
 
-    if request.entry.is_some()
-        && let Some(source) = request.source.as_deref()
-    {
+    if let PublicRoute::Entry { source, .. } = &request.route {
         let entry_ref_set = if page_state.source_filter == SourceFilter::All {
             page_state.active_ref_set()
         } else {
@@ -608,14 +1034,32 @@ fn status_for_resolution_error(error: &RequestResolutionError) -> StatusCode {
     }
 }
 
-fn sse_error_response(page_urls: &PageUrls, error: &str) -> Response {
-    let html = templates::results::render_error("Request failed", error).into_string();
-    let metadata = templates::layout::noindex_head_metadata(page_urls, "Request failed", error);
+fn sse_error_response(
+    public_seo_enabled: bool,
+    page_urls: &PageUrls,
+    error: &str,
+    target_public_url: Option<&str>,
+) -> Response {
+    let html = templates::results::render_status_error("Request failed", error).into_string();
+    let metadata =
+        metadata::noindex_head_metadata(public_seo_enabled, page_urls, "Request failed", error);
 
-    let events: Vec<std::result::Result<Event, Infallible>> = vec![
-        Ok(PatchElements::new(html).write_as_axum_sse_event()),
-        Ok(ExecuteScript::new(head_metadata_script(&metadata)).write_as_axum_sse_event()),
-    ];
+    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+
+    if let Some(target_public_url) = target_public_url {
+        events.push(Ok(ExecuteScript::new(results_patch_script(
+            &html,
+            target_public_url,
+        ))
+        .write_as_axum_sse_event()));
+        events.push(Ok(ExecuteScript::new(head_metadata_script(
+            &metadata,
+            Some(target_public_url),
+        ))
+        .write_as_axum_sse_event()));
+    } else {
+        events.push(Ok(PatchElements::new(html).write_as_axum_sse_event()));
+    }
 
     Sse::new(stream::iter(events)).into_response()
 }
@@ -628,39 +1072,58 @@ struct SseEntryErrorContext<'a> {
     snapshot: &'a ServedGenerationSnapshot,
     results_html: Option<String>,
     results_content: ResultsContent<'a>,
+    target_public_url: &'a str,
 }
 
 fn sse_entry_error_response(context: SseEntryErrorContext<'_>, error: &EntryLoadError) -> Response {
     let entry = entry_data_for_load_error(error);
+    let direct_entry = context.request.is_direct_entry();
+    let empty_entry = EntryData::Empty;
+    let modal_entry = if direct_entry { &empty_entry } else { &entry };
     let modal_html =
-        templates::modal::render(&context.state.config, context.page_state, &entry).into_string();
-    let metadata = templates::layout::page_head_metadata(
-        context.state,
-        context.request,
-        context.page_state,
-        context.page_urls,
-        context.snapshot,
-        context.results_content,
-        &entry,
-    );
+        templates::modal::render(&context.state.config, context.page_state, modal_entry)
+            .into_string();
+    let metadata = metadata::page_head_metadata(PageHeadMetadataInput {
+        state: context.state,
+        request: context.request,
+        page_state: context.page_state,
+        page_urls: context.page_urls,
+        snapshot: context.snapshot,
+        content: context.results_content.metadata_content(),
+        entry: &entry,
+    });
 
     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
 
-    if let Some(results_html) = context.results_html {
-        events.push(Ok(
-            PatchElements::new(results_html).write_as_axum_sse_event()
-        ));
+    if direct_entry {
+        let results_html =
+            templates::results::render_entry(&context.state.config, context.page_state, &entry)
+                .into_string();
+        events.push(Ok(ExecuteScript::new(results_patch_script(
+            &results_html,
+            context.target_public_url,
+        ))
+        .write_as_axum_sse_event()));
+    } else if let Some(results_html) = context.results_html {
+        events.push(Ok(ExecuteScript::new(results_patch_script(
+            &results_html,
+            context.target_public_url,
+        ))
+        .write_as_axum_sse_event()));
     }
 
-    events.push(Ok(PatchElements::new(modal_html).write_as_axum_sse_event()));
-    events.push(Ok(
-        ExecuteScript::new(dialog_reconcile_script()).write_as_axum_sse_event()
-    ));
-    events.push(Ok(
-        ExecuteScript::new(head_metadata_script(&metadata)).write_as_axum_sse_event()
-    ));
+    events.push(Ok(ExecuteScript::new(modal_patch_script(
+        &modal_html,
+        context.target_public_url,
+    ))
+    .write_as_axum_sse_event()));
+    events.push(Ok(ExecuteScript::new(head_metadata_script(
+        &metadata,
+        Some(context.target_public_url),
+    ))
+    .write_as_axum_sse_event()));
 
-    (error.status(), Sse::new(stream::iter(events))).into_response()
+    Sse::new(stream::iter(events)).into_response()
 }
 
 fn json_error_response(status: StatusCode, error: &str) -> Response {
@@ -696,40 +1159,53 @@ fn load_entry_data_from_snapshot(
             })
         });
 
-    let kind = parse_document_kind(detail.kind.as_deref()).map_err(EntryLoadError::InvalidKind)?;
-
-    match state.search.find_entry_with_snapshot(
-        snapshot,
-        EntryRequest {
-            source: detail.source.clone(),
-            ref_id: lookup_ref.map(ToOwned::to_owned),
-            name: detail.entry.clone(),
-            kind,
-        },
-    ) {
-        Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(document)),
-        Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
-            entry: detail.entry.clone(),
-        }),
-        Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(documents)),
-        Err(error) => Err(EntryLoadError::Lookup(error)),
-    }
-}
-
-fn run_search(
-    state: &AppState,
-    request: &PageRequest,
-    offset: usize,
-    limit: usize,
-) -> ServiceResult<SearchResult> {
-    let snapshot = state.search.snapshot();
-    let page_state = resolve_page_state(state, &snapshot, request)?;
-
-    if page_state.q.is_none() {
-        return Ok(empty_search_result());
+    let entry_request = EntryRequest {
+        source: detail.source.clone(),
+        ref_id: lookup_ref.map(ToOwned::to_owned),
+        name: detail.entry.clone(),
     };
 
-    run_search_with_snapshot(state, &snapshot, &page_state, offset, limit)
+    let facts = state
+        .search
+        .entry_facts_with_snapshot(snapshot, entry_request.clone())
+        .map_err(EntryLoadError::Lookup)?;
+
+    match facts.status() {
+        EntryFactsStatus::NotFound => Err(EntryLoadError::NotFound {
+            entry: detail.entry.clone(),
+        }),
+        EntryFactsStatus::Unique => {
+            let representative = facts
+                .representative
+                .as_ref()
+                .ok_or(EntryLoadError::IndexUnavailable)?;
+
+            Ok(EntryData::Found(AnnotatedEntryDocument::from_facts(
+                representative.document.clone(),
+                &facts,
+            )))
+        }
+        EntryFactsStatus::Ambiguous => {
+            match state
+                .search
+                .find_entry_with_facts_with_snapshot(snapshot, entry_request, &facts)
+            {
+                Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(
+                    documents
+                        .into_iter()
+                        .map(|document| AnnotatedEntryDocument::from_facts(document, &facts))
+                        .collect(),
+                )),
+                Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(
+                    AnnotatedEntryDocument::from_facts(*document, &facts),
+                )),
+                Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
+                    entry: detail.entry.clone(),
+                }),
+                Err(error) => Err(EntryLoadError::Lookup(error)),
+            }
+        }
+    }
 }
 
 fn empty_search_result() -> SearchResult {
@@ -797,21 +1273,17 @@ mod tests {
                 source: "fixtures".to_owned(),
                 entry: "programs.git.enable".to_owned(),
                 ref_id: None,
-                kind: None,
             }),
         }
     }
 
-    fn navigation(patch_results: bool, previous_state: Option<PageState>) -> StateEventsNavigation {
-        StateEventsNavigation {
-            patch_results,
-            previous_state,
-        }
+    fn navigation(patch_results: bool) -> StateEventsNavigation {
+        StateEventsNavigation { patch_results }
     }
 
     #[test]
     fn state_events_search_needed_when_results_are_patched() {
-        let navigation = navigation(true, Some(page_state(Some("git"), false)));
+        let navigation = navigation(true);
 
         assert!(navigation.needs_search_result(&page_state(Some("git"), true)));
         assert!(navigation.needs_search_result(&page_state(Some("git"), false)));
@@ -819,35 +1291,22 @@ mod tests {
 
     #[test]
     fn state_events_search_needed_for_query_metadata_without_entry() {
-        assert!(navigation(false, None).needs_search_result(&page_state(Some("git"), false)));
-        assert!(
-            navigation(false, Some(page_state(Some("git"), false)))
-                .needs_search_result(&page_state(Some("git"), false))
-        );
+        assert!(navigation(false).needs_search_result(&page_state(Some("git"), false)));
     }
 
     #[test]
     fn state_events_search_skipped_for_modal_only_entry_navigation() {
-        assert!(
-            !navigation(false, Some(page_state(Some("git"), false)))
-                .needs_search_result(&page_state(Some("git"), true))
-        );
+        assert!(!navigation(false).needs_search_result(&page_state(Some("git"), true)));
     }
 
     #[test]
-    fn state_events_search_skipped_for_modal_close_navigation() {
-        assert!(
-            !navigation(false, Some(page_state(Some("git"), true)))
-                .needs_search_result(&page_state(Some("git"), false))
-        );
+    fn state_events_search_needed_for_modal_close_metadata() {
+        assert!(navigation(false).needs_search_result(&page_state(Some("git"), false)));
     }
 
     #[test]
     fn state_events_search_skipped_without_query() {
-        assert!(!navigation(true, None).needs_search_result(&page_state(None, false)));
-        assert!(
-            !navigation(false, Some(page_state(None, true)))
-                .needs_search_result(&page_state(None, true))
-        );
+        assert!(!navigation(true).needs_search_result(&page_state(None, false)));
+        assert!(!navigation(false).needs_search_result(&page_state(None, true)));
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IndexFields {
@@ -9,6 +9,7 @@ pub(crate) struct IndexFields {
     pub(crate) source: Field,
     pub(crate) ref_id: Field,
     pub(crate) kind: Field,
+    pub(crate) entry_unique_within_kind: Field,
     pub(crate) name_exact: Field,
     pub(crate) name_text: Field,
     pub(crate) name_root: Field,
@@ -24,6 +25,7 @@ pub(crate) struct IndexFields {
     pub(crate) package_set: Field,
     pub(crate) platforms: Field,
     pub(crate) main_program: Field,
+    pub(crate) programs: Field,
 }
 
 impl IndexFields {
@@ -33,6 +35,9 @@ impl IndexFields {
             source: schema.get_field("source").context("missing field source")?,
             ref_id: schema.get_field("ref").context("missing field ref")?,
             kind: schema.get_field("kind").context("missing field kind")?,
+            entry_unique_within_kind: schema
+                .get_field("entry_unique_within_kind")
+                .context("missing field entry_unique_within_kind")?,
             name_exact: schema
                 .get_field("name_exact")
                 .context("missing field name_exact")?,
@@ -78,6 +83,9 @@ impl IndexFields {
             main_program: schema
                 .get_field("main_program")
                 .context("missing field main_program")?,
+            programs: schema
+                .get_field("programs")
+                .context("missing field programs")?,
         })
     }
 }
@@ -89,6 +97,7 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_text_field("source", STRING | STORED);
     builder.add_text_field("ref", STRING | STORED);
     builder.add_text_field("kind", STRING | STORED);
+    builder.add_bool_field("entry_unique_within_kind", STORED);
 
     builder.add_text_field("name_exact", STRING | STORED);
     builder.add_text_field("name_text", TEXT | STORED);
@@ -105,6 +114,7 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_text_field("package_set", STRING | STORED);
     builder.add_text_field("platforms", STRING | STORED);
     builder.add_text_field("main_program", STRING | STORED);
+    builder.add_text_field("programs", STRING | STORED);
 
     builder.add_text_field("stored_json", STORED);
 

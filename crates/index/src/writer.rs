@@ -4,6 +4,7 @@ use tantivy::{IndexWriter, doc};
 
 use nixsearch_core::document::{CommonDoc, OptionDoc, PackageDoc, SearchDocument};
 
+use crate::annotation::SearchHitAnnotation;
 use crate::schema::IndexFields;
 
 pub struct SearchIndexWriter {
@@ -12,10 +13,19 @@ pub struct SearchIndexWriter {
 }
 
 impl SearchIndexWriter {
-    pub fn add_document(&mut self, document: &SearchDocument) -> Result<()> {
+    pub fn add_document(
+        &mut self,
+        document: &SearchDocument,
+        annotation: &SearchHitAnnotation,
+    ) -> Result<()> {
+        document
+            .validate_identity()
+            .map_err(anyhow::Error::msg)
+            .context("invalid search document identity")?;
+
         match document {
-            SearchDocument::Option(option) => self.add_option(option),
-            SearchDocument::Package(package) => self.add_package(package),
+            SearchDocument::Option(option) => self.add_option(option, annotation),
+            SearchDocument::Package(package) => self.add_package(package, annotation),
         }
     }
 
@@ -26,7 +36,7 @@ impl SearchIndexWriter {
         Ok(())
     }
 
-    fn add_option(&mut self, option: &OptionDoc) -> Result<()> {
+    fn add_option(&mut self, option: &OptionDoc, annotation: &SearchHitAnnotation) -> Result<()> {
         let common = &option.common;
         let stored_json = serde_json::to_string(&SearchDocument::Option(option.clone()))
             .context("failed to serialize search document")?;
@@ -36,6 +46,7 @@ impl SearchIndexWriter {
             self.fields.source => common.source.clone(),
             self.fields.ref_id => common.ref_id.clone(),
             self.fields.kind => common.kind.as_str(),
+            self.fields.entry_unique_within_kind => annotation.unique_within_kind,
             self.fields.name_exact => common.name.clone(),
             self.fields.name_text => common.name.clone(),
             self.fields.stored_json => stored_json,
@@ -66,7 +77,11 @@ impl SearchIndexWriter {
         Ok(())
     }
 
-    fn add_package(&mut self, package: &PackageDoc) -> Result<()> {
+    fn add_package(
+        &mut self,
+        package: &PackageDoc,
+        annotation: &SearchHitAnnotation,
+    ) -> Result<()> {
         let common = &package.common;
         let stored_json = serde_json::to_string(&SearchDocument::Package(package.clone()))
             .context("failed to serialize search document")?;
@@ -76,6 +91,7 @@ impl SearchIndexWriter {
             self.fields.source => common.source.clone(),
             self.fields.ref_id => common.ref_id.clone(),
             self.fields.kind => common.kind.as_str(),
+            self.fields.entry_unique_within_kind => annotation.unique_within_kind,
             self.fields.name_exact => common.name.clone(),
             self.fields.name_text => common.name.clone(),
             self.fields.attribute_exact => package.attribute.clone(),
@@ -95,6 +111,10 @@ impl SearchIndexWriter {
 
         if let Some(main_program) = &package.main_program {
             document.add_text(self.fields.main_program, main_program);
+        }
+
+        for program in &package.programs {
+            document.add_text(self.fields.programs, program);
         }
 
         for platform in &package.platforms {

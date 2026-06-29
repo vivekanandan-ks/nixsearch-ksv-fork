@@ -1,21 +1,26 @@
 use std::collections::HashSet;
 use std::fs;
+use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use tantivy::collector::{Count, TopDocs};
-use tantivy::schema::{TantivyDocument, Value as _};
-use tantivy::{DocAddress, Index, IndexReader, Searcher};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value as _};
+use tantivy::{DocAddress, Index, IndexReader, ReloadPolicy, Searcher, Term};
 
-use nixsearch_core::document::{DocumentKind, SearchDocument};
+use nixsearch_core::document::{DocumentKind, IndexedEntryKind, SearchDocument};
 
+use crate::annotation::SearchHitAnnotation;
 use crate::ranking::{QueryAnalysis, SearchCandidate, rerank_candidate_limit, rerank_candidates};
 use crate::schema::{IndexFields, build_schema};
 use crate::writer::SearchIndexWriter;
 
+const INDEX_DOCUMENT_SCAN_BATCH_SIZE: usize = 1024;
+
 pub struct SearchIndex {
     pub(crate) index: Index,
-    reader: IndexReader,
+    reader: OnceLock<IndexReader>,
     pub(crate) fields: IndexFields,
 }
 
@@ -23,6 +28,13 @@ pub struct SearchIndex {
 pub struct SearchHit {
     pub score: f32,
     pub document: SearchDocument,
+    pub annotation: SearchHitAnnotation,
+}
+
+#[derive(Debug, Clone)]
+struct StoredSearchDocument {
+    document: SearchDocument,
+    annotation: SearchHitAnnotation,
 }
 
 #[derive(Debug, Clone)]
@@ -31,10 +43,17 @@ pub struct SearchResult {
     pub total: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexedSearchDocument {
+    pub document: SearchDocument,
+    pub annotation: SearchHitAnnotation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchScope {
     pub source: String,
     pub ref_id: String,
+    pub entry_kind: IndexedEntryKind,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,8 +68,8 @@ pub struct SearchOptions {
 pub struct EntryLookup {
     pub source: String,
     pub ref_id: String,
+    pub entry_kind: IndexedEntryKind,
     pub name: String,
-    pub kind: Option<DocumentKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +77,77 @@ pub enum EntryLookupResult {
     Found(Box<SearchDocument>),
     NotFound,
     Ambiguous(Vec<SearchDocument>),
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryRepresentative {
+    pub document: SearchDocument,
+    pub seo_eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryFactsStatus {
+    NotFound,
+    Unique,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryFacts {
+    pub source: String,
+    pub ref_id: String,
+    pub name: String,
+    pub entry_kind: IndexedEntryKind,
+    pub count: usize,
+    pub representative: Option<EntryRepresentative>,
+}
+
+impl EntryFacts {
+    pub fn not_found_for_lookup(lookup: &EntryLookup) -> Self {
+        Self {
+            source: lookup.source.clone(),
+            ref_id: lookup.ref_id.clone(),
+            name: lookup.name.clone(),
+            entry_kind: lookup.entry_kind,
+            count: 0,
+            representative: None,
+        }
+    }
+
+    pub fn count_for_kind(&self, kind: &DocumentKind) -> usize {
+        if IndexedEntryKind::from_document_kind(kind) == Some(self.entry_kind) {
+            self.count
+        } else {
+            0
+        }
+    }
+
+    pub fn status(&self) -> EntryFactsStatus {
+        match self.count {
+            0 => EntryFactsStatus::NotFound,
+            1 => EntryFactsStatus::Unique,
+            _ => EntryFactsStatus::Ambiguous,
+        }
+    }
+
+    pub fn seo_eligible(&self) -> Option<bool> {
+        self.representative
+            .as_ref()
+            .map(|representative| representative.seo_eligible)
+    }
+
+    pub fn annotation_for_document(&self, document: &SearchDocument) -> SearchHitAnnotation {
+        SearchHitAnnotation {
+            unique_within_kind: self.count_for_kind(document.kind()) == 1,
+        }
+    }
+
+    fn matches_lookup(&self, lookup: &EntryLookup) -> bool {
+        self.source == lookup.source
+            && self.ref_id == lookup.ref_id
+            && self.name == lookup.name
+            && self.entry_kind == lookup.entry_kind
+    }
 }
 
 impl SearchIndex {
@@ -76,11 +166,9 @@ impl SearchIndex {
         let fields = IndexFields::from_schema(&schema)?;
         let index = Index::create_in_dir(path, schema)
             .with_context(|| format!("failed to create Tantivy index at {path}"))?;
-        let reader = index.reader().context("failed to create index reader")?;
-
         Ok(Self {
             index,
-            reader,
+            reader: OnceLock::new(),
             fields,
         })
     }
@@ -91,13 +179,30 @@ impl SearchIndex {
             .with_context(|| format!("failed to open Tantivy index at {path}"))?;
         let schema = index.schema();
         let fields = IndexFields::from_schema(&schema)?;
-        let reader = index.reader().context("failed to create index reader")?;
-
         Ok(Self {
             index,
-            reader,
+            reader: OnceLock::new(),
             fields,
         })
+    }
+
+    fn reader(&self) -> Result<&IndexReader> {
+        if let Some(reader) = self.reader.get() {
+            return Ok(reader);
+        }
+
+        let reader = self
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .context("failed to create index reader")?;
+        let _ = self.reader.set(reader);
+
+        Ok(self
+            .reader
+            .get()
+            .expect("index reader should be initialized"))
     }
 
     pub fn writer(&self) -> Result<SearchIndexWriter> {
@@ -113,7 +218,7 @@ impl SearchIndex {
     }
 
     pub fn search(&self, options: SearchOptions) -> Result<SearchResult> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         let candidate_limit = rerank_candidate_limit(options.limit, options.offset);
         let diversify_sources = options.scopes.len() > 1;
         let analysis = QueryAnalysis::new(&self.index, self.fields.name_text, &options.query)?;
@@ -197,9 +302,11 @@ impl SearchIndex {
         let mut candidates = Vec::with_capacity(top_docs.len());
 
         for (score, address) in top_docs {
+            let stored = self.stored_document_at_with_searcher(searcher, address)?;
             candidates.push(SearchCandidate {
                 score,
-                document: self.document_at_with_searcher(searcher, address)?,
+                document: stored.document,
+                annotation: stored.annotation,
             });
         }
 
@@ -231,9 +338,11 @@ impl SearchIndex {
         let mut hits = Vec::with_capacity(top_docs.len());
 
         for (score, address) in top_docs {
+            let stored = self.stored_document_at_with_searcher(searcher, address)?;
             hits.push(SearchHit {
                 score,
-                document: self.document_at_with_searcher(searcher, address)?,
+                document: stored.document,
+                annotation: stored.annotation,
             });
         }
 
@@ -286,7 +395,8 @@ impl SearchIndex {
             native_offset += top_docs.len();
 
             for (score, address) in top_docs {
-                let document = self.document_at_with_searcher(searcher, address)?;
+                let stored = self.stored_document_at_with_searcher(searcher, address)?;
+                let document = stored.document;
 
                 if excluded_ids.contains(document.id()) {
                     continue;
@@ -297,7 +407,11 @@ impl SearchIndex {
                     continue;
                 }
 
-                hits.push(SearchHit { score, document });
+                hits.push(SearchHit {
+                    score,
+                    document,
+                    annotation: stored.annotation,
+                });
 
                 if hits.len() == limit {
                     break;
@@ -309,7 +423,7 @@ impl SearchIndex {
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<SearchDocument>> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
 
         let query = tantivy::query::TermQuery::new(
             tantivy::Term::from_field_text(self.fields.id, id),
@@ -328,63 +442,230 @@ impl SearchIndex {
     }
 
     pub fn find_entry(&self, lookup: EntryLookup) -> Result<EntryLookupResult> {
-        let searcher = self.reader.searcher();
+        let facts = self.entry_facts(lookup.clone())?;
 
-        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.source, &lookup.source),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.ref_id, &lookup.ref_id),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-            (
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.name_exact, &lookup.name),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ),
-        ];
+        self.find_entry_with_facts(lookup, &facts)
+    }
 
-        if let Some(kind) = lookup.kind {
-            clauses.push((
-                tantivy::query::Occur::Must,
-                Box::new(tantivy::query::TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.kind, kind.as_str()),
-                    tantivy::schema::IndexRecordOption::Basic,
-                )),
-            ));
+    pub fn find_entry_with_facts(
+        &self,
+        lookup: EntryLookup,
+        facts: &EntryFacts,
+    ) -> Result<EntryLookupResult> {
+        if !facts.matches_lookup(&lookup) {
+            bail!("entry facts identity does not match entry lookup");
         }
 
-        let query = tantivy::query::BooleanQuery::new(clauses);
+        match facts.status() {
+            EntryFactsStatus::NotFound => Ok(EntryLookupResult::NotFound),
+            EntryFactsStatus::Unique => {
+                let representative = facts
+                    .representative
+                    .as_ref()
+                    .context("unique entry facts did not include representative")?;
+
+                Ok(EntryLookupResult::Found(Box::new(
+                    representative.document.clone(),
+                )))
+            }
+            EntryFactsStatus::Ambiguous => {
+                let searcher = self.reader()?.searcher();
+                let documents = self.ambiguous_entry_documents(&searcher, &lookup, facts.count)?;
+
+                Ok(EntryLookupResult::Ambiguous(documents))
+            }
+        }
+    }
+
+    pub fn entry_facts(&self, lookup: EntryLookup) -> Result<EntryFacts> {
+        let searcher = self.reader()?.searcher();
+
+        let mut facts = EntryFacts::not_found_for_lookup(&lookup);
+        let count = self.count_exact_entry_kind(&searcher, &lookup)?;
+        facts.count = count;
+
+        if count == 1 {
+            let document = self.exact_entry_representative(&searcher, &lookup)?;
+            let seo_eligible = document.is_seo_eligible_entry();
+
+            facts.representative = Some(EntryRepresentative {
+                document,
+                seo_eligible,
+            });
+        }
+
+        Ok(facts)
+    }
+
+    pub fn try_for_each_supported_indexed_entry_document(
+        &self,
+        mut visit: impl FnMut(&SearchDocument) -> Result<()>,
+    ) -> Result<()> {
+        let searcher = self.reader()?.searcher();
+        let count = searcher
+            .search(&AllQuery, &Count)
+            .context("failed to count indexed documents")?;
+        let mut offset = 0;
+
+        while offset < count {
+            let limit = (count - offset).min(INDEX_DOCUMENT_SCAN_BATCH_SIZE);
+            let top_docs = searcher
+                .search(
+                    &AllQuery,
+                    &TopDocs::with_limit(limit)
+                        .and_offset(offset)
+                        .order_by_score(),
+                )
+                .context("failed to retrieve indexed documents")?;
+
+            if top_docs.is_empty() {
+                bail!("indexed document scan returned no documents before reaching counted total");
+            }
+
+            offset += top_docs.len();
+
+            for (_, address) in top_docs {
+                let document = self.document_at_with_searcher(&searcher, address)?;
+
+                if document.kind().is_supported_indexed_entry() {
+                    visit(&document)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn scan_indexed_documents(&self) -> Result<Vec<IndexedSearchDocument>> {
+        let searcher = self.reader()?.searcher();
+        let count = searcher
+            .search(&AllQuery, &Count)
+            .context("failed to count indexed documents")?;
+        let mut offset = 0;
+        let mut documents = Vec::with_capacity(count);
+
+        while offset < count {
+            let limit = (count - offset).min(INDEX_DOCUMENT_SCAN_BATCH_SIZE);
+            let top_docs = searcher
+                .search(
+                    &AllQuery,
+                    &TopDocs::with_limit(limit)
+                        .and_offset(offset)
+                        .order_by_score(),
+                )
+                .context("failed to retrieve indexed documents")?;
+
+            if top_docs.is_empty() {
+                bail!("indexed document scan returned no documents before reaching counted total");
+            }
+
+            offset += top_docs.len();
+
+            for (_, address) in top_docs {
+                documents.push(self.indexed_document_at_with_searcher(&searcher, address)?);
+            }
+        }
+
+        Ok(documents)
+    }
+
+    fn count_exact_entry_kind(&self, searcher: &Searcher, lookup: &EntryLookup) -> Result<usize> {
+        let kind = lookup.entry_kind.document_kind();
+        let query = self.exact_entry_kind_query(lookup);
+
+        searcher
+            .search(&*query, &Count)
+            .with_context(|| format!("failed to count exact {} entry facts", kind.as_str()))
+    }
+
+    fn exact_entry_representative(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+    ) -> Result<SearchDocument> {
+        let kind = lookup.entry_kind.document_kind();
+        let query = self.exact_entry_kind_query(lookup);
+        let top_docs = searcher
+            .search(&*query, &TopDocs::with_limit(1).order_by_score())
+            .with_context(|| {
+                format!(
+                    "failed to retrieve unique exact {} entry representative",
+                    kind.as_str()
+                )
+            })?;
+
+        let Some((_, address)) = top_docs.into_iter().next() else {
+            bail!(
+                "exact {} entry count was one but representative was not found",
+                kind.as_str()
+            );
+        };
+
+        let document = self.document_at_with_searcher(searcher, address)?;
+
+        if !document_deserialized_as_kind(&document, &kind) {
+            bail!(
+                "unique exact {} entry representative deserialized as {}",
+                kind.as_str(),
+                document_variant_name(&document)
+            );
+        }
+
+        Ok(document)
+    }
+
+    fn ambiguous_entry_documents(
+        &self,
+        searcher: &Searcher,
+        lookup: &EntryLookup,
+        count: usize,
+    ) -> Result<Vec<SearchDocument>> {
+        let query = self.exact_entry_kind_query(lookup);
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(10).order_by_score())
-            .context("entry lookup failed")?;
+            .search(&*query, &TopDocs::with_limit(count).order_by_score())
+            .context("failed to retrieve ambiguous entry documents")?;
 
         let mut documents = Vec::with_capacity(top_docs.len());
 
         for (_, address) in top_docs {
-            documents.push(self.document_at(address)?);
+            documents.push(self.document_at_with_searcher(searcher, address)?);
         }
 
-        match documents.len() {
-            0 => Ok(EntryLookupResult::NotFound),
-            1 => Ok(EntryLookupResult::Found(Box::new(documents.remove(0)))),
-            _ => Ok(EntryLookupResult::Ambiguous(documents)),
-        }
+        Ok(documents)
+    }
+
+    fn exact_entry_kind_query(&self, lookup: &EntryLookup) -> Box<dyn Query> {
+        let mut clauses = self.exact_entry_identity_clauses(lookup);
+        let kind = lookup.entry_kind.document_kind();
+        clauses.push((Occur::Must, self.entry_kind_query(&kind)));
+
+        Box::new(BooleanQuery::new(clauses))
+    }
+
+    fn exact_entry_identity_clauses(&self, lookup: &EntryLookup) -> Vec<(Occur, Box<dyn Query>)> {
+        vec![
+            (
+                Occur::Must,
+                exact_term_query(self.fields.source, &lookup.source),
+            ),
+            (
+                Occur::Must,
+                exact_term_query(self.fields.ref_id, &lookup.ref_id),
+            ),
+            (
+                Occur::Must,
+                exact_term_query(self.fields.name_exact, &lookup.name),
+            ),
+        ]
+    }
+
+    fn entry_kind_query(&self, kind: &DocumentKind) -> Box<dyn Query> {
+        exact_term_query(self.fields.kind, kind.as_str())
     }
 
     fn document_at(&self, address: DocAddress) -> Result<SearchDocument> {
-        let searcher = self.reader.searcher();
+        let searcher = self.reader()?.searcher();
         self.document_at_with_searcher(&searcher, address)
     }
 
@@ -393,15 +674,240 @@ impl SearchIndex {
         searcher: &Searcher,
         address: DocAddress,
     ) -> Result<SearchDocument> {
-        let retrieved: TantivyDocument = searcher
-            .doc(address)
-            .context("failed to retrieve entry document")?;
+        let retrieved = tantivy_document_at(searcher, address)?;
 
-        let stored_json = retrieved
-            .get_first(self.fields.stored_json)
-            .and_then(|value| value.as_str())
-            .context("entry document did not contain stored_json")?;
+        search_document_from_tantivy(&self.fields, &retrieved)
+    }
 
-        serde_json::from_str(stored_json).context("failed to deserialize entry document")
+    fn stored_document_at_with_searcher(
+        &self,
+        searcher: &Searcher,
+        address: DocAddress,
+    ) -> Result<StoredSearchDocument> {
+        let retrieved = tantivy_document_at(searcher, address)?;
+        let document = search_document_from_tantivy(&self.fields, &retrieved)?;
+        let unique_within_kind = stored_bool(
+            &retrieved,
+            self.fields.entry_unique_within_kind,
+            "entry_unique_within_kind",
+        )?;
+
+        Ok(StoredSearchDocument {
+            annotation: SearchHitAnnotation { unique_within_kind },
+            document,
+        })
+    }
+
+    fn indexed_document_at_with_searcher(
+        &self,
+        searcher: &Searcher,
+        address: DocAddress,
+    ) -> Result<IndexedSearchDocument> {
+        let retrieved = tantivy_document_at(searcher, address)?;
+        let document = search_document_from_tantivy_strict(&self.fields, &retrieved)?;
+        let unique_within_kind = stored_single_bool(
+            &retrieved,
+            self.fields.entry_unique_within_kind,
+            "entry_unique_within_kind",
+        )?;
+        validate_stored_identity_fields(&self.fields, &retrieved, &document)?;
+
+        Ok(IndexedSearchDocument {
+            annotation: SearchHitAnnotation { unique_within_kind },
+            document,
+        })
+    }
+}
+
+fn tantivy_document_at(searcher: &Searcher, address: DocAddress) -> Result<TantivyDocument> {
+    searcher
+        .doc(address)
+        .context("failed to retrieve entry document")
+}
+
+fn search_document_from_tantivy(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+) -> Result<SearchDocument> {
+    let stored_json = retrieved
+        .get_first(fields.stored_json)
+        .and_then(|value| value.as_str())
+        .context("entry document did not contain stored_json")?;
+
+    deserialize_stored_search_document(stored_json)
+}
+
+fn search_document_from_tantivy_strict(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+) -> Result<SearchDocument> {
+    let stored_json = stored_single_str(retrieved, fields.stored_json, "stored_json")?;
+
+    deserialize_stored_search_document(stored_json)
+}
+
+fn deserialize_stored_search_document(stored_json: &str) -> Result<SearchDocument> {
+    let document = serde_json::from_str::<SearchDocument>(stored_json)
+        .context("failed to deserialize entry document")?;
+    document
+        .validate_identity()
+        .map_err(anyhow::Error::msg)
+        .context("invalid stored entry document identity")?;
+
+    Ok(document)
+}
+
+fn stored_bool(retrieved: &TantivyDocument, field: Field, name: &'static str) -> Result<bool> {
+    retrieved
+        .get_first(field)
+        .and_then(|value| value.as_bool())
+        .with_context(|| format!("entry document did not contain {name}"))
+}
+
+fn stored_single_str<'a>(
+    retrieved: &'a TantivyDocument,
+    field: Field,
+    name: &'static str,
+) -> Result<&'a str> {
+    let values = retrieved.get_all(field).collect::<Vec<_>>();
+    if values.len() != 1 {
+        bail!(
+            "entry document contained {} values for singleton field {name}",
+            values.len()
+        );
+    }
+
+    values[0]
+        .as_str()
+        .with_context(|| format!("entry document singleton field {name} was not a string"))
+}
+
+fn stored_single_bool(
+    retrieved: &TantivyDocument,
+    field: Field,
+    name: &'static str,
+) -> Result<bool> {
+    let values = retrieved.get_all(field).collect::<Vec<_>>();
+    if values.len() != 1 {
+        bail!(
+            "entry document contained {} values for singleton field {name}",
+            values.len()
+        );
+    }
+
+    values[0]
+        .as_bool()
+        .with_context(|| format!("entry document singleton field {name} was not a bool"))
+}
+
+fn validate_stored_identity_fields(
+    fields: &IndexFields,
+    retrieved: &TantivyDocument,
+    document: &SearchDocument,
+) -> Result<()> {
+    let common = document.common();
+    validate_stored_string(retrieved, fields.id, "id", &common.id)?;
+    validate_stored_string(retrieved, fields.source, "source", &common.source)?;
+    validate_stored_string(retrieved, fields.ref_id, "ref", &common.ref_id)?;
+    validate_stored_string(retrieved, fields.kind, "kind", common.kind.as_str())?;
+    validate_stored_string(retrieved, fields.name_exact, "name_exact", &common.name)?;
+
+    Ok(())
+}
+
+fn validate_stored_string(
+    retrieved: &TantivyDocument,
+    field: Field,
+    name: &'static str,
+    expected: &str,
+) -> Result<()> {
+    let actual = stored_single_str(retrieved, field, name)?;
+    if actual != expected {
+        bail!("entry document field {name} mismatch: stored {actual:?}, json {expected:?}");
+    }
+
+    Ok(())
+}
+
+fn exact_term_query(field: tantivy::schema::Field, value: &str) -> Box<dyn Query> {
+    Box::new(TermQuery::new(
+        Term::from_field_text(field, value),
+        IndexRecordOption::Basic,
+    ))
+}
+
+fn document_deserialized_as_kind(document: &SearchDocument, kind: &DocumentKind) -> bool {
+    matches!(
+        (document, kind),
+        (SearchDocument::Package(_), DocumentKind::Package)
+            | (SearchDocument::Option(_), DocumentKind::Option)
+    ) && document.kind() == kind
+}
+
+fn document_variant_name(document: &SearchDocument) -> &'static str {
+    match document {
+        SearchDocument::Package(_) => "package",
+        SearchDocument::Option(_) => "option",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tantivy::doc;
+    use tempfile::tempdir;
+
+    use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES};
+
+    use super::*;
+
+    #[test]
+    fn search_index_open_defers_reader_until_query() {
+        let tempdir = tempdir().unwrap();
+        let index_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+            .expect("test path must be valid UTF-8");
+
+        SearchIndex::create_or_replace(&index_path).unwrap();
+
+        let index = SearchIndex::open(&index_path).unwrap();
+        assert!(index.reader.get().is_none());
+
+        index.scan_indexed_documents().unwrap();
+        assert!(index.reader.get().is_some());
+    }
+
+    #[test]
+    fn corrupt_unique_entry_representative_is_an_error() {
+        let tempdir = tempdir().unwrap();
+        let index_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf())
+            .expect("test path must be valid UTF-8");
+
+        let index = SearchIndex::create_or_replace(&index_path).unwrap();
+        let mut writer = index.index.writer(crate::WRITER_MEMORY_BYTES).unwrap();
+
+        writer
+            .add_document(doc!(
+                index.fields.id => "fixtures/small/option/corrupt.entry",
+                index.fields.source => SOURCE_FIXTURES,
+                index.fields.ref_id => REF_SMALL,
+                index.fields.kind => "option",
+                index.fields.name_exact => "corrupt.entry",
+                index.fields.name_text => "corrupt.entry",
+                index.fields.stored_json => "{not valid json",
+            ))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let index = SearchIndex::open(&index_path).unwrap();
+        let error = index
+            .entry_facts(EntryLookup {
+                source: SOURCE_FIXTURES.to_owned(),
+                ref_id: REF_SMALL.to_owned(),
+                entry_kind: IndexedEntryKind::Option,
+                name: "corrupt.entry".to_owned(),
+            })
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to deserialize entry document"));
     }
 }

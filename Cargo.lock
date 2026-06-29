@@ -2110,10 +2110,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "hex",
  "nixsearch-core",
  "nixsearch-test-support",
  "serde",
  "serde_json",
+ "sha2",
  "tantivy",
  "tempfile",
  "time",
@@ -2127,6 +2129,7 @@ dependencies = [
  "nixsearch-core",
  "nixsearch-index",
  "nixsearch-test-support",
+ "serde_json",
  "time",
 ]
 
@@ -2147,13 +2150,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "camino",
  "nixsearch-config",
  "nixsearch-core",
  "nixsearch-index",
+ "nixsearch-index-test-support",
  "nixsearch-ingest",
  "nixsearch-source",
  "nixsearch-store",
+ "nixsearch-test-support",
+ "serde_json",
  "tempfile",
  "time",
  "tokio",
@@ -2174,6 +2181,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "tracing",
 ]
 
 [[package]]
@@ -2247,6 +2255,7 @@ dependencies = [
  "nixsearch-ops",
  "nixsearch-service",
  "nixsearch-test-support",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",
@@ -2255,6 +2264,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "unicode-segmentation",
  "url",
  "urlencoding",
 ]
@@ -4122,6 +4132,12 @@ checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"

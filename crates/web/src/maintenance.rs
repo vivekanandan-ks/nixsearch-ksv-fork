@@ -3,15 +3,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use camino::Utf8PathBuf;
 use time::OffsetDateTime;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_index::manifest::IndexGenerationManifest;
-use nixsearch_index::store::IndexStore;
-use nixsearch_ops::targets::{TargetKey, all_targets};
-use nixsearch_ops::{cleanup, generate, lock};
-use nixsearch_service::{ReconcileOutcome, SearchService};
+use nixsearch_index::store::{IndexStore, PublishedGeneration};
+use nixsearch_ops::targets::{TargetKey, all_targets, missing_configured_target_keys};
+use nixsearch_ops::{cleanup, generate, lock, seo};
+use nixsearch_service::{ReconcileReport, SearchService};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_ERROR_RETRY: Duration = Duration::from_secs(60);
@@ -19,18 +18,6 @@ const MIN_LOCK_BUSY_RETRY: Duration = Duration::from_secs(60);
 const MAX_LOCK_BUSY_RETRY: Duration = Duration::from_secs(10 * 60);
 const MIN_FAILURE_RETRY: Duration = Duration::from_secs(60);
 const MAX_FAILURE_RETRY: Duration = Duration::from_secs(60 * 60);
-
-#[derive(Debug, Clone)]
-pub(crate) struct PublishedGeneration {
-    pub path: Utf8PathBuf,
-    pub manifest: IndexGenerationManifest,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CurrentGeneration {
-    Missing,
-    Found(PublishedGeneration),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaintenanceOutcome {
@@ -43,6 +30,27 @@ enum MaintenanceOutcome {
 struct RegenerationModes {
     recovery_enabled: bool,
     scheduled_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvalidCurrentAction {
+    RecoveryRegeneration,
+    ScheduledRegeneration,
+    Retry,
+}
+
+enum CurrentGenerationStatus {
+    Missing,
+    MissingConfiguredTargets {
+        generation: PublishedGeneration,
+    },
+    Invalid {
+        generation: PublishedGeneration,
+        error: anyhow::Error,
+    },
+    Valid {
+        generation: PublishedGeneration,
+    },
 }
 
 pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
@@ -58,88 +66,36 @@ pub(crate) fn spawn(config: Arc<AppConfig>, search: SearchService) {
 }
 
 async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Duration) {
-    let index_store = IndexStore::new(&config.data.index_dir);
     let modes = regeneration_modes(&config);
 
     loop {
-        let generation = match read_current_generation(&index_store) {
-            Ok(CurrentGeneration::Found(generation)) => generation,
-            Ok(CurrentGeneration::Missing) => {
-                tracing::warn!("current index disappeared during maintenance loop");
+        let (generation, reloaded) = match search.reconcile_current_generation() {
+            Ok(ReconcileReport::Superseded) => {
+                tracing::debug!("published index generation changed during reconciliation");
 
-                if !modes.recovery_enabled {
-                    tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
-                    continue;
-                }
-
-                let outcome = run_recovery_regeneration(&config).await;
-                sleep_after_regeneration_outcome(outcome, interval).await;
-
+                tokio::time::sleep(Duration::ZERO).await;
                 continue;
             }
-            Err(error) => {
-                tracing::warn!("failed to read current index generation: {error:#}");
-
-                if modes.recovery_enabled {
-                    let outcome = run_recovery_regeneration(&config).await;
-                    sleep_after_regeneration_outcome(outcome, interval).await;
-                    continue;
-                }
-
-                tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
-                continue;
-            }
-        };
-
-        let reconcile_outcome = match search
-            .reconcile_generation(generation.path.clone(), generation.manifest.clone())
-        {
-            Ok(outcome @ ReconcileOutcome::Unchanged) => outcome,
-            Ok(ReconcileOutcome::Reloaded) => {
+            Ok(ReconcileReport::Reloaded { generation }) => {
                 tracing::info!(
                     generation = %generation.path,
                     "detected published index generation change"
                 );
-                ReconcileOutcome::Reloaded
+
+                (generation, true)
             }
+            Ok(ReconcileReport::Unchanged { generation }) => (generation, false),
             Err(error) => {
                 tracing::error!(
                     "failed to switch to published index generation; continuing to serve previous generation: {error:#}"
                 );
 
-                if modes.recovery_enabled {
-                    tracing::info!(
-                        "published index generation is unreadable; running recovery regeneration"
-                    );
-                    let outcome = run_recovery_regeneration(&config).await;
-                    sleep_after_regeneration_outcome(outcome, interval).await;
-                    continue;
-                }
-
-                tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+                handle_invalid_current_generation(&config, modes, interval).await;
                 continue;
             }
         };
 
-        if should_validate_reconciled_generation(reconcile_outcome)
-            && let Err(error) = SearchService::validate_generation(&generation.path)
-        {
-            tracing::error!(
-                generation = %generation.path,
-                "published index generation became unreadable; continuing to serve previous generation: {error:#}"
-            );
-
-            if modes.recovery_enabled {
-                let outcome = run_recovery_regeneration(&config).await;
-                sleep_after_regeneration_outcome(outcome, interval).await;
-                continue;
-            }
-
-            tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
-            continue;
-        }
-
-        if reconcile_outcome == ReconcileOutcome::Reloaded {
+        if reloaded {
             run_cleanup_after_reload(&config).await;
         }
 
@@ -181,16 +137,89 @@ async fn run_loop(config: Arc<AppConfig>, search: SearchService, interval: Durat
     }
 }
 
-fn should_validate_reconciled_generation(outcome: ReconcileOutcome) -> bool {
-    matches!(outcome, ReconcileOutcome::Unchanged)
-}
-
 fn regeneration_modes(config: &AppConfig) -> RegenerationModes {
     let has_targets = has_configured_targets(config);
 
     RegenerationModes {
         recovery_enabled: config.server.bootstrap && has_targets,
         scheduled_enabled: config.server.schedule.enabled && has_targets,
+    }
+}
+
+fn invalid_current_action(modes: RegenerationModes) -> InvalidCurrentAction {
+    if modes.recovery_enabled {
+        InvalidCurrentAction::RecoveryRegeneration
+    } else if modes.scheduled_enabled {
+        InvalidCurrentAction::ScheduledRegeneration
+    } else {
+        InvalidCurrentAction::Retry
+    }
+}
+
+async fn handle_invalid_current_generation(
+    config: &AppConfig,
+    modes: RegenerationModes,
+    interval: Duration,
+) {
+    if config.public_seo_enabled() {
+        let repair = run_seo_sidecar_repair(config).await;
+        match repair {
+            MaintenanceOutcome::Completed => return,
+            MaintenanceOutcome::LockBusy => {
+                sleep_after_regeneration_outcome(repair, interval).await;
+                return;
+            }
+            MaintenanceOutcome::Failed => {}
+        }
+    }
+
+    match invalid_current_action(modes) {
+        InvalidCurrentAction::RecoveryRegeneration => {
+            tracing::info!("published index generation is invalid; running recovery regeneration");
+            let outcome = run_recovery_regeneration(config).await;
+            sleep_after_regeneration_outcome(outcome, interval).await;
+        }
+        InvalidCurrentAction::ScheduledRegeneration => {
+            tracing::info!("published index generation is invalid; running scheduled regeneration");
+            let outcome = run_scheduled_regeneration(config, interval).await;
+            sleep_after_regeneration_outcome(outcome, interval).await;
+        }
+        InvalidCurrentAction::Retry => {
+            tokio::time::sleep(MANIFEST_ERROR_RETRY.min(RECONCILE_INTERVAL)).await;
+        }
+    }
+}
+
+async fn run_seo_sidecar_repair(config: &AppConfig) -> MaintenanceOutcome {
+    let update_lock = match lock::try_acquire_update_lock(&config.data.index_dir) {
+        Ok(Some(update_lock)) => update_lock,
+        Ok(None) => return MaintenanceOutcome::LockBusy,
+        Err(error) => {
+            tracing::error!("failed to acquire maintenance lock for SEO sidecar repair: {error:#}");
+            return MaintenanceOutcome::Failed;
+        }
+    };
+
+    match seo::repair_current_seo_sidecar_under_lock(config, &update_lock) {
+        Ok(
+            seo::SeoSidecarRepairOutcome::AlreadySeoVerified { .. }
+            | seo::SeoSidecarRepairOutcome::Repaired { .. }
+            | seo::SeoSidecarRepairOutcome::SupersededBeforeRepair
+            | seo::SeoSidecarRepairOutcome::SupersededAfterRepair,
+        ) => MaintenanceOutcome::Completed,
+        Ok(seo::SeoSidecarRepairOutcome::MissingCurrent) => MaintenanceOutcome::Failed,
+        Ok(seo::SeoSidecarRepairOutcome::Unrepairable { generation, error }) => {
+            tracing::warn!(generation = %generation.path, "current SEO sidecar is not repairable: {error}");
+            MaintenanceOutcome::Failed
+        }
+        Ok(seo::SeoSidecarRepairOutcome::RepairFailed { generation, error }) => {
+            tracing::warn!(generation = %generation.path, "failed to repair current SEO sidecar: {error}");
+            MaintenanceOutcome::Failed
+        }
+        Err(error) => {
+            tracing::warn!("failed to repair current SEO sidecar: {error:#}");
+            MaintenanceOutcome::Failed
+        }
     }
 }
 
@@ -257,32 +286,27 @@ async fn run_recovery_regeneration(config: &AppConfig) -> MaintenanceOutcome {
     };
 
     let index_store = IndexStore::new(&config.data.index_dir);
-    match read_current_generation(&index_store) {
-        Ok(CurrentGeneration::Found(generation)) => {
-            if current_generation_missing_configured_targets(config, &generation) {
-                tracing::warn!(
-                    generation = %generation.path,
-                    "current index remains missing configured targets after lock acquisition; rebuilding"
-                );
-            } else {
-                match SearchService::validate_generation(&generation.path) {
-                    Ok(()) => {
-                        tracing::info!(
-                            generation = %generation.path,
-                            "recovery regeneration skipped; current index generation is openable"
-                        );
-                        return MaintenanceOutcome::Completed;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            generation = %generation.path,
-                            "current index generation remains unopenable after lock acquisition; rebuilding: {error:#}"
-                        );
-                    }
-                }
-            }
+    match current_generation_status(config, &index_store) {
+        Ok(CurrentGenerationStatus::Valid { generation }) => {
+            tracing::info!(
+                generation = %generation.path,
+                "recovery regeneration skipped; current index generation is valid"
+            );
+            return MaintenanceOutcome::Completed;
         }
-        Ok(CurrentGeneration::Missing) => {
+        Ok(CurrentGenerationStatus::MissingConfiguredTargets { generation }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "current index remains missing configured targets after lock acquisition; rebuilding"
+            );
+        }
+        Ok(CurrentGenerationStatus::Invalid { generation, error }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "current index generation remains invalid after lock acquisition; rebuilding: {error:#}"
+            );
+        }
+        Ok(CurrentGenerationStatus::Missing) => {
             tracing::warn!("current index remains missing after lock acquisition; rebuilding");
         }
         Err(error) => {
@@ -333,8 +357,10 @@ async fn run_cleanup_after_reload(config: &AppConfig) {
         }
     };
 
-    let report = cleanup::cleanup_under_lock(config, &update_lock).await;
-    cleanup::log_report(&report);
+    match cleanup::cleanup_under_lock(config, &update_lock).await {
+        Ok(report) => cleanup::log_report(&report),
+        Err(error) => tracing::warn!("index cleanup failed: {error:#}"),
+    }
 
     drop(update_lock);
 }
@@ -345,27 +371,23 @@ pub(crate) fn current_generation_needs_regeneration(
     interval: Duration,
     now: OffsetDateTime,
 ) -> Result<bool> {
-    match read_current_generation(index_store) {
-        Ok(CurrentGeneration::Found(generation)) => {
-            if current_generation_missing_configured_targets(config, &generation) {
-                return Ok(true);
-            }
-
-            if let Err(error) = SearchService::validate_generation(&generation.path) {
-                tracing::warn!(
-                    generation = %generation.path,
-                    "treating unopenable current index generation as needing regeneration: {error:#}"
-                );
-                return Ok(true);
-            }
-
+    match current_generation_status(config, index_store) {
+        Ok(CurrentGenerationStatus::Missing) => Ok(true),
+        Ok(CurrentGenerationStatus::MissingConfiguredTargets { .. }) => Ok(true),
+        Ok(CurrentGenerationStatus::Invalid { generation, error }) => {
+            tracing::warn!(
+                generation = %generation.path,
+                "treating invalid current index generation as needing regeneration: {error:#}"
+            );
+            Ok(true)
+        }
+        Ok(CurrentGenerationStatus::Valid { generation }) => {
             let Some(next_due) = next_due(generation.manifest.generated_at, interval) else {
                 bail!("failed to compute next scheduled regeneration time")
             };
 
             Ok(now >= next_due)
         }
-        Ok(CurrentGeneration::Missing) => Ok(true),
         Err(error) => {
             tracing::warn!(
                 "treating unreadable current index generation as needing regeneration: {error:#}"
@@ -373,6 +395,42 @@ pub(crate) fn current_generation_needs_regeneration(
             Ok(true)
         }
     }
+}
+
+fn current_generation_status(
+    config: &AppConfig,
+    index_store: &IndexStore,
+) -> Result<CurrentGenerationStatus> {
+    let Some(generation) = index_store.try_current_leased_generation()? else {
+        return Ok(CurrentGenerationStatus::Missing);
+    };
+    let published = generation.to_published_generation();
+
+    if !missing_configured_targets(config, generation.manifest()).is_empty() {
+        return Ok(CurrentGenerationStatus::MissingConfiguredTargets {
+            generation: published,
+        });
+    }
+
+    if let Err(error) = SearchService::verify_leased_generation_structural(config, &generation) {
+        return Ok(CurrentGenerationStatus::Invalid {
+            generation: published,
+            error,
+        });
+    }
+
+    if config.public_seo_enabled()
+        && let Err(error) = SearchService::verify_leased_generation_seo(config, &generation)
+    {
+        return Ok(CurrentGenerationStatus::Invalid {
+            generation: published,
+            error,
+        });
+    }
+
+    Ok(CurrentGenerationStatus::Valid {
+        generation: published,
+    })
 }
 
 pub(crate) fn current_generation_missing_configured_targets(
@@ -386,30 +444,7 @@ pub(crate) fn missing_configured_targets(
     config: &AppConfig,
     manifest: &IndexGenerationManifest,
 ) -> BTreeSet<TargetKey> {
-    let indexed_targets = manifest
-        .targets
-        .iter()
-        .map(TargetKey::from)
-        .collect::<BTreeSet<_>>();
-
-    all_targets(config)
-        .iter()
-        .map(TargetKey::from)
-        .filter(|target| !indexed_targets.contains(target))
-        .collect()
-}
-
-pub(crate) fn read_current_generation(index_store: &IndexStore) -> Result<CurrentGeneration> {
-    let Some(path) = index_store.try_current_path()? else {
-        return Ok(CurrentGeneration::Missing);
-    };
-
-    let manifest = index_store.read_manifest(&path)?;
-
-    Ok(CurrentGeneration::Found(PublishedGeneration {
-        path,
-        manifest,
-    }))
+    missing_configured_target_keys(config, manifest)
 }
 
 pub(crate) fn has_configured_targets(config: &AppConfig) -> bool {
@@ -435,31 +470,36 @@ pub(crate) fn clamp_duration(value: Duration, min: Duration, max: Duration) -> D
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::time::Duration;
+    use std::{fs, path::PathBuf};
 
+    use nixsearch_config::producer::ProducerConfig;
+    use nixsearch_core::artifact::ArtifactKind;
+    use nixsearch_core::target::RefRole;
     use nixsearch_index::search::SearchIndex;
+    use nixsearch_index::seo_sidecar::SeoFactsArtifact;
     use nixsearch_index::store::IndexStore;
     use nixsearch_index_test_support::{
-        assert_canonical_manifest_targets, publish_canonical_index,
-        publish_canonical_index_with_generated_at,
+        publish_canonical_index, publish_canonical_index_with_generated_at,
     };
-    use nixsearch_service::ReconcileOutcome;
-    use nixsearch_test_support::{REF_SMALL, SOURCE_FIXTURES, app_config, utf8_path_buf};
+    use nixsearch_ops::targets::TargetKey;
+    use nixsearch_test_support::{
+        REF_SMALL, SOURCE_FIXTURES, app_config, app_config_with_public_url, utf8_path_buf,
+    };
     use tempfile::tempdir;
     use time::Duration as TimeDuration;
 
     use super::{
-        CurrentGeneration, MaintenanceOutcome, clamp_duration,
-        current_generation_needs_regeneration, duration_until, next_due, read_current_generation,
-        regeneration_modes, run_recovery_regeneration, should_validate_reconciled_generation,
+        InvalidCurrentAction, MaintenanceOutcome, RegenerationModes, clamp_duration,
+        current_generation_needs_regeneration, duration_until, invalid_current_action,
+        missing_configured_targets, next_due, regeneration_modes, run_recovery_regeneration,
     };
 
     #[test]
     fn regeneration_modes_enable_recovery_without_scheduling() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
-        let config = app_config(&index_dir);
+        let config = app_config_with_public_url(&index_dir);
 
         let modes = regeneration_modes(&config);
 
@@ -482,17 +522,39 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_reconciled_generation_still_gets_disk_validation() {
-        assert!(should_validate_reconciled_generation(
-            ReconcileOutcome::Unchanged
-        ));
+    fn invalid_current_action_prefers_recovery_when_enabled() {
+        let modes = RegenerationModes {
+            recovery_enabled: true,
+            scheduled_enabled: true,
+        };
+
+        assert_eq!(
+            invalid_current_action(modes),
+            InvalidCurrentAction::RecoveryRegeneration
+        );
     }
 
     #[test]
-    fn reloaded_generation_skips_redundant_disk_validation() {
-        assert!(!should_validate_reconciled_generation(
-            ReconcileOutcome::Reloaded
-        ));
+    fn invalid_current_action_uses_scheduled_regeneration_without_recovery() {
+        let modes = RegenerationModes {
+            recovery_enabled: false,
+            scheduled_enabled: true,
+        };
+
+        assert_eq!(
+            invalid_current_action(modes),
+            InvalidCurrentAction::ScheduledRegeneration
+        );
+    }
+
+    #[test]
+    fn invalid_current_action_retries_when_regeneration_is_disabled() {
+        let modes = RegenerationModes {
+            recovery_enabled: false,
+            scheduled_enabled: false,
+        };
+
+        assert_eq!(invalid_current_action(modes), InvalidCurrentAction::Retry);
     }
 
     #[test]
@@ -530,46 +592,6 @@ mod tests {
             ),
             std::time::Duration::from_secs(20)
         );
-    }
-
-    #[test]
-    fn read_current_generation_returns_missing_when_current_absent() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let store = IndexStore::new(&index_dir);
-
-        let generation = read_current_generation(&store).unwrap();
-
-        assert!(matches!(generation, CurrentGeneration::Missing));
-    }
-
-    #[test]
-    fn read_current_generation_loads_manifest() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let published_path = publish_canonical_index(&index_dir);
-        let store = IndexStore::new(&index_dir);
-
-        let generation = read_current_generation(&store).unwrap();
-
-        let CurrentGeneration::Found(generation) = generation else {
-            panic!("expected published generation");
-        };
-        assert_eq!(generation.path, published_path);
-        assert_canonical_manifest_targets(&generation.manifest);
-    }
-
-    #[test]
-    fn read_current_generation_errors_on_empty_current() {
-        let tempdir = tempdir().unwrap();
-        let index_dir = utf8_path_buf(tempdir.path().to_path_buf());
-        let store = IndexStore::new(&index_dir);
-        fs::create_dir_all(&index_dir).unwrap();
-        fs::write(store.current_file(), "").unwrap();
-
-        let error = read_current_generation(&store).unwrap_err();
-
-        assert!(format!("{error:#}").contains("current index file is empty"));
     }
 
     #[test]
@@ -615,7 +637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_regeneration_rebuilds_fresh_unopenable_generation() {
+    async fn recovery_regeneration_rebuilds_fresh_invalid_generation() {
         let tempdir = tempdir().unwrap();
         let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
         publish_canonical_index(&index_dir);
@@ -642,7 +664,7 @@ mod tests {
         assert_eq!(outcome, MaintenanceOutcome::Completed);
         let current = store.current_path().unwrap();
         assert_ne!(current, broken);
-        SearchIndex::open(&current).unwrap();
+        SearchIndex::open(store.index_path(&current)).unwrap();
     }
 
     #[tokio::test]
@@ -670,7 +692,7 @@ mod tests {
         assert_eq!(outcome, MaintenanceOutcome::Completed);
         let current = store.current_path().unwrap();
         assert_eq!(current, repaired);
-        SearchIndex::open(&current).unwrap();
+        SearchIndex::open(store.index_path(&current)).unwrap();
     }
 
     #[tokio::test]
@@ -746,6 +768,27 @@ mod tests {
     }
 
     #[test]
+    fn current_generation_needs_regeneration_returns_true_when_seo_sidecar_missing() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let published_path = publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        fs::remove_file(SeoFactsArtifact::path(&published_path)).unwrap();
+
+        let config = app_config_with_public_url(&index_dir);
+
+        let needs_regeneration = current_generation_needs_regeneration(
+            &config,
+            &store,
+            Duration::from_secs(60 * 60),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+        assert!(needs_regeneration);
+    }
+
+    #[test]
     fn current_generation_needs_regeneration_returns_true_when_configured_target_missing() {
         let tempdir = tempdir().unwrap();
         let now = time::OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(2);
@@ -765,5 +808,38 @@ mod tests {
         .unwrap();
 
         assert!(needs_regeneration);
+    }
+
+    #[test]
+    fn missing_configured_targets_reports_source_ref_with_stale_artifact_kind() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_index(&index_dir);
+        let store = IndexStore::new(&index_dir);
+        let manifest = store.current_manifest().unwrap();
+        let mut config = app_config(&index_dir);
+        let ref_config = &mut config
+            .sources
+            .get_mut(SOURCE_FIXTURES)
+            .expect("fixture source exists")
+            .refs[0];
+        ref_config.role = RefRole::ArtifactOnly;
+        ref_config.producer = ProducerConfig::ExistingFile {
+            path: PathBuf::from("unused.json"),
+            artifact: ArtifactKind::FlakeInfoJson,
+        };
+
+        let missing = missing_configured_targets(&config, &manifest);
+
+        assert_eq!(
+            missing,
+            [TargetKey::new(
+                SOURCE_FIXTURES,
+                REF_SMALL,
+                ArtifactKind::FlakeInfoJson,
+                RefRole::ArtifactOnly,
+            )]
+            .into()
+        );
     }
 }

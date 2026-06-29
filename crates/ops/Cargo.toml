@@ -8,6 +8,8 @@ license.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 camino.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -20,4 +22,7 @@ nixsearch-source.workspace = true
 nixsearch-store.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
+nixsearch-index-test-support.workspace = true
+nixsearch-test-support.workspace = true
 tempfile.workspace = true

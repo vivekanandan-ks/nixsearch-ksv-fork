@@ -1,12 +1,14 @@
 (() => {
   const RECONCILE_EVENT = "nixsearch-reconcile";
-  const metadata = JSON.parse(
-    document.getElementById("source-metadata").textContent,
-  );
+  const metadata = parseJsonScript("source-metadata");
+  const initialHistoryMetadata = parseJsonScript("initial-history-metadata");
   const PAGE_SIZE = __DEFAULT_LIMIT__;
   const VIRTUAL_REPLACE_LIMIT = PAGE_SIZE * 3;
   const VIRTUAL_JUMP_GAP = PAGE_SIZE * 4;
   const VIRTUAL_JUMP_DELTA = PAGE_SIZE * 3;
+  let generationId = readGenerationId();
+  let generationChanging = false;
+  let generationChangeWatchdog = null;
   let currentUrl = currentPublicUrl();
   let lastFocusedResultHref = "";
 
@@ -18,34 +20,192 @@
     return window.location.pathname + window.location.search;
   }
 
-  function titleForUrl(url) {
-    const parsed = new URL(url, window.location.href);
-    const params = new URLSearchParams(parsed.search);
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    const sourceId =
-      params.get("source") === "__SOURCE_ALL_VALUE__"
-        ? ""
-        : parts[0]
-          ? decodeURIComponent(parts[0])
-          : "";
-    const q = (params.get("q") || "").trim();
-    const titleParts = [];
+  function parseJsonScript(id) {
+    const el = document.getElementById(id);
+    if (!el) return {};
 
-    if (q) titleParts.push(q);
-
-    const source = sourceMetadata(sourceId);
-    if (source) {
-      titleParts.push(source.name || source.id);
-    } else if (sourceId) {
-      titleParts.push(sourceId);
+    try {
+      const parsed = JSON.parse(el.textContent || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
     }
-
-    titleParts.push("nixsearch");
-    return titleParts.join(" · ");
   }
 
-  function syncTitle(url = currentPublicUrl()) {
-    document.title = titleForUrl(url);
+  function readGenerationId() {
+    const state = parseJsonScript("generation-state");
+    return typeof state.generationId === "string" ? state.generationId : "";
+  }
+
+  function currentGenerationId() {
+    return generationId;
+  }
+
+  window.nixsearchGenerationId = currentGenerationId;
+
+  function publicUrlKey(url = currentPublicUrl()) {
+    const parsed = new URL(url || currentPublicUrl(), window.location.href);
+    const query = parsed.searchParams.toString();
+    return parsed.pathname + (query ? "?" + query : "");
+  }
+
+  function headMetaContent(attribute, value) {
+    const el = metaByAttribute(attribute, value);
+    return el ? el.getAttribute("content") || "" : null;
+  }
+
+  function currentHeadMetadata() {
+    const canonical = document.head.querySelector('link[rel~="canonical"]');
+    const ogUrl = headMetaContent("property", "og:url");
+    const ogType = headMetaContent("property", "og:type");
+    const ogSiteName = headMetaContent("property", "og:site_name");
+    const ogTitle = headMetaContent("property", "og:title");
+    const ogDescription = headMetaContent("property", "og:description");
+    const ogImage = headMetaContent("property", "og:image");
+
+    return {
+      title: document.title,
+      description: headMetaContent("name", "description"),
+      robots: headMetaContent("name", "robots"),
+      openGraph:
+        ogUrl && ogType && ogSiteName && ogTitle && ogDescription && ogImage
+          ? {
+              url: ogUrl,
+              type: ogType,
+              siteName: ogSiteName,
+              title: ogTitle,
+              description: ogDescription,
+              imageUrl: ogImage,
+            }
+          : null,
+      canonicalUrl: canonical ? canonical.getAttribute("href") || "" : null,
+    };
+  }
+
+  function currentHistoryState() {
+    return history.state && typeof history.state === "object" ? history.state : {};
+  }
+
+  function applyReturnMetadataState(state, extra = {}) {
+    const next = { ...state };
+    const returnMetadataPair = extra.returnMetadataPair
+      ? extra.returnMetadataPair
+      : extra.returnHeadMetadata && extra.returnHeadMetadataUrl
+        ? {
+            metadata: extra.returnHeadMetadata,
+            urlKey: publicUrlKey(extra.returnHeadMetadataUrl),
+          }
+        : null;
+
+    if (returnMetadataPair && returnMetadataPair.metadata && returnMetadataPair.urlKey) {
+      next.nixsearchReturnHeadMetadata = returnMetadataPair.metadata;
+      next.nixsearchReturnHeadMetadataUrl = returnMetadataPair.urlKey;
+    } else if (extra.clearReturnHeadMetadata) {
+      delete next.nixsearchReturnHeadMetadata;
+      delete next.nixsearchReturnHeadMetadataUrl;
+    }
+
+    return next;
+  }
+
+  function historyStateWithExactMetadata(
+    metadata,
+    extra = {},
+    url = currentPublicUrl(),
+  ) {
+    const state =
+      extra.baseState && typeof extra.baseState === "object"
+        ? extra.baseState
+        : currentHistoryState();
+    const next = applyReturnMetadataState(state, extra);
+
+    next.nixsearchHeadMetadata = metadata;
+    next.nixsearchHeadMetadataUrl = publicUrlKey(url);
+    delete next.nixsearchHeadMetadataPendingUrl;
+
+    return next;
+  }
+
+  function pendingHistoryState(url, extra = {}) {
+    const state =
+      extra.baseState && typeof extra.baseState === "object"
+        ? extra.baseState
+        : {};
+    const next = applyReturnMetadataState(state, extra);
+
+    next.nixsearchHeadMetadataPendingUrl = publicUrlKey(url);
+    delete next.nixsearchHeadMetadata;
+    delete next.nixsearchHeadMetadataUrl;
+
+    return next;
+  }
+
+  function exactHeadMetadataFromState(
+    state = currentHistoryState(),
+    url = currentPublicUrl(),
+  ) {
+    if (!state || typeof state !== "object") return null;
+    if (!state.nixsearchHeadMetadata) return null;
+    if (state.nixsearchHeadMetadataUrl !== publicUrlKey(url)) return null;
+
+    return state.nixsearchHeadMetadata;
+  }
+
+  function storeExactHistoryHeadMetadata(
+    metadata = currentHeadMetadata(),
+    extra = {},
+  ) {
+    history.replaceState(
+      historyStateWithExactMetadata(metadata, extra),
+      "",
+      window.location.href,
+    );
+    return metadata;
+  }
+
+  function writeHeadMetadata(metadata) {
+    if (!metadata || typeof metadata !== "object") return false;
+
+    if (metadata.title) document.title = metadata.title;
+
+    setMeta("name", "description", metadata.description);
+    setMeta("name", "robots", metadata.robots);
+    if (metadata.openGraph) {
+      const openGraph = metadata.openGraph;
+      setMeta("property", "og:url", openGraph.url);
+      setMeta("property", "og:type", openGraph.type);
+      setMeta("property", "og:site_name", openGraph.siteName);
+      setMeta("property", "og:title", openGraph.title);
+      setMeta("property", "og:description", openGraph.description);
+      setMeta("property", "og:image", openGraph.imageUrl);
+    } else {
+      removeOpenGraphMetadata();
+    }
+    setCanonicalUrl(metadata.canonicalUrl);
+    return true;
+  }
+
+  function removeOpenGraphMetadata() {
+    [
+      "og:url",
+      "og:type",
+      "og:site_name",
+      "og:title",
+      "og:description",
+      "og:image",
+    ].forEach((property) => setMeta("property", property, null));
+  }
+
+  function restoreHeadMetadata(metadata) {
+    if (!metadata) return false;
+
+    try {
+      if (!writeHeadMetadata(metadata)) return false;
+      storeExactHistoryHeadMetadata(currentHeadMetadata());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function metaByAttribute(attribute, value) {
@@ -93,21 +253,25 @@
     el.setAttribute("href", String(url));
   }
 
-  function applyHeadMetadata(metadata) {
+  function applyHeadMetadata(metadata, url = currentPublicUrl()) {
     if (!metadata || typeof metadata !== "object") return;
+    const target = url ? publicUrlKey(url) : publicUrlKey();
+    if (url && target !== publicUrlKey()) return false;
 
-    if (metadata.title) document.title = metadata.title;
-
-    setMeta("name", "description", metadata.description);
-    setMeta("name", "robots", metadata.robots);
-    setMeta("property", "og:url", metadata.url);
-    setMeta("property", "og:title", metadata.title);
-    setMeta("property", "og:description", metadata.description);
-    setMeta("property", "og:image", metadata.imageUrl);
-    setCanonicalUrl(metadata.canonicalUrl);
+    try {
+      if (!writeHeadMetadata(metadata)) return false;
+      storeExactHistoryHeadMetadata(currentHeadMetadata());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   window.nixsearchApplyHeadMetadata = applyHeadMetadata;
+  storeExactHistoryHeadMetadata(currentHeadMetadata(), {
+    returnHeadMetadata: initialHistoryMetadata.returnHeadMetadata,
+    returnHeadMetadataUrl: initialHistoryMetadata.returnHeadMetadataUrl,
+  });
 
   function replaceVisiblePageInUrl(page) {
     const nextPage = Math.max(1, page || 1);
@@ -123,8 +287,7 @@
     const target = url.pathname + url.search;
     if (target === previous) return;
 
-    history.replaceState(null, "", target);
-    currentUrl = currentPublicUrl();
+    navigate(target, { push: false });
   }
 
   function currentPageFromUrl() {
@@ -156,6 +319,7 @@
   let virtualResults = null;
   let virtualLoadScheduled = false;
   let virtualRequestSeq = 0;
+  let virtualRequestEpoch = 0;
   let virtualActiveRequest = null;
   let virtualLastTargetOffset = null;
   const virtualSliceCache = new Map();
@@ -222,13 +386,61 @@
     }
   }
 
+  function parsedElementFromHtml(html, selector) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = html || "";
+    return wrapper.querySelector(selector);
+  }
+
+  function replaceParsedElement(next, selector, parent = document.body) {
+    if (!next) return false;
+
+    const existing = document.querySelector(selector);
+    if (existing) {
+      existing.replaceWith(next);
+    } else {
+      parent.appendChild(next);
+    }
+
+    return true;
+  }
+
+  function replaceResultsElement(results) {
+    return replaceParsedElement(
+      results,
+      "#results",
+      document.querySelector("main.main") || document.body,
+    );
+  }
+
+  function finishResultsPatch() {
+    initializeVirtualResults();
+    scheduleVisiblePageSync();
+    scheduleVirtualLoad();
+    setLoading(false);
+  }
+
+  function applyResultsPatch(html, targetUrl) {
+    if (targetUrl && publicUrlKey(targetUrl) !== publicUrlKey()) return false;
+
+    const results = parsedElementFromHtml(html, "#results");
+    if (!results) return false;
+
+    resetVirtualStateForPatch();
+    if (!replaceResultsElement(results)) return false;
+    finishResultsPatch();
+    return true;
+  }
+
+  window.nixsearchApplyResultsPatch = applyResultsPatch;
+
   // Clear loading state when results are patched by Datastar.
   (() => {
     const main = document.querySelector("main.main");
     if (!main) return;
     const observer = new MutationObserver(() => {
       const results = document.getElementById("results");
-      if (results && !results.classList.contains("results-loading")) {
+      if (!generationChanging && results && !results.classList.contains("results-loading")) {
         setLoading(false);
         initializeVirtualResults();
         scheduleVisiblePageSync();
@@ -251,6 +463,41 @@
 
   function shouldLoadResults(previousUrl, nextUrl) {
     return resultsContextForUrl(previousUrl) !== resultsContextForUrl(nextUrl);
+  }
+
+  function urlHasEntryDetail(url) {
+    const parsed = new URL(url, window.location.href);
+    return parsed.pathname.split("/").filter(Boolean).length >= 2;
+  }
+
+  function isPopstateModalClose(previous, current) {
+    if (!urlHasEntryDetail(previous) || urlHasEntryDetail(current)) return false;
+
+    const dialog = document.getElementById("entry-modal");
+    if (!dialog) return true;
+
+    const closeUrl = dialog.getAttribute("data-close-url");
+    return !!closeUrl && publicUrlKey(closeUrl) === publicUrlKey(current);
+  }
+
+  function returnMetadataPairForNavigation(current, target, currentMetadata) {
+    if (!urlHasEntryDetail(target)) return null;
+
+    const state = currentHistoryState();
+    if (
+      urlHasEntryDetail(current) &&
+      state.nixsearchReturnHeadMetadata &&
+      state.nixsearchReturnHeadMetadataUrl
+    ) {
+      return {
+        metadata: state.nixsearchReturnHeadMetadata,
+        urlKey: state.nixsearchReturnHeadMetadataUrl,
+      };
+    }
+
+    return currentMetadata
+      ? { metadata: currentMetadata, urlKey: publicUrlKey(current) }
+      : null;
   }
 
   function getActiveSourceTab() {
@@ -454,12 +701,7 @@
         selectedRefId === undefined
           ? activeRefSet || defaultRefSet()
           : selectedRefId;
-      container.innerHTML = refSets
-        .map((r) => {
-          const checked = r === selectedRefSet ? " checked" : "";
-          return `<label class="ref-radio-label"><input type="radio" name="ref_set" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
-        })
-        .join("");
+      replaceRefRadios(container, refSets, selectedRefSet, "ref_set");
       syncHeaderHeight();
       return;
     }
@@ -474,13 +716,30 @@
       selectedRefId === undefined
         ? firstRefForRefSetSource(activeRefSet, sourceId) || source.defaultRef
         : selectedRefId;
-    container.innerHTML = source.refs
-      .map((r) => {
-        const checked = r === selectedRef ? " checked" : "";
-        return `<label class="ref-radio-label"><input type="radio" name="ref" value="${r}"${checked} data-nixsearch-input="ref"><span>${r}</span></label>`;
-      })
-      .join("");
+    replaceRefRadios(container, source.refs, selectedRef, "ref");
     syncHeaderHeight();
+  }
+
+  function replaceRefRadios(container, refs, selectedRef, inputName) {
+    container.replaceChildren(
+      ...refs.map((refId) => {
+        const label = document.createElement("label");
+        label.className = "ref-radio-label";
+
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = inputName;
+        input.value = refId;
+        input.checked = refId === selectedRef;
+        input.dataset.nixsearchInput = "ref";
+
+        const span = document.createElement("span");
+        span.textContent = refId;
+
+        label.append(input, span);
+        return label;
+      }),
+    );
   }
 
   function syncHeaderHeight() {
@@ -628,7 +887,9 @@
         ? refsForRefSetSource(contextActiveRefSet, sourceId)
         : [];
       const shouldUseRefSet = refSetRefs.length > 0;
-      const shouldSetRef = !shouldUseRefSet || refSetRefs.length > 1;
+      const shouldSetRef =
+        !shouldUseRefSet ||
+        refSetRefs.length > 1;
       const sourceMatchesContext = context.sourceId === sourceId;
 
       if (
@@ -731,6 +992,71 @@
 
   window.nixsearchRestoreResultFocus = restoreResultFocus;
 
+  function syncModalStateSafely() {
+    try {
+      syncModalState();
+    } catch {
+      document.documentElement.classList.toggle("modal-open", isEntryModalOpen());
+    }
+  }
+
+  function modalContainerFromHtml(html) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = html || "";
+    return wrapper.querySelector("#entry-modal-container");
+  }
+
+  function applyModalPatch(html, targetUrl) {
+    if (publicUrlKey(targetUrl) !== publicUrlKey()) return false;
+
+    document.querySelectorAll("dialog[open]").forEach((dialog) => {
+      try {
+        dialog.close();
+      } catch {}
+    });
+
+    const existing = document.getElementById("entry-modal-container");
+    const parsed = modalContainerFromHtml(html);
+    let container = existing;
+
+    if (existing && parsed) {
+      existing.replaceWith(parsed);
+      container = parsed;
+    } else if (existing) {
+      existing.innerHTML = "";
+    } else {
+      container = document.createElement("div");
+      container.id = "entry-modal-container";
+      if (parsed) container.innerHTML = parsed.innerHTML;
+      (document.querySelector("main.main") || document.body).appendChild(container);
+    }
+
+    const dialog = document.getElementById("entry-modal");
+    document.querySelectorAll("dialog[open]").forEach((openDialog) => {
+      if (openDialog === dialog) return;
+      try {
+        openDialog.close();
+      } catch {}
+    });
+
+    if (dialog && !dialog.open) {
+      try {
+        dialog.showModal();
+      } catch {}
+    }
+
+    syncModalStateSafely();
+    if (!dialog) {
+      try {
+        restoreResultFocus();
+      } catch {}
+    }
+
+    return true;
+  }
+
+  window.nixsearchApplyModalPatch = applyModalPatch;
+
   function firstVisibleResultRowIndex(rows) {
     const visible = firstVisibleResultRow();
     const index = visible ? rows.indexOf(visible) : -1;
@@ -769,47 +1095,161 @@
     return true;
   }
 
-  function navigate(url, { push = true, syncInputs = false } = {}) {
+  function navigate(
+    url,
+    {
+      push = true,
+      syncInputs = false,
+      restoreMetadata = null,
+      onRestoreMetadata = null,
+      reconcileMode = "always",
+      reconcileSameUrl = false,
+    } = {},
+  ) {
     const next = new URL(url, window.location.href);
     const target = next.pathname + next.search;
     const current = currentPublicUrl();
+    const currentMetadata = exactHeadMetadataFromState(currentHistoryState(), current);
+    const returnMetadataPair = returnMetadataPairForNavigation(
+      current,
+      target,
+      currentMetadata,
+    );
+    const loadsResults = shouldLoadResults(current, target);
+
+    const notifyRestoreMetadata = (restored) => {
+      if (!onRestoreMetadata) return true;
+
+      try {
+        return onRestoreMetadata(restored) !== false;
+      } catch {
+        return false;
+      }
+    };
 
     if (target === current) {
       if (syncInputs) {
         syncInputsFromUrl();
       }
-      syncTitle(target);
+      const restoredMetadata = restoreMetadata
+        ? restoreHeadMetadata(restoreMetadata)
+        : false;
+      const restoreCallbackOk = restoreMetadata
+        ? notifyRestoreMetadata(restoredMetadata)
+        : true;
+      const skipReconcile =
+        reconcileMode === "unless-restored" &&
+        restoredMetadata &&
+        !loadsResults &&
+        restoreCallbackOk;
+
+      if (restoreMetadata) {
+        setLoading(loadsResults);
+      }
+      if (skipReconcile) currentUrl = currentPublicUrl();
+      if (reconcileSameUrl && !skipReconcile) reconcile(current);
       return false;
     }
 
-    const loadsResults = shouldLoadResults(current, target);
+    const nextState = pendingHistoryState(target, { returnMetadataPair });
 
     if (push) {
-      history.pushState(null, "", target);
+      history.pushState(nextState, "", target);
     } else {
-      history.replaceState(null, "", target);
+      history.replaceState(nextState, "", target);
     }
 
     if (syncInputs) {
       syncInputsFromUrl();
     }
 
+    const restoredMetadata = restoreMetadata
+      ? restoreHeadMetadata(restoreMetadata)
+      : false;
+    const restoreCallbackOk = restoreMetadata
+      ? notifyRestoreMetadata(restoredMetadata)
+      : true;
+
     setLoading(loadsResults);
     if (loadsResults) {
       window.scrollTo(0, 0);
     }
-    syncTitle(target);
+    if (
+      reconcileMode === "unless-restored" &&
+      restoredMetadata &&
+      !loadsResults &&
+      restoreCallbackOk
+    ) {
+      currentUrl = currentPublicUrl();
+      return true;
+    }
     reconcile(current);
     return true;
+  }
+
+  function ensureEntryModalContainer() {
+    let container = document.getElementById("entry-modal-container");
+    if (container) return container;
+
+    container = document.createElement("div");
+    container.id = "entry-modal-container";
+    (document.querySelector("main.main") || document.body).appendChild(container);
+    return container;
+  }
+
+  function optimisticallyRemoveEntryModal() {
+    try {
+      const dialog = document.getElementById("entry-modal");
+      if (dialog && dialog.open) dialog.close();
+
+      const container = ensureEntryModalContainer();
+      container.innerHTML = "";
+      document.documentElement.classList.remove("modal-open");
+
+      try {
+        syncModalState();
+      } catch {
+        document.documentElement.classList.remove("modal-open");
+      }
+
+      try {
+        restoreResultFocus();
+      } catch {}
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function closeEntryModal(dialog) {
     const url = dialog.getAttribute("data-close-url");
     if (!url) return false;
+    const state = currentHistoryState();
+    const returnMetadata = state.nixsearchReturnHeadMetadata;
+    const returnMetadataUrl = state.nixsearchReturnHeadMetadataUrl;
+    const closeTargetKey = publicUrlKey(url);
+    const canRestoreReturnMetadata =
+      returnMetadata &&
+      returnMetadataUrl === closeTargetKey &&
+      !shouldLoadResults(currentPublicUrl(), url);
 
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();
-    navigate(url);
+
+    if (canRestoreReturnMetadata) {
+      navigate(url, {
+        restoreMetadata: returnMetadata,
+        syncInputs: true,
+        reconcileMode: "unless-restored",
+        reconcileSameUrl: true,
+        onRestoreMetadata: (restored) =>
+          restored ? optimisticallyRemoveEntryModal() : false,
+      });
+    } else {
+      navigate(url, { syncInputs: true, reconcileSameUrl: true });
+    }
+
     return true;
   }
 
@@ -935,6 +1375,12 @@
     if (!link) return;
     if (link.target === "_blank") return;
     if (link.hasAttribute("download")) return;
+
+    if (link.matches(".modal-backdrop, [data-role='entry-close']")) {
+      const dialog = document.getElementById("entry-modal");
+      if (dialog && closeEntryModal(dialog)) evt.preventDefault();
+      return;
+    }
 
     const url = new URL(link.href, window.location.href);
     if (url.origin !== window.location.origin) return;
@@ -1112,13 +1558,26 @@
     navigate(buildSearchUrlFromInputs());
   });
 
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", (evt) => {
     const previous = currentUrl;
+    const current = currentPublicUrl();
+    const loadsResults = shouldLoadResults(previous, current);
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();
     syncInputsFromUrl();
-    setLoading(shouldLoadResults(previous, currentPublicUrl()));
-    syncTitle();
+    const restoredMetadata = restoreHeadMetadata(
+      exactHeadMetadataFromState(evt.state, current),
+    );
+    setLoading(loadsResults);
+    if (
+      isPopstateModalClose(previous, current) &&
+      restoredMetadata &&
+      !loadsResults &&
+      optimisticallyRemoveEntryModal()
+    ) {
+      currentUrl = current;
+      return;
+    }
     reconcile(previous);
   });
 
@@ -1127,8 +1586,10 @@
 
     syncInputsFromUrl();
     setLoading(false);
-    syncTitle();
     currentUrl = currentPublicUrl();
+    if (!restoreHeadMetadata(exactHeadMetadataFromState())) {
+      reconcile("");
+    }
   });
 
   window.nixsearchNavigate = navigate;
@@ -1143,15 +1604,23 @@
     offset,
     limit = PAGE_SIZE,
     pageUrl = currentPublicUrl(),
+    requestGenerationId = currentGenerationId(),
     signal = undefined,
   ) {
-    const url = `${RESULTS_SLICE_URL}?url=${encodeURIComponent(pageUrl)}&offset=${offset}&limit=${limit}`;
-    const res = await fetch(url, { signal });
+    const params = new URLSearchParams();
+    params.set("url", pageUrl);
+    params.set("offset", String(offset));
+    params.set("limit", String(limit));
+    params.set("generation_id", requestGenerationId);
+
+    const res = await fetch(`${RESULTS_SLICE_URL}?${params.toString()}`, {
+      signal,
+    });
     return await res.json();
   }
 
-  function virtualSliceCacheKey(requestUrl, offset, limit) {
-    return `${requestUrl}\n${offset}\n${limit}`;
+  function virtualSliceCacheKey(requestGenerationId, requestUrl, offset, limit) {
+    return JSON.stringify([requestGenerationId, requestUrl, offset, limit]);
   }
 
   function rememberVirtualSlice(key, data) {
@@ -1203,6 +1672,7 @@
       startOffset,
       endOffset: Math.min(total, startOffset + rows.length),
       requestUrl: currentPublicUrl(),
+      generationId: currentGenerationId(),
       topSpacer: createVirtualSpacer("top"),
       bottomSpacer: createVirtualSpacer("bottom"),
       topSpacerHeight: startOffset * rowHeight,
@@ -1355,16 +1825,16 @@
   }
 
   function scheduleVirtualLoad() {
-    if (!virtualResults || virtualLoadScheduled) return;
+    if (generationChanging || !virtualResults || virtualLoadScheduled) return;
     virtualLoadScheduled = true;
     requestAnimationFrame(() => {
       virtualLoadScheduled = false;
-      loadVirtualRowsNearViewport();
+      if (!generationChanging) loadVirtualRowsNearViewport();
     });
   }
 
   async function loadVirtualRowsNearViewport() {
-    if (!virtualResults) return;
+    if (generationChanging || !virtualResults) return;
 
     const targetOffset = virtualOffsetAtViewport();
     const previousTargetOffset = virtualLastTargetOffset;
@@ -1465,24 +1935,114 @@
     virtualActiveRequest = null;
   }
 
+  function resetVirtualStateForPatch() {
+    cancelVirtualRequest();
+    virtualRequestEpoch += 1;
+    virtualSliceCache.clear();
+    virtualLoadScheduled = false;
+    virtualLastTargetOffset = null;
+    virtualResults = null;
+  }
+
+  function clearGenerationChangeWatchdog() {
+    if (!generationChangeWatchdog) return;
+    clearTimeout(generationChangeWatchdog);
+    generationChangeWatchdog = null;
+  }
+
+  function beginGenerationChange() {
+    generationChanging = true;
+    clearGenerationChangeWatchdog();
+    setVirtualSpacerLoading("replace", false);
+    resetVirtualStateForPatch();
+
+    generationChangeWatchdog = setTimeout(() => {
+      generationChanging = false;
+      generationChangeWatchdog = null;
+      finishResultsPatch();
+    }, 10000);
+  }
+
+  function finishGenerationChange() {
+    clearGenerationChangeWatchdog();
+    generationId = readGenerationId();
+    generationChanging = false;
+    finishResultsPatch();
+  }
+
+  function applyGenerationChange(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (typeof payload.targetUrl !== "string") return false;
+    if (publicUrlKey(payload.targetUrl) !== publicUrlKey()) return false;
+    if (typeof payload.generationStateHtml !== "string") return false;
+    if (typeof payload.resultsHtml !== "string") return false;
+
+    const generationState = parsedElementFromHtml(
+      payload.generationStateHtml,
+      "#generation-state",
+    );
+    const results = parsedElementFromHtml(payload.resultsHtml, "#results");
+    if (!generationState || !results) return false;
+
+    beginGenerationChange();
+
+    try {
+      if (typeof payload.generationId === "string") {
+        generationId = payload.generationId;
+      }
+
+      if (!replaceParsedElement(generationState, "#generation-state")) {
+        return false;
+      }
+
+      if (!replaceResultsElement(results)) {
+        return false;
+      }
+
+      if (typeof payload.modalHtml === "string") {
+        applyModalPatch(payload.modalHtml, payload.targetUrl);
+      }
+
+      if (payload.metadata && typeof payload.metadata === "object") {
+        applyHeadMetadata(payload.metadata, payload.targetUrl);
+      }
+
+      return true;
+    } finally {
+      finishGenerationChange();
+    }
+  }
+
+  window.nixsearchApplyGenerationChange = applyGenerationChange;
+
   async function loadVirtualSlice(offset, mode, options = {}) {
-    if (!virtualResults) return;
+    if (generationChanging || !virtualResults) return;
 
     const state = virtualResults;
     const requestUrl = state.requestUrl;
+    const requestGenerationId = state.generationId;
+    const requestEpoch = virtualRequestEpoch;
     const limit = options.limit || PAGE_SIZE;
     const normalizedOffset = Math.max(
       0,
       Math.min(offset, Math.max(0, state.total - 1)),
     );
-    const cacheKey = virtualSliceCacheKey(requestUrl, normalizedOffset, limit);
+    const cacheKey = virtualSliceCacheKey(
+      requestGenerationId,
+      requestUrl,
+      normalizedOffset,
+      limit,
+    );
     const cached = virtualSliceCache.get(cacheKey);
 
     if (virtualActiveRequest && virtualActiveRequest.key === cacheKey) return;
 
     if (cached) {
       if (options.abortExisting || mode === "replace") cancelVirtualRequest();
-      if (applyVirtualSlice(cached, mode, normalizedOffset)) {
+      if (
+        virtualSliceStillCurrent(requestUrl, requestGenerationId, requestEpoch) &&
+        applyVirtualSlice(cached, mode, normalizedOffset)
+      ) {
         scheduleVisiblePageSync();
         scheduleVirtualLoad();
       }
@@ -1507,12 +2067,17 @@
         normalizedOffset,
         limit,
         requestUrl,
+        requestGenerationId,
         controller.signal,
       );
 
+      if (data && data.error === "stale_generation") {
+        beginStaleGenerationReconcile();
+        return;
+      }
+
       if (
-        !virtualResults ||
-        virtualResults.requestUrl !== requestUrl ||
+        !virtualSliceStillCurrent(requestUrl, requestGenerationId, requestEpoch) ||
         !virtualActiveRequest ||
         virtualActiveRequest.id !== requestId
       ) {
@@ -1539,12 +2104,37 @@
       if (ownsActiveRequest) {
         virtualActiveRequest = null;
       }
-      scheduleVirtualLoad();
+      if (!generationChanging) scheduleVirtualLoad();
     }
   }
 
+  function virtualSliceStillCurrent(
+    requestUrl,
+    requestGenerationId,
+    requestEpoch,
+  ) {
+    return (
+      !generationChanging &&
+      virtualRequestEpoch === requestEpoch &&
+      virtualResults &&
+      virtualResults.requestUrl === requestUrl &&
+      virtualResults.generationId === requestGenerationId
+    );
+  }
+
+  function beginStaleGenerationReconcile() {
+    beginGenerationChange();
+    reconcile(currentPublicUrl());
+  }
+
   function applyVirtualSlice(data, mode, requestedOffset) {
-    if (!virtualResults || typeof data.rows !== "string") return false;
+    if (
+      generationChanging ||
+      !virtualResults ||
+      typeof data.rows !== "string"
+    ) {
+      return false;
+    }
 
     const state = virtualResults;
     const previousTotal = state.total;
@@ -1653,8 +2243,15 @@
 
   const initialPage = currentPageFromUrl();
   initializeVirtualResults();
-  scrollToResultPage(initialPage);
-  scheduleVisiblePageSync();
+  if (initialPage > 1) {
+    requestAnimationFrame(() => {
+      scrollToResultPage(initialPage);
+      scheduleVisiblePageSync();
+      scheduleVirtualLoad();
+    });
+  } else {
+    scheduleVisiblePageSync();
+  }
   window.addEventListener(
     "scroll",
     () => {
@@ -1672,6 +2269,7 @@
   });
   window.addEventListener(RECONCILE_EVENT, () => {
     setTimeout(() => {
+      if (generationChanging) return;
       initializeVirtualResults();
       scheduleVisiblePageSync();
     }, 50);

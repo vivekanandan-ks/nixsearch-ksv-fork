@@ -13,9 +13,41 @@ pub(crate) fn validate_non_empty(name: &str, value: &str) -> Result<()> {
 pub(crate) fn validate_id(name: &str, value: &str) -> Result<()> {
     validate_non_empty(name, value)?;
 
-    if value.contains('/') {
+    if matches!(value, "." | "..") {
         return Err(ConfigError::Validation(format!(
-            "{name} must not contain '/': {value:?}"
+            "{name} must not be a dot path segment: {value:?}"
+        )));
+    }
+
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(ConfigError::Validation(format!(
+            "{name} must contain only ASCII letters, digits, '.', '_', or '-': {value:?}"
+        )));
+    }
+
+    Ok(())
+}
+
+const RESERVED_SOURCE_IDS: &[&str] = &[
+    "-",
+    ".",
+    "..",
+    "robots.txt",
+    "sitemap.xml",
+    "sitemaps",
+    "favicon.ico",
+    "apple-touch-icon.png",
+];
+
+pub(crate) fn validate_source_id(name: &str, value: &str) -> Result<()> {
+    validate_id(name, value)?;
+
+    if RESERVED_SOURCE_IDS.contains(&value) {
+        return Err(ConfigError::Validation(format!(
+            "{name} is reserved for web routing: {value:?}"
         )));
     }
 

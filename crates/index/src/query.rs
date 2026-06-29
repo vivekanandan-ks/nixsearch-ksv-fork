@@ -22,6 +22,7 @@ impl SearchIndex {
             let mut scope_clauses = Vec::with_capacity(scopes.len());
 
             for scope in scopes {
+                let document_kind = scope.entry_kind.document_kind();
                 let source_query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
                     Term::from_field_text(self.fields.source, &scope.source),
                     tantivy::schema::IndexRecordOption::Basic,
@@ -32,9 +33,15 @@ impl SearchIndex {
                     tantivy::schema::IndexRecordOption::Basic,
                 ));
 
+                let kind_query: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
+                    Term::from_field_text(self.fields.kind, document_kind.as_str()),
+                    tantivy::schema::IndexRecordOption::Basic,
+                ));
+
                 let pair_query: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
                     (Occur::Must, source_query),
                     (Occur::Must, ref_query),
+                    (Occur::Must, kind_query),
                 ]));
 
                 scope_clauses.push((Occur::Should, pair_query));
@@ -114,6 +121,7 @@ impl SearchIndex {
                 self.fields.name_leaf,
                 self.fields.attribute_exact,
                 self.fields.main_program,
+                self.fields.programs,
                 self.fields.option_set,
                 self.fields.parents,
                 self.fields.package_set,
@@ -136,6 +144,7 @@ impl SearchIndex {
         parser.set_field_boost(self.fields.name_leaf, 6.0);
         parser.set_field_boost(self.fields.attribute_exact, 25.0);
         parser.set_field_boost(self.fields.main_program, 20.0);
+        parser.set_field_boost(self.fields.programs, 14.0);
         parser.set_field_boost(self.fields.option_set, 3.0);
         parser.set_field_boost(self.fields.parents, 2.0);
         parser.set_field_boost(self.fields.package_set, 2.0);
@@ -207,6 +216,13 @@ impl SearchIndex {
             self.fields.main_program,
             value,
             20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.programs,
+            value,
+            14.0,
             IndexRecordOption::Basic,
         );
         add_boosted_term_clause(
@@ -287,6 +303,13 @@ impl SearchIndex {
             self.fields.main_program,
             term,
             20.0,
+            IndexRecordOption::Basic,
+        );
+        add_boosted_term_clause(
+            clauses,
+            self.fields.programs,
+            term,
+            14.0,
             IndexRecordOption::Basic,
         );
         add_boosted_term_clause(

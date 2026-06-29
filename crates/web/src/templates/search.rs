@@ -10,7 +10,12 @@ use super::source_tag::color_for_source;
 const ALL_TAB_COLOR: &str = "#d4d4d8";
 
 pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: &str) -> Markup {
-    let has_multiple_sources = config.sources.len() > 1;
+    let has_multiple_sources = config
+        .sources
+        .values()
+        .filter(|source| source.has_searchable_refs())
+        .count()
+        > 1;
     let source_color = match &state.source_filter {
         SourceFilter::Named(source_id) if config.sources.contains_key(source_id) => {
             Some(color_for_source(config, source_id))
@@ -57,7 +62,7 @@ fn render_source_tabs(config: &AppConfig, state: &PageState) -> Markup {
                     style=(format!("--tab-color: {ALL_TAB_COLOR};")) {
                     "All"
                 }
-                @for (id, source) in &config.sources {
+                @for (id, source) in config.sources.iter().filter(|(_, source)| source.has_searchable_refs()) {
                     @let name = source.name.as_deref().unwrap_or(id);
                     @let is_selected = matches!(&state.source_filter, SourceFilter::Named(s) if s == id);
                     @let color = color_for_source(config, id);
@@ -105,7 +110,7 @@ fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<
     html! {
         div.ref-radios.noscript-ref-radios
             style=[source_color.map(|color| format!("--source-color: {color};"))] {
-            @for ref_config in &source.refs {
+            @for ref_config in source.searchable_refs() {
                 @let ref_id = ref_config.id.as_str();
                 @let is_selected = state.source_ref.as_deref() == Some(ref_id);
                 @let next = {
@@ -133,7 +138,7 @@ fn render_ref_radios(config: &AppConfig, state: &PageState) -> Markup {
         ),
         SourceFilter::Named(source_id) => match config.sources.get(source_id.as_str()) {
             Some(source) => (
-                source.refs.iter().map(|r| r.id.as_str()).collect(),
+                source.searchable_refs().map(|r| r.id.as_str()).collect(),
                 state.source_ref.as_deref(),
                 "ref",
             ),

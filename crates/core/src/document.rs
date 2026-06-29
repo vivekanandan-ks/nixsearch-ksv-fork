@@ -11,7 +11,7 @@ use crate::ingest::IngestContext;
 use crate::name::{NameParts, make_document_id};
 use crate::source_link::{Declaration, Repo};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DocumentKind {
     Option,
@@ -27,6 +27,33 @@ impl DocumentKind {
             Self::Package => "package",
             Self::App => "app",
             Self::Service => "service",
+        }
+    }
+
+    pub fn is_supported_indexed_entry(&self) -> bool {
+        IndexedEntryKind::from_document_kind(self).is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedEntryKind {
+    Package,
+    Option,
+}
+
+impl IndexedEntryKind {
+    pub fn from_document_kind(kind: &DocumentKind) -> Option<Self> {
+        match kind {
+            DocumentKind::Package => Some(Self::Package),
+            DocumentKind::Option => Some(Self::Option),
+            DocumentKind::App | DocumentKind::Service => None,
+        }
+    }
+
+    pub fn document_kind(self) -> DocumentKind {
+        match self {
+            Self::Package => DocumentKind::Package,
+            Self::Option => DocumentKind::Option,
         }
     }
 }
@@ -793,13 +820,85 @@ impl SearchDocument {
     pub fn kind(&self) -> &DocumentKind {
         &self.common().kind
     }
+
+    pub fn variant_kind(&self) -> DocumentKind {
+        match self {
+            Self::Option(_) => DocumentKind::Option,
+            Self::Package(_) => DocumentKind::Package,
+        }
+    }
+
+    pub fn validate_identity(&self) -> Result<(), String> {
+        let common = self.common();
+        let variant_kind = self.variant_kind();
+
+        if common.kind != variant_kind {
+            return Err(format!(
+                "document variant kind {:?} does not match common kind {:?} for {}",
+                variant_kind, common.kind, common.id
+            ));
+        }
+
+        if common.source.trim().is_empty() || matches!(common.source.as_str(), "." | "..") {
+            return Err(format!("document source is invalid for {}", common.id));
+        }
+
+        if common.ref_id.trim().is_empty() || matches!(common.ref_id.as_str(), "." | "..") {
+            return Err(format!("document ref_id is invalid for {}", common.id));
+        }
+
+        let expected_name_parts = NameParts::from_dotted(&common.name);
+        if common.name.trim().is_empty()
+            || common.name.split('.').any(str::is_empty)
+            || expected_name_parts.segments.is_empty()
+        {
+            return Err(format!("document name is invalid for {}", common.id));
+        }
+
+        let expected_id = make_document_id(
+            &common.source,
+            &common.ref_id,
+            variant_kind.as_str(),
+            &common.name,
+        );
+        if common.id != expected_id {
+            return Err(format!(
+                "document id mismatch for {}: expected {expected_id}",
+                common.id
+            ));
+        }
+
+        if common.name_parts != expected_name_parts {
+            return Err(format!("document name_parts mismatch for {}", common.id));
+        }
+
+        if let Self::Package(package) = self
+            && package.attribute != package.common.name
+        {
+            return Err(format!(
+                "package attribute {:?} does not match common name {:?}",
+                package.attribute, package.common.name
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn is_seo_eligible_entry(&self) -> bool {
+        match self {
+            Self::Package(_) => true,
+            Self::Option(option) => option.internal != Some(true) && option.visible != Some(false),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::ingest::IngestContext;
 
-    use super::{CommonDoc, DocText, DocumentKind, PackageDoc};
+    use super::{
+        CommonDoc, DocText, DocumentKind, IndexedEntryKind, OptionDoc, PackageDoc, SearchDocument,
+    };
 
     #[test]
     fn common_doc_uses_context_identity() {
@@ -822,6 +921,34 @@ mod tests {
         assert_eq!(doc.name_parts.root.as_deref(), Some("programs"));
         assert_eq!(doc.name_parts.groups, ["programs", "programs.git"]);
         assert_eq!(doc.name_parts.leaf.as_deref(), Some("enable"));
+    }
+
+    #[test]
+    fn validate_identity_rejects_degenerate_identity_fields() {
+        let context = IngestContext {
+            source: "nixpkgs".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+        let mut doc = PackageDoc::new(&context, "git");
+
+        doc.common.source.clear();
+        doc.common.id = crate::name::make_document_id("", "unstable", "package", "git");
+        let error = SearchDocument::Package(doc.clone())
+            .validate_identity()
+            .unwrap_err();
+        assert!(error.contains("source is invalid"));
+
+        doc.common.source = "nixpkgs".to_owned();
+        doc.common.name = ".".to_owned();
+        doc.attribute = ".".to_owned();
+        doc.common.name_parts = crate::name::NameParts::from_dotted(&doc.common.name);
+        doc.common.id = crate::name::make_document_id("nixpkgs", "unstable", "package", ".");
+        let error = SearchDocument::Package(doc)
+            .validate_identity()
+            .unwrap_err();
+        assert!(error.contains("name is invalid"));
     }
 
     #[test]
@@ -991,5 +1118,71 @@ mod tests {
         let value = DocText::Plain("Already plain.".to_owned());
 
         assert_eq!(value.plain_text(), "Already plain.");
+    }
+
+    #[test]
+    fn supported_indexed_entry_kinds_are_package_and_option() {
+        assert!(DocumentKind::Package.is_supported_indexed_entry());
+        assert!(DocumentKind::Option.is_supported_indexed_entry());
+        assert!(!DocumentKind::App.is_supported_indexed_entry());
+        assert!(!DocumentKind::Service.is_supported_indexed_entry());
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Package),
+            Some(IndexedEntryKind::Package)
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Option),
+            Some(IndexedEntryKind::Option)
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::App),
+            None
+        );
+        assert_eq!(
+            IndexedEntryKind::from_document_kind(&DocumentKind::Service),
+            None
+        );
+        assert_eq!(
+            IndexedEntryKind::Package.document_kind(),
+            DocumentKind::Package
+        );
+        assert_eq!(
+            IndexedEntryKind::Option.document_kind(),
+            DocumentKind::Option
+        );
+    }
+
+    #[test]
+    fn package_document_is_seo_eligible() {
+        let context = IngestContext {
+            source: "nixpkgs".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+        let document = SearchDocument::Package(PackageDoc::new(&context, "git"));
+
+        assert!(document.is_seo_eligible_entry());
+    }
+
+    #[test]
+    fn option_document_visibility_controls_seo_eligibility() {
+        let context = IngestContext {
+            source: "nixos".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+
+        let visible = SearchDocument::Option(OptionDoc::new(&context, "services.nginx.enable"));
+        assert!(visible.is_seo_eligible_entry());
+
+        let mut internal = OptionDoc::new(&context, "internal.option");
+        internal.internal = Some(true);
+        assert!(!SearchDocument::Option(internal).is_seo_eligible_entry());
+
+        let mut hidden = OptionDoc::new(&context, "hidden.option");
+        hidden.visible = Some(false);
+        assert!(!SearchDocument::Option(hidden).is_seo_eligible_entry());
     }
 }

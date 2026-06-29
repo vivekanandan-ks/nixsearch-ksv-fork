@@ -6,9 +6,13 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use nixsearch_core::artifact::ArtifactKind;
 use nixsearch_core::document::SearchDocument;
+use nixsearch_core::target::{RefRole, TargetCapabilities};
+use nixsearch_index::annotation::EntryAnnotationIndex;
 use nixsearch_index::manifest::{IndexGenerationManifest, IndexTargetManifest};
 use nixsearch_index::search::SearchIndex;
-use nixsearch_index::store::IndexStore;
+use nixsearch_index::seo::SeoSidecar;
+use nixsearch_index::seo_sidecar::SeoFactsArtifact;
+use nixsearch_index::store::{IndexStore, PublishedGeneration};
 use nixsearch_test_support::{
     REF_SMALL, SOURCE_FIXTURES, canonical_documents, ingest_context_for, option_doc_for,
 };
@@ -44,6 +48,8 @@ pub fn publish_canonical_options_index_with_generated_at(
             source: SOURCE_FIXTURES.to_owned(),
             ref_id: REF_SMALL.to_owned(),
             artifact_kind: ArtifactKind::OptionsJson,
+            target_role: RefRole::Search,
+            indexes_search_documents: true,
             document_count: 4,
             artifact_hash: Some("fixture-options-hash".to_owned()),
             revision: Some("fixture-revision".to_owned()),
@@ -78,6 +84,8 @@ pub fn publish_canonical_mixed_index_with_generated_at(
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
                 artifact_kind: ArtifactKind::OptionsJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
                 document_count: options_count,
                 artifact_hash: Some("fixture-options-hash".to_owned()),
                 revision: Some("fixture-revision".to_owned()),
@@ -86,6 +94,8 @@ pub fn publish_canonical_mixed_index_with_generated_at(
                 source: SOURCE_FIXTURES.to_owned(),
                 ref_id: REF_SMALL.to_owned(),
                 artifact_kind: ArtifactKind::PackagesJson,
+                target_role: RefRole::Search,
+                indexes_search_documents: true,
                 document_count: packages_count,
                 artifact_hash: Some("fixture-packages-hash".to_owned()),
                 revision: Some("fixture-revision".to_owned()),
@@ -130,21 +140,67 @@ pub fn publish_documents_with_manifest_targets(
     let store = IndexStore::new(index_root);
     let generation = store.create_generation_path().unwrap();
 
-    let index = SearchIndex::create_or_replace(&generation).unwrap();
+    let index = SearchIndex::create_or_replace(store.index_path(&generation)).unwrap();
     let mut writer = index.writer().unwrap();
+    let mut annotations = EntryAnnotationIndex::new();
 
     for doc in &documents {
-        writer.add_document(doc).unwrap();
+        annotations.observe(doc);
+    }
+
+    for doc in &documents {
+        writer
+            .add_document(doc, &annotations.annotation_for(doc))
+            .unwrap();
     }
 
     writer.commit().unwrap();
 
     let manifest =
-        IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at);
+        IndexGenerationManifest::with_generated_at(documents.len(), targets, generated_at).unwrap();
 
+    let published_generation = PublishedGeneration {
+        path: generation.clone(),
+        manifest: manifest.clone(),
+    };
+
+    SeoFactsArtifact::write_derived_index_verified(&store, &published_generation).unwrap();
     store.write_manifest(&generation, &manifest).unwrap();
+    store.write_integrity(&published_generation, true).unwrap();
     store.publish(&generation).unwrap();
     store.current_path().unwrap()
+}
+
+/// Writes a sidecar directly, bypassing production validation.
+///
+/// Use only in tests that intentionally simulate corrupt on-disk sidecars.
+pub fn write_raw_seo_sidecar(
+    _store: &IndexStore,
+    generation: &PublishedGeneration,
+    sidecar: &SeoSidecar,
+) {
+    std::fs::write(
+        SeoFactsArtifact::path(&generation.path),
+        serde_json::to_vec_pretty(sidecar).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Writes a manifest directly, bypassing production validation.
+///
+/// Use only in tests that intentionally simulate corrupt on-disk manifests. Call
+/// `refresh_generation_id` before using this helper when the test needs a valid
+/// generation id.
+pub fn write_raw_manifest(
+    store: &IndexStore,
+    generation: &PublishedGeneration,
+    manifest: &IndexGenerationManifest,
+) {
+    std::fs::write(
+        store.manifest_path(&generation.path),
+        serde_json::to_vec_pretty(manifest).unwrap(),
+    )
+    .unwrap();
 }
 
 pub fn index_target(
@@ -153,12 +209,20 @@ pub fn index_target(
     artifact_kind: ArtifactKind,
     document_count: usize,
 ) -> IndexTargetManifest {
+    let target_role = RefRole::default_for_artifact_kind(artifact_kind);
+
     IndexTargetManifest {
         source: source.to_owned(),
         ref_id: ref_id.to_owned(),
         artifact_kind,
+        target_role,
+        indexes_search_documents: TargetCapabilities::new(target_role, artifact_kind)
+            .indexes_search_documents(),
         document_count,
-        artifact_hash: None,
+        artifact_hash: Some(format!(
+            "fixture-{source}-{ref_id}-{}-{document_count}",
+            artifact_kind.as_str()
+        )),
         revision: None,
     }
 }
