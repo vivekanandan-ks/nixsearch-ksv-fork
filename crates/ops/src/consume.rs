@@ -162,6 +162,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_ref_mismatch_errors_before_consumption() {
+        let tempdir = tempdir().unwrap();
+        let store = ArtifactStore::local(tempdir.path()).unwrap();
+        let target = target(SourceKind::Apps, ArtifactKind::FlakeInfoJson);
+        let mut produced = put_artifact(
+            &store,
+            ArtifactKind::FlakeInfoJson,
+            Bytes::from_static(br#"[{"type":"app","app_attr_name":"hello"}]"#),
+        )
+        .await;
+        produced.artifact_ref =
+            ArtifactRef::latest(SOURCE, "other-ref", ArtifactKind::FlakeInfoJson);
+
+        let error = consume_target(&store, &target, &produced)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("artifact ref mismatch"));
+    }
+
+    #[tokio::test]
     async fn flake_info_json_consumes_to_zero_documents_for_apps_services_and_mixed() {
         for source_kind in [SourceKind::Apps, SourceKind::Services, SourceKind::Mixed] {
             let tempdir = tempdir().unwrap();

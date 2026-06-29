@@ -347,7 +347,7 @@ mod tests {
             indexes_search_documents: TargetCapabilities::new(target_role, artifact_kind)
                 .indexes_search_documents(),
             document_count,
-            artifact_hash: None,
+            artifact_hash: Some("fixture-hash".to_owned()),
             revision: None,
         }
     }

@@ -1533,7 +1533,7 @@ mod tests {
                 target_role: RefRole::IndexOnly,
                 indexes_search_documents: true,
                 document_count: 1,
-                artifact_hash: None,
+                artifact_hash: Some("fixture-hash".to_owned()),
                 revision: None,
             }],
         );

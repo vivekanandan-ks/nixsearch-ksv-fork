@@ -41,7 +41,7 @@ impl<'a> ResultsContent<'a> {
             Self::Home => MetadataContent::Home,
             Self::SearchResults(result) => MetadataContent::SearchResults(result),
             Self::DirectEntry(_) => MetadataContent::DirectEntry,
-            Self::Error { .. } => MetadataContent::Error,
+            Self::Error { title, message } => MetadataContent::Error { title, message },
         }
     }
 }

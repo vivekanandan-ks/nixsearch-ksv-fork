@@ -56,6 +56,8 @@ impl IndexStore {
             .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
         validate_index_schema_version(&manifest)
             .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
+        validate_manifest_invariants(&manifest)
+            .with_context(|| format!("failed to validate index metadata {}", path.as_str()))?;
 
         Ok(manifest)
     }

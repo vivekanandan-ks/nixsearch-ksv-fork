@@ -13,6 +13,12 @@ pub(crate) fn validate_non_empty(name: &str, value: &str) -> Result<()> {
 pub(crate) fn validate_id(name: &str, value: &str) -> Result<()> {
     validate_non_empty(name, value)?;
 
+    if matches!(value, "." | "..") {
+        return Err(ConfigError::Validation(format!(
+            "{name} must not be a dot path segment: {value:?}"
+        )));
+    }
+
     if !value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))

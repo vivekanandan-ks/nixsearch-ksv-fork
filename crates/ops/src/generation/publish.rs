@@ -22,7 +22,7 @@ impl IncompleteGenerationGuard {
         &self.path
     }
 
-    pub(crate) fn begin_publish(&mut self) {
+    pub(crate) fn mark_published(&mut self) {
         self.cleanup_enabled = false;
     }
 }

@@ -46,7 +46,7 @@ impl EntryAnnotationIndex {
         });
 
         SearchHitAnnotation {
-            unique_within_kind: count.map(|count| *count == 1).unwrap_or(true),
+            unique_within_kind: count.map(|count| *count == 1).unwrap_or(false),
         }
     }
 }

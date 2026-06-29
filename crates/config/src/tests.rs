@@ -903,8 +903,6 @@ fn rejects_invalid_source_ids() {
 fn rejects_reserved_source_ids() {
     for source_id in [
         "-",
-        ".",
-        "..",
         "robots.txt",
         "sitemap.xml",
         "sitemaps",
@@ -920,6 +918,21 @@ fn rejects_reserved_source_ids() {
         ));
 
         assert_error_contains(&error, "reserved for web routing");
+    }
+}
+
+#[test]
+fn rejects_dot_segment_ids() {
+    for source_id in [".", ".."] {
+        let error = load_toml_error(&format!(
+            r#"
+            [sources."{source_id}"]
+            name = "Reserved"
+            kind = "options"
+            "#
+        ));
+
+        assert_error_contains(&error, "must not be a dot path segment");
     }
 }
 

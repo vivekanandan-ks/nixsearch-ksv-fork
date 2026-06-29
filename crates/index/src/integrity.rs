@@ -152,9 +152,12 @@ fn collect_index_files(
         let entry = entry.with_context(|| format!("failed to read index dir entry in {path}"))?;
         let entry_path = Utf8PathBuf::from_path_buf(entry.path())
             .map_err(|path| anyhow::anyhow!("index path is not valid UTF-8: {}", path.display()))?;
-        let metadata = entry
-            .metadata()
+        let metadata = fs::symlink_metadata(&entry_path)
             .with_context(|| format!("failed to stat index file {entry_path}"))?;
+
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("unexpected symlink in index path {entry_path}");
+        }
 
         if metadata.is_dir() {
             collect_index_files(root, &entry_path, entries)?;

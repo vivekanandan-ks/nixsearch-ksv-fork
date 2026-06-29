@@ -97,6 +97,7 @@ async fn verify_produced_target(
     let verified = artifact_store
         .get_verified_artifact(&produced.artifact_ref)
         .await?;
+    validate_verified_metadata_matches_produced(&target, &produced, &verified.metadata)?;
 
     Ok(ProducedTarget {
         key,
@@ -105,6 +106,31 @@ async fn verify_produced_target(
         produced,
         verified_metadata: verified.metadata,
     })
+}
+
+fn validate_verified_metadata_matches_produced(
+    target: &TargetRef,
+    produced: &ProducedArtifact,
+    verified: &nixsearch_store::ArtifactMetadata,
+) -> Result<()> {
+    if produced.metadata.content_hash != verified.content_hash
+        || produced.metadata.size_bytes != verified.size_bytes
+        || produced.metadata.revision != verified.revision
+    {
+        bail!(
+            "verified artifact metadata mismatch for {}/{}: producer reported hash={:?} size={} revision={:?}, store has hash={:?} size={} revision={:?}",
+            target.source_id,
+            target.ref_config.id,
+            produced.metadata.content_hash,
+            produced.metadata.size_bytes,
+            produced.metadata.revision,
+            verified.content_hash,
+            verified.size_bytes,
+            verified.revision
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_produced_artifact_identity(

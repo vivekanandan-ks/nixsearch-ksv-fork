@@ -5,7 +5,7 @@ use nixsearch_index::generation_validator::GenerationValidator;
 use nixsearch_index::seo_sidecar::{ManifestCheckedSeoFacts, SeoFactsArtifact};
 use nixsearch_index::store::{IndexStore, PublishedGeneration};
 
-use crate::lock::UpdateLock;
+use crate::lock::{UpdateLock, update_lock_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeoSidecarRepairOutcome {
@@ -30,8 +30,17 @@ pub enum SeoSidecarRepairOutcome {
 
 pub fn repair_current_seo_sidecar_under_lock(
     config: &AppConfig,
-    _update_lock: &UpdateLock,
+    update_lock: &UpdateLock,
 ) -> Result<SeoSidecarRepairOutcome> {
+    let expected_lock_path = update_lock_path(&config.data.index_dir);
+    if update_lock.path() != expected_lock_path {
+        anyhow::bail!(
+            "maintenance lock {} does not protect index directory {}",
+            update_lock.path(),
+            config.data.index_dir
+        );
+    }
+
     let index_store = IndexStore::new(&config.data.index_dir);
     let validator = GenerationValidator::new(index_store.clone());
     let Some(candidate) = index_store.try_current_generation_metadata()? else {
@@ -125,6 +134,19 @@ mod tests {
 
     use crate::lock::acquire_update_lock;
     use crate::seo::{SeoSidecarRepairOutcome, repair_current_seo_sidecar_under_lock};
+
+    #[test]
+    fn repair_current_seo_sidecar_rejects_lock_for_different_index_dir() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        let other_index_dir = utf8_path_buf(tempdir.path().join("other-indexes"));
+        let config = app_config_with_public_url(&index_dir);
+        let update_lock = acquire_update_lock(&other_index_dir).unwrap();
+
+        let error = repair_current_seo_sidecar_under_lock(&config, &update_lock).unwrap_err();
+
+        assert!(format!("{error:#}").contains("does not protect index directory"));
+    }
 
     #[test]
     fn repair_current_seo_sidecar_rewrites_integrity_metadata() {

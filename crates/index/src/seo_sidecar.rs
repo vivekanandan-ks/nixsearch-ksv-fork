@@ -192,6 +192,8 @@ impl SeoFactsArtifact {
     pub fn read_manifest_checked(
         generation: &PublishedGeneration,
     ) -> Result<ManifestCheckedSeoFacts> {
+        validate_generation_id(&generation.manifest)
+            .context("failed to validate supplied index generation manifest")?;
         validate_index_schema_version(&generation.manifest)
             .context("failed to validate supplied index generation manifest")?;
 
@@ -280,7 +282,7 @@ mod tests {
                 target_role: RefRole::Search,
                 indexes_search_documents: true,
                 document_count,
-                artifact_hash: None,
+                artifact_hash: Some("fixture-hash".to_owned()),
                 revision: None,
             }],
         )
@@ -315,7 +317,7 @@ mod tests {
                 target_role: RefRole::Search,
                 indexes_search_documents: true,
                 document_count: 1,
-                artifact_hash: None,
+                artifact_hash: Some("fixture-hash".to_owned()),
                 revision: None,
             }],
             time::OffsetDateTime::UNIX_EPOCH,
@@ -397,7 +399,7 @@ mod tests {
                 target_role: RefRole::Search,
                 indexes_search_documents: true,
                 document_count: 0,
-                artifact_hash: None,
+                artifact_hash: Some("fixture-hash".to_owned()),
                 revision: None,
             }],
             time::OffsetDateTime::UNIX_EPOCH,

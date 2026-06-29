@@ -86,7 +86,11 @@ fn count_for(
         SourceFilter::Named(source) => (
             Some(source.as_str()),
             page_state.source_ref.as_deref(),
-            None,
+            page_state
+                .source_ref
+                .is_none()
+                .then(|| page_state.active_ref_set())
+                .flatten(),
         ),
     };
 

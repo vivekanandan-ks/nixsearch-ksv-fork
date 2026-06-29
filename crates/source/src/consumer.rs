@@ -50,7 +50,7 @@ impl Consumer for OptionsJsonConsumer {
             .await
             .context("failed to read verified options artifact")?;
 
-        let context = ingest_context_from_verified(&verified);
+        let context = ingest_context_from_verified(&verified, artifact)?;
 
         parse_options_json_with_strip_prefixes(
             verified.bytes.as_ref(),
@@ -91,7 +91,7 @@ impl Consumer for PackagesJsonConsumer {
             .await
             .context("failed to read verified packages artifact")?;
 
-        let context = ingest_context_from_verified(&verified);
+        let context = ingest_context_from_verified(&verified, artifact)?;
 
         parse_packages_json_with_strip_prefixes(
             verified.bytes.as_ref(),
@@ -133,13 +133,24 @@ impl Consumer for FlakeInfoJsonConsumer {
     }
 }
 
-fn ingest_context_from_verified(verified: &VerifiedArtifact) -> IngestContext {
-    IngestContext {
-        source: verified.metadata.source.clone(),
-        ref_id: verified.metadata.ref_id.clone(),
-        revision: verified.metadata.revision.clone(),
-        repo: None,
+fn ingest_context_from_verified(
+    verified: &VerifiedArtifact,
+    artifact: &ProducedArtifact,
+) -> Result<IngestContext> {
+    if verified.metadata.revision != artifact.metadata.revision {
+        bail!(
+            "artifact revision metadata mismatch: producer reported {:?}, store has {:?}",
+            artifact.metadata.revision,
+            verified.metadata.revision
+        );
     }
+
+    Ok(IngestContext {
+        source: artifact.artifact_ref.source.clone(),
+        ref_id: artifact.artifact_ref.ref_id.clone(),
+        revision: artifact.metadata.revision.clone(),
+        repo: None,
+    })
 }
 
 fn validate_flake_info_json(value: &serde_json::Value) -> Result<()> {

@@ -197,8 +197,8 @@ pub(crate) async fn build_and_publish_generation_with_policy(
     let manifest = build_generation_manifest(&documents)?;
     write_generation_artifacts(index_store, generation.path(), manifest)?;
 
-    generation.begin_publish();
     publish_completed_generation(index_store, generation.path(), documents.total_documents)?;
+    generation.mark_published();
 
     Ok(GenerationBuildResult {
         path: generation.path().to_owned(),

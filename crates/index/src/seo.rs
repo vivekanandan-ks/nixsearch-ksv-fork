@@ -88,7 +88,8 @@ impl SeoSidecarAccumulator {
                 ref_id: key.ref_id.clone(),
             })
             .or_default()
-            .merge(&counts);
+            .merge(&counts)
+            .expect("observed SEO counts should not overflow");
 
             entries.push(SeoEntryFacts {
                 source: key.source,
@@ -102,7 +103,9 @@ impl SeoSidecarAccumulator {
             });
         }
 
-        for (key, expected) in manifest_supported_counts(manifest) {
+        for (key, expected) in manifest_supported_counts(manifest)
+            .expect("manifest supported counts should not overflow")
+        {
             if expected.has_supported_target() {
                 refs.entry(key).or_default();
             }
@@ -150,7 +153,7 @@ impl SeoSidecar {
             );
         }
 
-        let manifest_expected = manifest_supported_counts(manifest);
+        let manifest_expected = manifest_supported_counts(manifest)?;
         let mut ref_sums = BTreeMap::<SeoRefKey, SeoCounts>::new();
         let mut seen_entries = BTreeSet::<SeoEntryKey>::new();
 
@@ -193,7 +196,13 @@ impl SeoSidecar {
                     ref_id: entry.ref_id.clone(),
                 })
                 .or_default()
-                .merge(&counts);
+                .merge(&counts)
+                .with_context(|| {
+                    format!(
+                        "SEO sidecar counts overflowed for ref {}/{}",
+                        entry.source, entry.ref_id
+                    )
+                })?;
         }
 
         let mut seen_refs = BTreeSet::<SeoRefKey>::new();
@@ -238,7 +247,7 @@ impl SeoSidecar {
                     );
                 }
                 Some(_) => {}
-                None if expected.has_zero_supported_documents()
+                None if expected.has_zero_supported_documents()?
                     && actual.total_supported_indexed_count == 0 => {}
                 None => {
                     bail!(
@@ -385,16 +394,18 @@ struct SeoManifestExpectedCounts {
 }
 
 impl SeoManifestExpectedCounts {
-    fn total_supported_count(&self) -> usize {
-        self.package_supported_count + self.option_supported_count
+    fn total_supported_count(&self) -> Result<usize> {
+        self.package_supported_count
+            .checked_add(self.option_supported_count)
+            .context("SEO manifest expected supported counts overflowed")
     }
 
     fn has_supported_target(&self) -> bool {
         self.has_package_target || self.has_option_target
     }
 
-    fn has_zero_supported_documents(&self) -> bool {
-        self.total_supported_count() == 0
+    fn has_zero_supported_documents(&self) -> Result<bool> {
+        Ok(self.total_supported_count()? == 0)
     }
 }
 
@@ -421,18 +432,38 @@ impl SeoCounts {
         }
     }
 
-    fn merge(&mut self, other: &Self) {
-        self.total_supported_indexed_count += other.total_supported_indexed_count;
-        self.package_supported_count += other.package_supported_count;
-        self.option_supported_count += other.option_supported_count;
-        self.package_eligible_count += other.package_eligible_count;
-        self.option_eligible_count += other.option_eligible_count;
+    fn merge(&mut self, other: &Self) -> Result<()> {
+        self.total_supported_indexed_count = self
+            .total_supported_indexed_count
+            .checked_add(other.total_supported_indexed_count)
+            .context("total_supported_indexed_count overflowed")?;
+        self.package_supported_count = self
+            .package_supported_count
+            .checked_add(other.package_supported_count)
+            .context("package_supported_count overflowed")?;
+        self.option_supported_count = self
+            .option_supported_count
+            .checked_add(other.option_supported_count)
+            .context("option_supported_count overflowed")?;
+        self.package_eligible_count = self
+            .package_eligible_count
+            .checked_add(other.package_eligible_count)
+            .context("package_eligible_count overflowed")?;
+        self.option_eligible_count = self
+            .option_eligible_count
+            .checked_add(other.option_eligible_count)
+            .context("option_eligible_count overflowed")?;
+
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
-        if self.total_supported_indexed_count
-            != self.package_supported_count + self.option_supported_count
-        {
+        let supported_sum = self
+            .package_supported_count
+            .checked_add(self.option_supported_count)
+            .context("package+option counts overflowed")?;
+
+        if self.total_supported_indexed_count != supported_sum {
             bail!("total_supported_indexed_count does not match package+option counts");
         }
 
@@ -450,7 +481,7 @@ impl SeoCounts {
 
 fn manifest_supported_counts(
     manifest: &IndexGenerationManifest,
-) -> BTreeMap<SeoRefKey, SeoManifestExpectedCounts> {
+) -> Result<BTreeMap<SeoRefKey, SeoManifestExpectedCounts>> {
     let mut refs = BTreeMap::<SeoRefKey, SeoManifestExpectedCounts>::new();
 
     for target in &manifest.targets {
@@ -464,17 +495,33 @@ fn manifest_supported_counts(
         match target.artifact_kind.indexed_document_kind() {
             Some(DocumentKind::Package) => {
                 expected.has_package_target = true;
-                expected.package_supported_count += target.document_count;
+                expected.package_supported_count = expected
+                    .package_supported_count
+                    .checked_add(target.document_count)
+                    .with_context(|| {
+                        format!(
+                            "SEO manifest package counts overflowed for ref {}/{}",
+                            target.source, target.ref_id
+                        )
+                    })?;
             }
             Some(DocumentKind::Option) => {
                 expected.has_option_target = true;
-                expected.option_supported_count += target.document_count;
+                expected.option_supported_count = expected
+                    .option_supported_count
+                    .checked_add(target.document_count)
+                    .with_context(|| {
+                        format!(
+                            "SEO manifest option counts overflowed for ref {}/{}",
+                            target.source, target.ref_id
+                        )
+                    })?;
             }
             Some(DocumentKind::App | DocumentKind::Service) | None => {}
         }
     }
 
-    refs
+    Ok(refs)
 }
 
 fn validate_entry_manifest_target(
@@ -565,7 +612,7 @@ mod tests {
             target_role: RefRole::Search,
             indexes_search_documents: true,
             document_count,
-            artifact_hash: None,
+            artifact_hash: Some("fixture-hash".to_owned()),
             revision: None,
         }
     }

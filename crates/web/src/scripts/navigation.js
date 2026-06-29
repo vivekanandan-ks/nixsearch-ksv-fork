@@ -889,8 +889,7 @@
       const shouldUseRefSet = refSetRefs.length > 0;
       const shouldSetRef =
         !shouldUseRefSet ||
-        refSetRefs.length > 1 ||
-        (source && refValue && refValue !== source.defaultRef);
+        refSetRefs.length > 1;
       const sourceMatchesContext = context.sourceId === sourceId;
 
       if (

@@ -219,7 +219,10 @@ pub fn index_target(
         indexes_search_documents: TargetCapabilities::new(target_role, artifact_kind)
             .indexes_search_documents(),
         document_count,
-        artifact_hash: None,
+        artifact_hash: Some(format!(
+            "fixture-{source}-{ref_id}-{}-{document_count}",
+            artifact_kind.as_str()
+        )),
         revision: None,
     }
 }

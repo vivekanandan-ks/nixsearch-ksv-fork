@@ -124,11 +124,15 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
     let route = match path_parts.as_slice() {
         [] => PublicRoute::Home,
         [source] => PublicRoute::Source {
-            source: strict_decode(source, false)?,
+            source: decode_path_segment(source)?,
         },
         [source, rest @ ..] => PublicRoute::Entry {
-            source: strict_decode(source, false)?,
-            entry: strict_decode(&rest.join("/"), false)?,
+            source: decode_path_segment(source)?,
+            entry: rest
+                .iter()
+                .map(|segment| decode_path_segment(segment))
+                .collect::<ParseResult<Vec<_>>>()?
+                .join("/"),
         },
     };
 
@@ -177,4 +181,14 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
             page,
         },
     })
+}
+
+fn decode_path_segment(segment: &str) -> ParseResult<String> {
+    let decoded = strict_decode(segment, false)?;
+
+    if decoded.contains('/') {
+        return Err(RequestParseError::new("path segment must not contain '/'"));
+    }
+
+    Ok(decoded)
 }

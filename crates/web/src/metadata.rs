@@ -44,7 +44,7 @@ pub(crate) enum MetadataContent<'a> {
     Home,
     SearchResults(&'a SearchResult),
     DirectEntry,
-    Error,
+    Error { title: &'a str, message: &'a str },
 }
 
 pub(crate) struct PageHeadMetadataInput<'a> {
@@ -92,14 +92,16 @@ pub(crate) fn page_head_metadata(input: PageHeadMetadataInput<'_>) -> PageMetada
 
     let search_result_for_metadata = match content {
         MetadataContent::SearchResults(result) => Some(result),
-        MetadataContent::Home | MetadataContent::DirectEntry | MetadataContent::Error => None,
+        MetadataContent::Home | MetadataContent::DirectEntry | MetadataContent::Error { .. } => {
+            None
+        }
     };
 
     let index_metadata = page_index_metadata(
         state, request, page_state, snapshot, content, entry, page_urls,
     );
 
-    page_metadata(
+    let mut metadata = page_metadata(
         &state.config,
         request,
         &page_state.source_filter,
@@ -107,7 +109,21 @@ pub(crate) fn page_head_metadata(input: PageHeadMetadataInput<'_>) -> PageMetada
         entry,
         page_urls,
         index_metadata,
-    )
+    );
+
+    if let MetadataContent::Error { title, message } = content {
+        metadata.title = title.to_owned();
+        metadata.description = message.to_owned();
+        metadata.open_graph = open_graph_metadata(
+            state.config.public_seo_enabled(),
+            page_urls,
+            metadata.canonical_url.as_deref(),
+            title,
+            message,
+        );
+    }
+
+    metadata
 }
 
 pub(crate) fn noindex_head_metadata(
@@ -186,7 +202,7 @@ fn page_index_metadata(
         return noindex_metadata();
     }
 
-    if matches!(content, MetadataContent::Error) {
+    if matches!(content, MetadataContent::Error { .. }) {
         return noindex_metadata();
     }
 

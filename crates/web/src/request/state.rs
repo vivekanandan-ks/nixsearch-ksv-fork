@@ -149,10 +149,10 @@ fn detail_ref(
     active_ref_set: Option<&str>,
     source_ref: Option<&str>,
 ) -> Option<String> {
-    if let Some(refs) =
-        active_ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, source))
-    {
-        return ref_from_ref_set_refs(refs, raw_ref);
+    if let Some(ref_set) = active_ref_set {
+        return config
+            .refs_for_ref_set_source(ref_set, source)
+            .and_then(|refs| ref_from_ref_set_refs(refs, raw_ref));
     }
 
     source_ref

@@ -38,6 +38,7 @@ impl IndexGenerationManifest {
             targets,
         };
 
+        validate_target_content_identity(&manifest)?;
         refresh_generation_id(&mut manifest)?;
 
         Ok(manifest)
@@ -92,6 +93,8 @@ pub fn refresh_generation_id(manifest: &mut IndexGenerationManifest) -> Result<(
 }
 
 pub fn validate_generation_id(manifest: &IndexGenerationManifest) -> Result<()> {
+    validate_target_content_identity(manifest)?;
+
     let computed = canonical_generation_id(manifest)?;
 
     if manifest.generation_id != computed {
@@ -100,6 +103,23 @@ pub fn validate_generation_id(manifest: &IndexGenerationManifest) -> Result<()> 
             manifest.generation_id,
             computed
         );
+    }
+
+    Ok(())
+}
+
+pub fn validate_target_content_identity(manifest: &IndexGenerationManifest) -> Result<()> {
+    for target in &manifest.targets {
+        if target.artifact_hash.as_deref().is_none_or(str::is_empty)
+            && target.revision.as_deref().is_none_or(str::is_empty)
+        {
+            bail!(
+                "index generation target {}/{}/{} has no content identity (artifact_hash or revision required)",
+                target.source,
+                target.ref_id,
+                target.artifact_kind.as_str()
+            );
+        }
     }
 
     Ok(())
@@ -222,7 +242,7 @@ mod tests {
         IndexGenerationManifest::with_generated_at(
             3,
             vec![
-                target(ArtifactKind::PackagesJson, 2, None, None),
+                target(ArtifactKind::PackagesJson, 2, Some("bbb"), None),
                 target(ArtifactKind::OptionsJson, 1, Some("aaa"), Some("rev1")),
             ],
             OffsetDateTime::UNIX_EPOCH,
@@ -238,7 +258,7 @@ mod tests {
 
         assert_eq!(
             id,
-            "sha256:ab77557a0c8ea2be0896709443ab82324590761615215e0f53cd03d80877c45b"
+            "sha256:b9215702301e9abfe572e2cc35add074a1a62e23df370f34da54f43e96449bc1"
         );
     }
 
@@ -265,7 +285,7 @@ mod tests {
             3,
             vec![
                 target(ArtifactKind::OptionsJson, 1, Some("aaa"), Some("rev1")),
-                target(ArtifactKind::PackagesJson, 2, None, None),
+                target(ArtifactKind::PackagesJson, 2, Some("bbb"), None),
             ],
             OffsetDateTime::UNIX_EPOCH,
         )
@@ -278,31 +298,22 @@ mod tests {
     }
 
     #[test]
-    fn canonical_generation_id_distinguishes_none_from_empty_optional_fields() {
-        let none = IndexGenerationManifest::with_generated_at(
+    fn manifest_rejects_target_without_content_identity() {
+        let error = IndexGenerationManifest::with_generated_at(
             1,
             vec![target(ArtifactKind::OptionsJson, 1, None, None)],
             OffsetDateTime::UNIX_EPOCH,
         )
-        .unwrap();
-        let empty = IndexGenerationManifest::with_generated_at(
-            1,
-            vec![target(ArtifactKind::OptionsJson, 1, Some(""), Some(""))],
-            OffsetDateTime::UNIX_EPOCH,
-        )
-        .unwrap();
+        .unwrap_err();
 
-        assert_ne!(
-            canonical_generation_id(&none).unwrap(),
-            canonical_generation_id(&empty).unwrap()
-        );
+        assert!(format!("{error:#}").contains("has no content identity"));
     }
 
     #[test]
     fn canonical_manifest_uses_expected_compact_json() {
         let manifest = IndexGenerationManifest::with_generated_at(
             1,
-            vec![target(ArtifactKind::OptionsJson, 1, None, None)],
+            vec![target(ArtifactKind::OptionsJson, 1, Some("aaa"), None)],
             OffsetDateTime::UNIX_EPOCH,
         )
         .unwrap();
@@ -311,7 +322,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"generation_id_version":1,"schema_version":5,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","target_role":"search","indexes_search_documents":true,"document_count":1,"artifact_hash":null,"revision":null}]}"#
+            r#"{"generation_id_version":1,"schema_version":5,"document_count":1,"targets":[{"source":"fixtures","ref_id":"small","artifact_kind":"options-json","target_role":"search","indexes_search_documents":true,"document_count":1,"artifact_hash":"aaa","revision":null}]}"#
         );
     }
 
@@ -324,7 +335,7 @@ mod tests {
 
         assert_eq!(
             manifest.generation_id,
-            "sha256:ab77557a0c8ea2be0896709443ab82324590761615215e0f53cd03d80877c45b"
+            "sha256:b9215702301e9abfe572e2cc35add074a1a62e23df370f34da54f43e96449bc1"
         );
     }
 

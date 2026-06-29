@@ -839,6 +839,19 @@ impl SearchDocument {
             ));
         }
 
+        if common.source.trim().is_empty() || matches!(common.source.as_str(), "." | "..") {
+            return Err(format!("document source is invalid for {}", common.id));
+        }
+
+        if common.ref_id.trim().is_empty() || matches!(common.ref_id.as_str(), "." | "..") {
+            return Err(format!("document ref_id is invalid for {}", common.id));
+        }
+
+        let expected_name_parts = NameParts::from_dotted(&common.name);
+        if common.name.trim().is_empty() || expected_name_parts.segments.is_empty() {
+            return Err(format!("document name is invalid for {}", common.id));
+        }
+
         let expected_id = make_document_id(
             &common.source,
             &common.ref_id,
@@ -852,7 +865,6 @@ impl SearchDocument {
             ));
         }
 
-        let expected_name_parts = NameParts::from_dotted(&common.name);
         if common.name_parts != expected_name_parts {
             return Err(format!("document name_parts mismatch for {}", common.id));
         }
@@ -906,6 +918,34 @@ mod tests {
         assert_eq!(doc.name_parts.root.as_deref(), Some("programs"));
         assert_eq!(doc.name_parts.groups, ["programs", "programs.git"]);
         assert_eq!(doc.name_parts.leaf.as_deref(), Some("enable"));
+    }
+
+    #[test]
+    fn validate_identity_rejects_degenerate_identity_fields() {
+        let context = IngestContext {
+            source: "nixpkgs".into(),
+            ref_id: "unstable".into(),
+            revision: None,
+            repo: None,
+        };
+        let mut doc = PackageDoc::new(&context, "git");
+
+        doc.common.source.clear();
+        doc.common.id = crate::name::make_document_id("", "unstable", "package", "git");
+        let error = SearchDocument::Package(doc.clone())
+            .validate_identity()
+            .unwrap_err();
+        assert!(error.contains("source is invalid"));
+
+        doc.common.source = "nixpkgs".to_owned();
+        doc.common.name = ".".to_owned();
+        doc.attribute = ".".to_owned();
+        doc.common.name_parts = crate::name::NameParts::from_dotted(&doc.common.name);
+        doc.common.id = crate::name::make_document_id("nixpkgs", "unstable", "package", ".");
+        let error = SearchDocument::Package(doc)
+            .validate_identity()
+            .unwrap_err();
+        assert!(error.contains("name is invalid"));
     }
 
     #[test]

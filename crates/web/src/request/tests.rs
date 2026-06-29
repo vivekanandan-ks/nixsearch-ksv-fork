@@ -184,6 +184,13 @@ fn parses_nested_entry_public_url() {
 }
 
 #[test]
+fn rejects_encoded_slashes_inside_path_segments() {
+    let error = page_request_from_public_url("/fixtures/programs.git%2Fenable").unwrap_err();
+
+    assert!(error.contains("path segment must not contain '/'"));
+}
+
+#[test]
 fn rejects_duplicate_public_query_params() {
     let error = page_request_from_public_url("/?q=&q=git").unwrap_err();
 

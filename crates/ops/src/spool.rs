@@ -42,6 +42,7 @@ impl DocumentSpool {
         Ok(DocumentSpoolReader {
             reader: BufReader::new(file),
             line_number: 0,
+            line: String::new(),
         })
     }
 }
@@ -70,19 +71,20 @@ impl DocumentSpoolWriter {
 pub(crate) struct DocumentSpoolReader {
     reader: BufReader<File>,
     line_number: usize,
+    line: String,
 }
 
 impl Iterator for DocumentSpoolReader {
     type Item = Result<SearchDocument>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
+        self.line.clear();
 
-        match self.reader.read_line(&mut line) {
+        match self.reader.read_line(&mut self.line) {
             Ok(0) => None,
             Ok(_) => {
                 self.line_number += 1;
-                let line = line.trim_end_matches(['\n', '\r']);
+                let line = self.line.trim_end_matches(['\n', '\r']);
                 Some(serde_json::from_str(line).with_context(|| {
                     format!(
                         "failed to deserialize document spool line {}",

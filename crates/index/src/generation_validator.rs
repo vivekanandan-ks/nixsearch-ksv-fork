@@ -210,7 +210,7 @@ mod tests {
                 target_role: RefRole::Search,
                 indexes_search_documents: true,
                 document_count: 1,
-                artifact_hash: None,
+                artifact_hash: Some("fixture-hash".to_owned()),
                 revision: None,
             }],
             time::OffsetDateTime::UNIX_EPOCH,
