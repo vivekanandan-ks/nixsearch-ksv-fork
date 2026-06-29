@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
+use axum::middleware;
 use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
@@ -20,6 +21,7 @@ mod origin;
 mod reconciliation;
 mod render_docs;
 mod request;
+mod robots;
 mod scripts;
 mod sitemap;
 mod source_labels;
@@ -42,6 +44,7 @@ struct AppState {
 
 pub async fn serve(config: AppConfig) -> Result<()> {
     config.validate()?;
+    log_public_seo_state(&config);
 
     let generation = ensure_current_generation(&config).await?;
 
@@ -85,17 +88,21 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 }
 
 fn app_router(state: AppState) -> Router {
+    let internal_routes = Router::new()
+        .route("/health", get(handlers::health))
+        .route("/state/events", get(handlers::state_events))
+        .route("/results/slice", get(handlers::results_slice))
+        .route("/assets/datastar.js", get(handlers::datastar_js))
+        .layer(middleware::map_response(robots::add_noindex_header));
+
     Router::new()
-        .route("/-/health", get(handlers::health))
-        .route(RECONCILE_EVENTS_URL, get(handlers::state_events))
-        .route(RESULTS_SLICE_URL, get(handlers::results_slice))
+        .nest("/-", internal_routes)
         .route("/robots.txt", get(handlers::robots_txt))
         .route("/sitemap.xml", get(handlers::sitemap_xml))
         .route("/sitemaps", get(handlers::sitemaps_not_found))
         .route("/sitemaps/{*path}", get(handlers::sitemaps_not_found))
         .route("/favicon.ico", get(handlers::favicon))
         .route("/apple-touch-icon.png", get(handlers::apple_touch_icon))
-        .route(DATASTAR_JS_URL, get(handlers::datastar_js))
         .route("/", get(handlers::public_page))
         .route("/{*path}", get(handlers::public_page))
         .with_state(state)
@@ -363,6 +370,16 @@ fn assess_current_generation_for_startup(
     ))
 }
 
+fn log_public_seo_state(config: &AppConfig) {
+    if let Some(public_url) = config.server.public_url.as_deref() {
+        tracing::info!(public_url, "public SEO enabled");
+    } else {
+        tracing::warn!(
+            "public SEO disabled because server.public_url is unset; pages will emit noindex and sitemap.xml will return 404"
+        );
+    }
+}
+
 fn format_target_keys<'a>(targets: impl IntoIterator<Item = &'a TargetKey>) -> String {
     targets
         .into_iter()
@@ -457,6 +474,7 @@ mod tests {
         status: StatusCode,
         content_type: String,
         location: Option<String>,
+        x_robots_tag: Option<String>,
         body: String,
     }
 
@@ -485,6 +503,10 @@ mod tests {
         (response.status, response.location)
     }
 
+    async fn request_x_robots_tag(app: Router, uri: &str) -> Option<String> {
+        request_test_response(app, uri).await.x_robots_tag
+    }
+
     async fn request_test_response(app: Router, uri: &str) -> TestResponse {
         let response = app
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -502,12 +524,18 @@ mod tests {
             .get("location")
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
+        let x_robots_tag = response
+            .headers()
+            .get("x-robots-tag")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
         TestResponse {
             status,
             content_type,
             location,
+            x_robots_tag,
             body: String::from_utf8(bytes.to_vec()).unwrap(),
         }
     }
@@ -957,6 +985,73 @@ mod tests {
         assert_eq!(
             request_status(app, "/apple-touch-icon.png").await,
             StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_endpoints_emit_x_robots_noindex_header() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+        let generation_id = current_generation_id(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+        let expected = Some(crate::robots::X_ROBOTS_TAG_NOINDEX_NOFOLLOW);
+        let result_slice_uri = with_generation(
+            "/-/results/slice?url=%2F%3Fq%3Dgit&offset=0",
+            &generation_id,
+        );
+
+        for uri in [
+            "/-/health",
+            "/-/state/events?url=%2F",
+            "/-/assets/datastar.js",
+            result_slice_uri.as_str(),
+        ] {
+            assert_eq!(
+                request_x_robots_tag(app.clone(), uri).await.as_deref(),
+                expected,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_pages_and_sitemap_do_not_emit_x_robots_header() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let app = test_app(app_config_with_public_url(&index_dir));
+
+        for uri in ["/", "/sitemap.xml"] {
+            assert_eq!(request_x_robots_tag(app.clone(), uri).await, None, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sitemap_not_found_responses_emit_x_robots_noindex_header() {
+        let tempdir = tempdir().unwrap();
+        let index_dir = utf8_path_buf(tempdir.path().join("indexes"));
+        publish_canonical_options_index(&index_dir);
+
+        let public_app = test_app(app_config_with_public_url(&index_dir));
+        for uri in ["/sitemaps", "/sitemap.xml?foo=bar"] {
+            assert_eq!(
+                request_x_robots_tag(public_app.clone(), uri)
+                    .await
+                    .as_deref(),
+                Some(crate::robots::X_ROBOTS_TAG_NOINDEX_NOFOLLOW),
+                "{uri}"
+            );
+        }
+
+        let private_app = test_app(app_config(&index_dir));
+        assert_eq!(
+            request_x_robots_tag(private_app, "/sitemap.xml")
+                .await
+                .as_deref(),
+            Some(crate::robots::X_ROBOTS_TAG_NOINDEX_NOFOLLOW)
         );
     }
 

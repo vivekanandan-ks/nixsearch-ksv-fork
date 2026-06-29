@@ -24,6 +24,7 @@ use crate::request::{
     PageRequest, PageState, PublicRoute, SourceFilter, normalized_query,
     page_request_from_public_uri, page_state, public_uri,
 };
+use crate::robots;
 use crate::scripts::datastar_script;
 use crate::sitemap::{
     SitemapDocument, SitemapRenderError, protocol_sitemap_limits, render_sitemap_entrypoint,
@@ -136,12 +137,15 @@ pub async fn sitemap_xml(State(state): State<AppState>, headers: HeaderMap, uri:
 }
 
 pub async fn sitemaps_not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        "not found",
+    robots::add_noindex_header(
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "not found",
+        )
+            .into_response(),
     )
-        .into_response()
+    .await
 }
 
 fn sitemap_internal_error() -> Response {

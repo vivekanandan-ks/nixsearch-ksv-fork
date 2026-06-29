@@ -14,6 +14,17 @@ The Nix ecosystem has thousands of packages and options. Many solutions exist to
   - Run it yourself: [example config](/nixsearch.example.toml)
 - [ ] MCP frontend, to easily feed agents with options & source code
 
+### Public deployment and SEO
+
+Set `server.public_url` to the canonical production origin before exposing nixsearch publicly:
+
+```toml
+[server]
+public_url = "https://nixsearch.example.com"
+```
+
+When `server.public_url` is unset, public SEO is intentionally disabled: pages emit `noindex`, canonical/Open Graph metadata is omitted, `robots.txt` disallows crawling, and `/sitemap.xml` returns 404. This keeps local and private deployments out of search indexes by default.
+
 ### Development
 
 This section should be expanded on. But utilize the devenv defined in this flake with `nix develop .#`. Then, the cli can be run with `cargo run -p nixsearch -- <command>`.

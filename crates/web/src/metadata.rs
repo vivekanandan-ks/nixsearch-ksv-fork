@@ -1,4 +1,5 @@
 use serde::Serialize;
+use unicode_segmentation::UnicodeSegmentation;
 
 use nixsearch_config::app::AppConfig;
 use nixsearch_core::document::SearchDocument;
@@ -15,6 +16,9 @@ use crate::source_labels::{source_display_name, source_kind_noun};
 use crate::urls::{canonical_entry_path_for_document, canonical_home_path, canonical_source_path};
 
 const DEFAULT_DESCRIPTION: &str = "Search the Nix ecosystem";
+const META_DESCRIPTION_MAX_GRAPHEMES: usize = 160;
+const META_DESCRIPTION_WORD_BOUNDARY_MIN_GRAPHEMES: usize = 120;
+const DESCRIPTION_ELLIPSIS: &str = "…";
 const ROBOTS_NOINDEX_FOLLOW: &str = "noindex,follow";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,14 +116,15 @@ pub(crate) fn page_head_metadata(input: PageHeadMetadataInput<'_>) -> PageMetada
     );
 
     if let MetadataContent::Error { title, message } = content {
+        let description = meta_description(message);
         metadata.title = title.to_owned();
-        metadata.description = message.to_owned();
+        metadata.description = description;
         metadata.open_graph = open_graph_metadata(
             state.config.public_seo_enabled(),
             page_urls,
             metadata.canonical_url.as_deref(),
             title,
-            message,
+            &metadata.description,
         );
     }
 
@@ -132,10 +137,13 @@ pub(crate) fn noindex_head_metadata(
     title: &str,
     description: &str,
 ) -> PageMetadata {
+    let description = meta_description(description);
+    let open_graph = open_graph_metadata(public_seo_enabled, page_urls, None, title, &description);
+
     PageMetadata {
         title: title.to_owned(),
-        description: description.to_owned(),
-        open_graph: open_graph_metadata(public_seo_enabled, page_urls, None, title, description),
+        description,
+        open_graph,
         canonical_url: None,
         robots: Some(ROBOTS_NOINDEX_FOLLOW),
     }
@@ -151,7 +159,13 @@ fn page_metadata(
     index_metadata: IndexMetadata,
 ) -> PageMetadata {
     let title = title_for_entry(config, request, source_filter, entry.document());
-    let description = description_for(config, request, source_filter, search_result, entry);
+    let description = meta_description(&description_for(
+        config,
+        request,
+        source_filter,
+        search_result,
+        entry,
+    ));
     let open_graph = open_graph_metadata(
         config.public_seo_enabled(),
         page_urls,
@@ -425,6 +439,41 @@ fn first_non_empty_line(value: &str) -> Option<&str> {
     value.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
+fn meta_description(value: &str) -> String {
+    truncate_description(&collapse_description_whitespace(value))
+}
+
+fn collapse_description_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_description(value: &str) -> String {
+    if value.graphemes(true).count() <= META_DESCRIPTION_MAX_GRAPHEMES {
+        return value.to_owned();
+    }
+
+    let ellipsis_graphemes = DESCRIPTION_ELLIPSIS.graphemes(true).count();
+    let max_content_graphemes = META_DESCRIPTION_MAX_GRAPHEMES.saturating_sub(ellipsis_graphemes);
+    let mut cutoff_byte = value.len();
+    let mut word_boundary_cutoff = None;
+
+    for (grapheme_index, (byte_index, grapheme)) in value.grapheme_indices(true).enumerate() {
+        if grapheme_index == max_content_graphemes {
+            cutoff_byte = byte_index;
+            break;
+        }
+
+        if grapheme == " " && grapheme_index >= META_DESCRIPTION_WORD_BOUNDARY_MIN_GRAPHEMES {
+            word_boundary_cutoff = Some(byte_index);
+        }
+    }
+
+    let cutoff_byte = word_boundary_cutoff.unwrap_or(cutoff_byte);
+    let mut description = value[..cutoff_byte].trim_end().to_owned();
+    description.push_str(DESCRIPTION_ELLIPSIS);
+    description
+}
+
 #[cfg(test)]
 mod tests {
     use nixsearch_core::document::{DocText, OptionDoc, PackageDoc, SearchDocument};
@@ -435,12 +484,16 @@ mod tests {
         SOURCE_FIXTURES, app_config, app_config_with_public_url, utf8_path_buf,
     };
     use tempfile::tempdir;
+    use unicode_segmentation::UnicodeSegmentation;
 
     use crate::entry::{AnnotatedEntryDocument, EntryData};
     use crate::origin::PageUrls;
     use crate::request::{PageQuery, PageRequest, PublicRoute, SourceFilter};
 
-    use super::{IndexMetadata, description_for, page_metadata, title_for, title_for_entry};
+    use super::{
+        IndexMetadata, META_DESCRIPTION_MAX_GRAPHEMES, description_for, meta_description,
+        noindex_head_metadata, page_metadata, title_for, title_for_entry,
+    };
 
     fn config() -> nixsearch_config::app::AppConfig {
         let tempdir = tempdir().unwrap();
@@ -707,5 +760,46 @@ mod tests {
             ),
             "programs.git.enable · Enable Git support."
         );
+    }
+
+    #[test]
+    fn meta_description_collapses_whitespace() {
+        assert_eq!(
+            meta_description("  First line.\n\nSecond\tline.  "),
+            "First line. Second line."
+        );
+    }
+
+    #[test]
+    fn meta_description_truncates_at_word_boundary() {
+        let description = meta_description(&format!(
+            "{} final words that should be removed",
+            "word ".repeat(40)
+        ));
+
+        assert!(description.ends_with('…'));
+        assert!(description.graphemes(true).count() <= META_DESCRIPTION_MAX_GRAPHEMES);
+        assert!(!description.contains("removed"));
+    }
+
+    #[test]
+    fn meta_description_truncates_grapheme_safely_without_word_boundary() {
+        let description = meta_description(&"👩🏽‍💻".repeat(200));
+
+        assert!(description.ends_with('…'));
+        assert_eq!(
+            description.graphemes(true).count(),
+            META_DESCRIPTION_MAX_GRAPHEMES
+        );
+        assert!(std::str::from_utf8(description.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn noindex_metadata_caps_error_description() {
+        let metadata =
+            noindex_head_metadata(true, &page_urls(), "Request failed", &"x".repeat(400));
+
+        assert!(metadata.description.ends_with('…'));
+        assert!(metadata.description.graphemes(true).count() <= META_DESCRIPTION_MAX_GRAPHEMES);
     }
 }

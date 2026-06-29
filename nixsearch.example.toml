@@ -4,6 +4,7 @@ index_dir = "./data/indexes"
 
 [server]
 listen = "127.0.0.1:3000"
+# Required for public SEO. If unset, pages intentionally emit noindex and sitemap.xml is disabled.
 public_url = "https://nixsearch.example.com"
 bootstrap = true
 
