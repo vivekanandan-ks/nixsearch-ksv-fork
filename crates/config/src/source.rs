@@ -9,7 +9,8 @@ pub use nixsearch_core::target::{RefRole, TargetCapabilities};
 
 use crate::error::{ConfigError, Result};
 use crate::producer::{
-    EvalModuleConfig, EvalModuleRefConfig, ProducerConfig, default_flake_file_fallback_inputs,
+    DownloadCompression, EvalModuleConfig, EvalModuleRefConfig, ProducerConfig,
+    default_flake_file_fallback_inputs,
 };
 use crate::validation::{validate_hex_color, validate_id, validate_source_id};
 
@@ -19,6 +20,7 @@ pub(crate) const HOME_MANAGER_COLOR: &str = "#f59e0b";
 pub(crate) const NIX_DARWIN_COLOR: &str = "#a78bfa";
 pub(crate) const HJEM_COLOR: &str = "#14b8a6";
 pub(crate) const HJEM_RUM_COLOR: &str = "#ec4899";
+pub(crate) const NUR_COLOR: &str = "#8b5cf6";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -118,7 +120,38 @@ impl RawSourceConfig {
             SourcePreset::NixDarwinOptions => self.expand_nix_darwin_options(source_id, ref_ids),
             SourcePreset::HjemOptions => self.expand_hjem_options(source_id, ref_ids),
             SourcePreset::HjemRumOptions => self.expand_hjem_rum_options(source_id, ref_ids),
+            SourcePreset::NurPackages => self.expand_nur_packages(source_id, ref_ids),
         }
+    }
+
+    fn expand_nur_packages(self, source_id: &str, ref_ids: Vec<String>) -> Result<SourceConfig> {
+        reject_conflicting_kind(self.kind, SourceKind::Packages, SourcePreset::NurPackages)?;
+
+        let refs = ref_ids
+            .into_iter()
+            .map(|ref_id| RefConfig {
+                id: ref_id.clone(),
+                role: RefRole::Search,
+                source_links: Some(nur_source_links(&ref_id)),
+                producer: ProducerConfig::Download {
+                    url: "https://alinnow.github.io/nix-options/nur/packages.json".to_owned(),
+                    artifact: ArtifactKind::PackagesJson,
+                    revision_url: Some("https://alinnow.github.io/nix-options/nur/revision".to_owned()),
+                    compression: DownloadCompression::None,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let default_ref = effective_default_ref(source_id, self.default_ref, &refs)?;
+
+        Ok(SourceConfig {
+            name: self.name.or_else(|| Some("NUR".to_owned())),
+            color: self.color.or_else(|| Some(NUR_COLOR.to_owned())),
+            kind: SourceKind::Packages,
+            strip_prefixes: self.strip_prefixes.unwrap_or_else(|| vec!["nur.repos.".to_owned()]),
+            default_ref,
+            refs,
+        })
     }
 
     fn expand_nixpkgs_packages(
@@ -364,6 +397,10 @@ fn hjem_rum_source_links(revision: &str) -> SourceLinkConfig {
     github_source_links_with_strip_prefixes("snugnug", "hjem-rum", revision, vec!["hjem-rum"])
 }
 
+fn nur_source_links(revision: &str) -> SourceLinkConfig {
+    github_source_links("nix-community", "NUR", revision)
+}
+
 fn github_source_links(owner: &str, repo: &str, revision: &str) -> SourceLinkConfig {
     github_source_links_with_strip_prefixes(owner, repo, revision, Vec::new())
 }
@@ -599,6 +636,7 @@ pub enum SourcePreset {
     NixDarwinOptions,
     HjemOptions,
     HjemRumOptions,
+    NurPackages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

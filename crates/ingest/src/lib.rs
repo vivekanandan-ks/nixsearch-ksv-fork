@@ -90,12 +90,16 @@ pub fn parse_options_json_with_strip_prefixes<R: Read>(
         let raw: RawOption = serde_json::from_value(value)
             .with_context(|| format!("failed to parse option {name}"))?;
 
-        documents.push(SearchDocument::Option(convert_option(
+        let doc = SearchDocument::Option(convert_option(
             name,
             raw,
             context,
             strip_prefixes,
-        )));
+        ));
+
+        if doc.validate_identity().is_ok() {
+            documents.push(doc);
+        }
     }
 
     documents.sort_by(|left, right| left.id().cmp(right.id()));
@@ -223,8 +227,19 @@ fn loc_prefix_from_name_prefix(prefix: &str) -> Vec<String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawPackagesJson {
-    packages: BTreeMap<String, RawPackage>,
+#[serde(untagged)]
+enum RawPackagesJson {
+    Nested { packages: BTreeMap<String, RawPackage> },
+    Flat(BTreeMap<String, RawPackage>),
+}
+
+impl RawPackagesJson {
+    fn into_packages(self) -> BTreeMap<String, RawPackage> {
+        match self {
+            Self::Nested { packages } => packages,
+            Self::Flat(packages) => packages,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,16 +309,21 @@ pub fn parse_packages_json_with_strip_prefixes<R: Read>(
 ) -> Result<Vec<SearchDocument>> {
     let raw: RawPackagesJson =
         serde_json::from_reader(reader).context("failed to parse packages JSON")?;
+    let packages = raw.into_packages();
 
-    let mut documents = Vec::with_capacity(raw.packages.len());
+    let mut documents = Vec::with_capacity(packages.len());
 
-    for (attribute, package) in raw.packages {
-        documents.push(SearchDocument::Package(convert_package(
+    for (attribute, package) in packages {
+        let doc = SearchDocument::Package(convert_package(
             attribute,
             package,
             context,
             strip_prefixes,
-        )));
+        ));
+
+        if doc.validate_identity().is_ok() {
+            documents.push(doc);
+        }
     }
 
     documents.sort_by(|left, right| left.id().cmp(right.id()));

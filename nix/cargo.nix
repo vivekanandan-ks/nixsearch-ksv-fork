@@ -138,7 +138,13 @@
           type = "app";
           program = lib.getExe self'.packages.cli;
         };
-        default = cli;
+        serve = {
+          type = "app";
+          program = lib.getExe (pkgs.writeShellScriptBin "nixsearch-serve" ''
+            exec ${lib.getExe self'.packages.cli} serve --config "''${NIXSEARCH_CONFIG:-nixsearch.example.toml}"
+          '');
+        };
+        default = serve;
       };
 
       devShells.default = craneLib.devShell (

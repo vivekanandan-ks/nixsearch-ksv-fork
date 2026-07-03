@@ -35,8 +35,7 @@ home-manager = ["master"]
 darwin = ["master"]
 hjem = ["main"]
 hjem-rum = ["main"]
-fixtures = ["small"]
-eval-fixture = ["local"]
+nur = ["main"]
 
 [ref_sets."26.05"]
 nixpkgs = ["nixos-26.05"]
@@ -45,8 +44,7 @@ home-manager = ["release-26.05"]
 darwin = ["nix-darwin-26.05"]
 hjem = ["main"]
 hjem-rum = ["main"]
-fixtures = ["small"]
-eval-fixture = ["local"]
+nur = ["main"]
 
 [ref_sets."25.11"]
 nixpkgs = ["nixos-25.11"]
@@ -55,8 +53,7 @@ home-manager = ["release-25.11"]
 darwin = ["nix-darwin-25.11"]
 hjem = ["main"]
 hjem-rum = ["main"]
-fixtures = ["small"]
-eval-fixture = ["local"]
+nur = ["main"]
 
 [sources.nixpkgs]
 preset = "nixpkgs-packages"
@@ -92,27 +89,7 @@ preset = "hjem-rum-options"
 default_ref = "main"
 preset_refs = ["main"]
 
-[sources.fixtures]
-name = "Fixture"
-kind = "options"
-
-[sources.fixtures.refs.small.producer]
-type = "existing-file"
-path = "fixtures/search-small/options.json"
-artifact = "options-json"
-
-[sources.eval-fixture]
-name = "Eval-Fixture"
-kind = "options"
-
-[sources.eval-fixture.refs.local.source_links]
-type = "prefix"
-url_prefix = "https://example.com/blob/main/"
-
-[sources.eval-fixture.refs.local.producer]
-type = "eval-modules"
-ref = "path:./fixtures/eval-modules-flake"
-
-[[sources.eval-fixture.refs.local.producer.modules]]
-type = "flake-attr"
-attr = "nixosModules.default"
+[sources.nur]
+preset = "nur-packages"
+default_ref = "main"
+preset_refs = ["main"]
