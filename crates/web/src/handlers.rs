@@ -1149,9 +1149,24 @@ fn load_entry_data_from_snapshot(
                 .as_ref()
                 .ok_or(EntryLoadError::IndexUnavailable)?;
 
+            let mut other_versions = state
+                .search
+                .find_other_versions_with_snapshot(
+                    snapshot,
+                    &representative.document.common().name,
+                    representative.document.kind(),
+                )
+                .unwrap_or_default();
+            
+            other_versions.retain(|doc| {
+                doc.common().source != representative.document.common().source ||
+                doc.common().ref_id != representative.document.common().ref_id
+            });
+
             Ok(EntryData::Found(AnnotatedEntryDocument::from_facts(
                 representative.document.clone(),
                 &facts,
+                other_versions,
             )))
         }
         EntryFactsStatus::Ambiguous => {
@@ -1162,12 +1177,28 @@ fn load_entry_data_from_snapshot(
                 Ok(EntryLookupResult::Ambiguous(documents)) => Ok(EntryData::Ambiguous(
                     documents
                         .into_iter()
-                        .map(|document| AnnotatedEntryDocument::from_facts(document, &facts))
+                        .map(|document| AnnotatedEntryDocument::from_facts(document, &facts, vec![]))
                         .collect(),
                 )),
-                Ok(EntryLookupResult::Found(document)) => Ok(EntryData::Found(
-                    AnnotatedEntryDocument::from_facts(*document, &facts),
-                )),
+                Ok(EntryLookupResult::Found(document)) => {
+                    let mut other_versions = state
+                        .search
+                        .find_other_versions_with_snapshot(
+                            snapshot,
+                            &document.common().name,
+                            document.kind(),
+                        )
+                        .unwrap_or_default();
+
+                    other_versions.retain(|doc| {
+                        doc.common().source != document.common().source ||
+                        doc.common().ref_id != document.common().ref_id
+                    });
+
+                    Ok(EntryData::Found(
+                        AnnotatedEntryDocument::from_facts(*document, &facts, other_versions),
+                    ))
+                }
                 Ok(EntryLookupResult::NotFound) => Err(EntryLoadError::NotFound {
                     entry: detail.entry.clone(),
                 }),

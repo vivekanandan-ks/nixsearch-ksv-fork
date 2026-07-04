@@ -554,6 +554,7 @@ mod tests {
                 unique_within_kind: true,
             },
             document: Box::new(document),
+            other_versions: vec![],
         })
     }
 

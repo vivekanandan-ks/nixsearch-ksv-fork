@@ -537,6 +537,27 @@ impl SearchService {
         self.find_entry_with_snapshot(&snapshot, request)
     }
 
+    pub fn find_other_versions_current(
+        &self,
+        name: &str,
+        kind: &DocumentKind,
+    ) -> ServiceResult<Vec<SearchDocument>> {
+        let snapshot = self.snapshot();
+        self.find_other_versions_with_snapshot(&snapshot, name, kind)
+    }
+
+    pub fn find_other_versions_with_snapshot(
+        &self,
+        snapshot: &ServedGenerationSnapshot,
+        name: &str,
+        kind: &DocumentKind,
+    ) -> ServiceResult<Vec<SearchDocument>> {
+        snapshot
+            .index
+            .find_other_versions(name, kind)
+            .map_err(ServiceError::EntryLookup)
+    }
+
     pub fn find_entry_with_snapshot(
         &self,
         snapshot: &ServedGenerationSnapshot,

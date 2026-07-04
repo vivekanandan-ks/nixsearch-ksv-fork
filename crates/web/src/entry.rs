@@ -6,15 +6,17 @@ use nixsearch_index::search::EntryFacts;
 pub(crate) struct AnnotatedEntryDocument {
     pub document: Box<SearchDocument>,
     pub annotation: SearchHitAnnotation,
+    pub other_versions: Vec<SearchDocument>,
 }
 
 impl AnnotatedEntryDocument {
-    pub(crate) fn from_facts(document: SearchDocument, facts: &EntryFacts) -> Self {
+    pub(crate) fn from_facts(document: SearchDocument, facts: &EntryFacts, other_versions: Vec<SearchDocument>) -> Self {
         let annotation = facts.annotation_for_document(&document);
 
         Self {
             document: Box::new(document),
             annotation,
+            other_versions,
         }
     }
 }

@@ -1,7 +1,6 @@
 use maud::{Markup, html};
 
 use nixsearch_config::app::AppConfig;
-use nixsearch_core::document::SearchDocument;
 
 use crate::entry::{AnnotatedEntryDocument, EntryData};
 use crate::request::PageState;
@@ -17,7 +16,7 @@ pub fn render(
 ) -> Markup {
     match entry {
         EntryData::Empty => html! {},
-        EntryData::Found(entry) => render_found(config, page_state, &entry.document, close_href),
+        EntryData::Found(entry) => render_found(config, page_state, entry, close_href),
         EntryData::NotFound { entry } => render_not_found(entry, close_href),
         EntryData::Ambiguous(entries) => render_ambiguous(config, page_state, entries, close_href),
         EntryData::Error(error) => render_error(error, close_href),
@@ -27,9 +26,10 @@ pub fn render(
 fn render_found(
     config: &AppConfig,
     page_state: &PageState,
-    document: &SearchDocument,
+    entry: &AnnotatedEntryDocument,
     close_href: Option<&str>,
 ) -> Markup {
+    let document = &entry.document;
     let common = document.common();
     let source_color = source_tag::color_for_source(config, &common.source);
     let source_href = source_url_from_state(config, page_state, &common.source);
@@ -56,7 +56,26 @@ fn render_found(
                     }
                     div.meta {
                         (source_tag::render_link(config, &common.source, &source_href))
-                        (common.kind.as_str()) " · " (common.ref_id)
+                        (common.kind.as_str()) " · "
+                        
+                        @if !entry.other_versions.is_empty() {
+                            select.channel-select onchange="if (this.value) { window.location.href = this.value; }" {
+                                @let current_display_ref = common.ref_id.strip_prefix("nixos-").unwrap_or(&common.ref_id);
+                                option value="" selected {
+                                    (current_display_ref)
+                                }
+                                @for other in &entry.other_versions {
+                                    @let other_url = crate::urls::entry_url_for_document(config, page_state, other, page_state.page);
+                                    @let other_display_ref = other.common().ref_id.strip_prefix("nixos-").unwrap_or(&other.common().ref_id);
+                                    option value=(other_url) {
+                                        (other_display_ref)
+                                    }
+                                }
+                            }
+                        } @else {
+                            @let current_display_ref = common.ref_id.strip_prefix("nixos-").unwrap_or(&common.ref_id);
+                            (current_display_ref)
+                        }
                         @if let Some(revision) = &common.revision {
                             " · " code { (&revision[..revision.len().min(8)]) }
                         }

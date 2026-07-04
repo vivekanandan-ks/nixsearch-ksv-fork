@@ -660,6 +660,33 @@ impl SearchIndex {
         ]
     }
 
+    pub fn find_other_versions(
+        &self,
+        name: &str,
+        kind: &DocumentKind,
+    ) -> Result<Vec<SearchDocument>> {
+        let searcher = self.reader()?.searcher();
+        let query = Box::new(BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                exact_term_query(self.fields.name_exact, name),
+            ),
+            (Occur::Must, self.entry_kind_query(kind)),
+        ]));
+
+        let top_docs = searcher
+            .search(&*query, &TopDocs::with_limit(100).order_by_score())
+            .context("failed to retrieve other versions")?;
+
+        let mut documents = Vec::with_capacity(top_docs.len());
+
+        for (_, address) in top_docs {
+            documents.push(self.document_at_with_searcher(&searcher, address)?);
+        }
+
+        Ok(documents)
+    }
+
     fn entry_kind_query(&self, kind: &DocumentKind) -> Box<dyn Query> {
         exact_term_query(self.fields.kind, kind.as_str())
     }

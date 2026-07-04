@@ -227,17 +227,20 @@ pub fn canonical_entry_path_for_document(config: &AppConfig, document: &SearchDo
     )
 }
 
-fn entry_url_for_document(
+pub fn entry_url_for_document(
     config: &AppConfig,
     state: &PageState,
     document: &SearchDocument,
     page: Option<usize>,
 ) -> String {
     let common = document.common();
-    let from_scope = matches!(state.source_filter, SourceFilter::All).then_some(QuerySource::All);
+    let mut from_scope = matches!(state.source_filter, SourceFilter::All).then_some(QuerySource::All);
     let ref_set = state.active_ref_set().filter(|ref_set| {
         config.ref_set_contains_source_ref(ref_set, &common.source, &common.ref_id)
     });
+    if ref_set.is_none() {
+        from_scope = None;
+    }
     let ref_set_refs =
         ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, &common.source));
     let ref_id = match ref_set_refs {

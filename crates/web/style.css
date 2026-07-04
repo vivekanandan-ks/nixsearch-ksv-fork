@@ -1169,3 +1169,19 @@ a:hover {
     display: none;
   }
 }
+
+.channel-select {
+  font-family: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.2rem;
+  margin: 0 0.2rem;
+}
+
+.channel-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
