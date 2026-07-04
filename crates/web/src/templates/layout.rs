@@ -109,10 +109,7 @@ pub fn render_full_page(page: FullPageRender<'_>) -> Markup {
         entry,
     });
 
-    let form_action = match source_filter {
-        SourceFilter::All => "/".to_owned(),
-        SourceFilter::Named(source) => source_path(source),
-    };
+    let form_action = "/".to_owned();
     let logo_style = match source_filter {
         SourceFilter::All => None,
         SourceFilter::Named(source) => state.config.sources.contains_key(source).then(|| {

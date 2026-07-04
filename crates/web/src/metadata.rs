@@ -282,7 +282,7 @@ fn page_index_metadata(
                     .as_deref()
                     .and_then(non_empty)
                     .is_none()
-                && request.query.source.is_none()
+                && request.query.sources.is_empty()
             {
                 canonical_metadata(page_urls.absolute_url(&canonical_home_path()))
             } else {
@@ -290,7 +290,7 @@ fn page_index_metadata(
             }
         }
         SourceFilter::Named(source) => {
-            if request.route.is_entry() || request.query.source.is_some() {
+            if request.route.is_entry() || !request.query.sources.is_empty() {
                 return noindex_metadata();
             }
 
@@ -316,7 +316,7 @@ fn request_has_entry_context(request: &PageRequest) -> bool {
             .as_deref()
             .and_then(non_empty)
             .is_some()
-        || request.query.source.is_some()
+        || !request.query.sources.is_empty()
         || request.query.page.unwrap_or(1) > 1
 }
 

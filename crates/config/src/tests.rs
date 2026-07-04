@@ -299,7 +299,7 @@ fn loads_example_config_file() {
         config.server.public_url.as_deref(),
         Some("https://nixsearch.example.com")
     );
-    assert!(config.sources.contains_key("eval-fixture"));
+    assert!(config.sources.contains_key("nur"));
     assert_eq!(config.default_ref_set(), Some("unstable"));
     assert_eq!(
         config.ref_sets["26.05"].refs["nixpkgs"],
@@ -326,12 +326,8 @@ fn loads_example_config_file() {
         vec!["main".to_owned()]
     );
     assert_eq!(
-        config.ref_sets["26.05"].refs["fixtures"],
-        vec!["small".to_owned()]
-    );
-    assert_eq!(
-        config.ref_sets["26.05"].refs["eval-fixture"],
-        vec!["local".to_owned()]
+        config.ref_sets["26.05"].refs["nur"],
+        vec!["main".to_owned()]
     );
 }
 
@@ -356,8 +352,7 @@ fn preserves_source_order_from_config_file() {
             "darwin",
             "hjem",
             "hjem-rum",
-            "fixtures",
-            "eval-fixture",
+            "nur",
         ]
     );
 }

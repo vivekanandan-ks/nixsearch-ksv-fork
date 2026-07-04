@@ -1657,7 +1657,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("search-form"));
-        assert!(body.contains("action=\"/missing\""));
+        assert!(body.contains("action=\"/\""));
         assert!(body.contains("value=\"git\""));
         assert!(body.contains("Page unavailable"));
         assert!(body.contains("unknown source"));
@@ -1680,7 +1680,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("search-form"));
-        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("action=\"/\""));
         assert!(body.contains("value=\"git\""));
         assert!(body.contains("Page unavailable"));
         assert!(body.contains("unknown ref"));
@@ -1717,7 +1717,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("search-form"));
-        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("action=\"/\""));
         assert!(body.contains("value=\"git\""));
         assert!(body.contains("Page unavailable"));
         assert!(body.contains("explicit ref is required"));
@@ -1736,7 +1736,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("search-form"));
-        assert!(body.contains("action=\"/fixtures\""));
+        assert!(body.contains("action=\"/\""));
         assert!(body.contains("value=\"git\""));
         assert!(body.contains("entry-modal"));
         assert!(body.contains("Entry not found"));
@@ -2092,7 +2092,7 @@ mod tests {
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let (status, body) =
-            request_body(app, "/fixtures/programs.git.enable?q=git&source=all").await;
+            request_body(app, "/fixtures/programs.git.enable?q=git").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("result"));
@@ -2111,7 +2111,7 @@ mod tests {
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let (status, body) =
-            request_body(app, "/fixtures/programs.missing.enable?q=git&source=all").await;
+            request_body(app, "/fixtures/programs.missing.enable?q=git").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("result"));
@@ -2197,7 +2197,7 @@ mod tests {
         let (status, body) = request_body(app.clone(), "/?q=git").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains(r#"href="/fixtures/git?q=git&amp;source=all""#));
+        assert!(body.contains(r#"href="/fixtures/git?q=git""#));
         assert!(!body.contains("?kind="));
 
         let uri = with_generation(
@@ -2207,7 +2207,7 @@ mod tests {
         let (status, body) = request_body(app, &uri).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("/fixtures/git?q=git&amp;source=all"));
+        assert!(body.contains("/fixtures/git?q=git"));
         assert!(!body.contains("?kind="));
     }
 
@@ -2269,7 +2269,7 @@ mod tests {
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let (status, body) =
-            request_body(app, "/fixtures/programs.git.enable?q=git&page=2&source=all").await;
+            request_body(app, "/fixtures/programs.git.enable?q=git&page=2").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_no_canonical(&body);
@@ -2802,7 +2802,7 @@ mod tests {
 
         let app = test_app(app_config_with_public_url(&index_dir));
         let uri = with_generation(
-            "/-/state/events?url=%2Ffixtures%2Fprograms.git.enable%3Fq%3Dgit%26source%3Dall&previous_url=%2F%3Fq%3Dgit",
+            "/-/state/events?url=%2Ffixtures%2Fprograms.git.enable%3Fq%3Dgit&previous_url=%2F%3Fq%3Dgit",
             &generation_id,
         );
         let (status, body) = request_body(app, &uri).await;

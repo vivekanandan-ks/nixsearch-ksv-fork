@@ -20,7 +20,7 @@ impl PageRequest {
     pub fn has_search_return_context(&self) -> bool {
         normalized_query(&self.query).is_some()
             || self.query.page.is_some()
-            || self.query.source == Some(QuerySource::All)
+            || !self.query.sources.is_empty()
     }
 
     pub fn is_direct_entry(&self) -> bool {
@@ -55,23 +55,12 @@ pub struct PageQuery {
 
     pub ref_set: Option<String>,
 
-    pub source: Option<QuerySource>,
+    pub sources: Vec<String>,
 
     pub page: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuerySource {
-    All,
-}
 
-impl QuerySource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-        }
-    }
-}
 
 pub fn normalized_query(query: &PageQuery) -> Option<&str> {
     query.q.as_deref().and_then(non_empty)
@@ -139,22 +128,24 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
     let mut q = None;
     let mut ref_id = None;
     let mut ref_set = None;
-    let mut source_param = None;
+    let mut sources = Vec::new();
     let mut page = None;
     let mut seen = HashSet::new();
 
     for (key, value) in strict_query_pairs(raw_query)? {
-        mark_seen(&mut seen, &key)?;
+        if key != "source" {
+            mark_seen(&mut seen, &key)?;
+        }
 
         match key.as_str() {
             "q" => q = non_empty_string(value),
             "ref" => ref_id = Some(required_value(&key, value)?),
             "ref_set" => ref_set = Some(required_value(&key, value)?),
             "source" => {
-                if value != QuerySource::All.as_str() {
-                    return Err(RequestParseError::new("source must be all"));
+                let val = required_value(&key, value)?;
+                if val != "all" {
+                    sources.push(val);
                 }
-                source_param = Some(QuerySource::All);
             }
             "page" => {
                 page = Some(parse_bounded_usize(&value, "page", 1, MAX_PAGE)?);
@@ -177,7 +168,7 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
             q,
             ref_id,
             ref_set,
-            source: source_param,
+            sources,
             page,
         },
     })

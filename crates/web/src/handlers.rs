@@ -953,9 +953,20 @@ fn validate_page_request(
                 raw_ref
             };
 
-            state
-                .search
-                .search_scopes_for_snapshot(snapshot, None, all_source_ref, raw_ref_set)?;
+            if page_state.active_sources.is_empty() {
+                state
+                    .search
+                    .search_scopes_for_snapshot(snapshot, None, all_source_ref, raw_ref_set)?;
+            } else {
+                for source in &page_state.active_sources {
+                    state.search.search_scopes_for_snapshot(
+                        snapshot,
+                        Some(source),
+                        all_source_ref,
+                        raw_ref_set,
+                    )?;
+                }
+            }
         }
         SourceFilter::Named(source) => {
             state.search.search_scopes_for_snapshot(
@@ -1159,7 +1170,7 @@ fn load_entry_data_from_snapshot(
                 .unwrap_or_default();
             
             other_versions.retain(|doc| {
-                doc.common().source != representative.document.common().source ||
+                doc.common().source == representative.document.common().source &&
                 doc.common().ref_id != representative.document.common().ref_id
             });
 
@@ -1191,7 +1202,7 @@ fn load_entry_data_from_snapshot(
                         .unwrap_or_default();
 
                     other_versions.retain(|doc| {
-                        doc.common().source != document.common().source ||
+                        doc.common().source == document.common().source &&
                         doc.common().ref_id != document.common().ref_id
                     });
 
@@ -1238,18 +1249,18 @@ fn search_request_for_page_state(
     offset: usize,
     limit: usize,
 ) -> SearchRequest {
-    let (source, ref_id, ref_set) = match &page_state.source_filter {
+    let (sources, ref_id, ref_set) = match &page_state.source_filter {
         SourceFilter::All => (
-            None,
+            page_state.active_sources.clone(),
             None,
             page_state.active_ref_set().map(ToOwned::to_owned),
         ),
-        SourceFilter::Named(source) => (Some(source.clone()), page_state.source_ref.clone(), None),
+        SourceFilter::Named(source) => (vec![source.clone()], page_state.source_ref.clone(), None),
     };
 
     SearchRequest {
         query: query.to_owned(),
-        source,
+        sources,
         ref_id,
         ref_set,
         offset,
@@ -1274,6 +1285,7 @@ mod tests {
                 entry: "programs.git.enable".to_owned(),
                 ref_id: None,
             }),
+            active_sources: Vec::new(),
         }
     }
 

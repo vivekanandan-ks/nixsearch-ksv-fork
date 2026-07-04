@@ -4,7 +4,7 @@ use nixsearch_index::search::SearchHit;
 use nixsearch_service::SitemapCandidate;
 
 use crate::entry::AnnotatedEntryDocument;
-use crate::request::{PageQuery, PageState, QuerySource, SourceFilter, non_empty};
+use crate::request::{PageQuery, PageState, SourceFilter, non_empty};
 #[cfg(test)]
 use crate::request::{PageRequest, PublicRoute};
 
@@ -20,13 +20,19 @@ pub fn search_url_for(source: Option<&str>, query: &PageQuery) -> String {
     let path = source.map(source_path).unwrap_or_else(|| "/".to_owned());
     let page_str = query.page.filter(|&p| p > 1).map(|p| p.to_string());
 
-    let qs = query_string([
+    let mut qs = query_string_dynamic([
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
         ("ref_set", query.ref_set.as_deref()),
-        ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
     ]);
+    
+    for src in &query.sources {
+        if !qs.is_empty() {
+            qs.push_str("&");
+        }
+        qs.push_str(&format!("source={}", encode_query(src)));
+    }
 
     if qs.is_empty() {
         path
@@ -65,13 +71,19 @@ fn entry_url_for(source: &str, entry: &str, query: &PageQuery) -> String {
     let path = format!("{}/{}", source_path(source), encode_path(entry));
     let page_str = query.page.filter(|&p| p > 1).map(|p| p.to_string());
 
-    let qs = query_string([
+    let mut qs = query_string_dynamic([
         ("q", query.q.as_deref()),
         ("ref", query.ref_id.as_deref()),
         ("ref_set", query.ref_set.as_deref()),
-        ("source", query.source.map(|s| s.as_str())),
         ("page", page_str.as_deref()),
     ]);
+
+    for src in &query.sources {
+        if !qs.is_empty() {
+            qs.push_str("&");
+        }
+        qs.push_str(&format!("source={}", encode_query(src)));
+    }
 
     if qs.is_empty() {
         path
@@ -82,7 +94,7 @@ fn entry_url_for(source: &str, entry: &str, query: &PageQuery) -> String {
 
 #[cfg(test)]
 pub fn close_url_for(request: &PageRequest) -> String {
-    if request.query.source == Some(QuerySource::All) {
+    if request.has_search_return_context() {
         return search_url_for(
             None,
             &PageQuery {
@@ -234,15 +246,24 @@ pub fn entry_url_for_document(
     page: Option<usize>,
 ) -> String {
     let common = document.common();
-    let mut from_scope = matches!(state.source_filter, SourceFilter::All).then_some(QuerySource::All);
+    let mut sources = if matches!(state.source_filter, SourceFilter::All) {
+        state.active_sources.clone()
+    } else {
+        Vec::new()
+    };
     let ref_set = state.active_ref_set().filter(|ref_set| {
         config.ref_set_contains_source_ref(ref_set, &common.source, &common.ref_id)
+    }).map(ToOwned::to_owned).or_else(|| {
+        config.ref_sets.keys().find(|name| {
+            config.ref_set_contains_source_ref(name, &common.source, &common.ref_id)
+        }).map(ToOwned::to_owned)
     });
+
     if ref_set.is_none() {
-        from_scope = None;
+        sources.clear();
     }
     let ref_set_refs =
-        ref_set.and_then(|ref_set| config.refs_for_ref_set_source(ref_set, &common.source));
+        ref_set.as_deref().and_then(|ref_set| config.refs_for_ref_set_source(ref_set, &common.source));
     let ref_id = match ref_set_refs {
         Some(refs) if refs.len() == 1 => None,
         _ => Some(common.ref_id.as_str()),
@@ -258,8 +279,8 @@ pub fn entry_url_for_document(
         &PageQuery {
             q: state.q.clone(),
             ref_id,
-            ref_set: ref_set.and_then(|ref_set| ref_set_for_link(config, ref_set)),
-            source: from_scope,
+            ref_set: ref_set.as_deref().and_then(|ref_set| ref_set_for_link(config, ref_set)),
+            sources,
             page,
         },
     )
@@ -313,7 +334,7 @@ fn encode_query(value: &str) -> String {
     urlencoding::encode(value).into_owned()
 }
 
-fn query_string<const N: usize>(pairs: [(&str, Option<&str>); N]) -> String {
+fn query_string_dynamic<const N: usize>(pairs: [(&str, Option<&str>); N]) -> String {
     pairs
         .into_iter()
         .filter_map(|(key, value)| {
@@ -337,10 +358,9 @@ mod tests {
     use nixsearch_core::target::RefRole;
     use nixsearch_index::annotation::SearchHitAnnotation;
     use nixsearch_test_support::{
-        REF_SMALL, SOURCE_FIXTURES, app_config, ingest_context_for, package_doc_for,
+        app_config, ingest_context_for, package_doc_for, REF_SMALL, SOURCE_FIXTURES,
     };
-
-    use crate::request::{PageQuery, PageRequest, PublicRoute, QuerySource, page_state};
+    use crate::request::{PageQuery, PageRequest, PublicRoute, page_state};
 
     fn ref_config(id: &str) -> RefConfig {
         RefConfig {
@@ -478,7 +498,7 @@ mod tests {
             query: PageQuery {
                 q: Some("git".to_owned()),
                 ref_set: Some("unused".to_owned()),
-                source: Some(QuerySource::All),
+                sources: Vec::new(),
                 page: Some(2),
                 ..PageQuery::default()
             },
@@ -494,7 +514,7 @@ mod tests {
 
         assert_eq!(
             entry_url_for_hit(&config, &state, &hit(document), Some(2)),
-            "/fixtures/git?q=git&source=all&page=2"
+            "/fixtures/git?q=git&page=2"
         );
     }
 
@@ -521,11 +541,11 @@ mod tests {
             PageQuery {
                 q: Some("git".to_owned()),
                 ref_id: Some("small".to_owned()),
-                source: None,
+                sources: Vec::new(),
                 ..PageQuery::default()
             },
         );
-        assert_eq!(close_url_for(&request), "/fixtures?q=git&ref=small");
+        assert_eq!(close_url_for(&request), "/?q=git");
     }
 
     #[test]
@@ -546,7 +566,7 @@ mod tests {
                 q: Some("git".to_owned()),
                 ref_id: Some("nixos-25.11".to_owned()),
                 ref_set: Some("25.11".to_owned()),
-                source: Some(QuerySource::All),
+                sources: Vec::new(),
                 ..PageQuery::default()
             },
         );
@@ -688,7 +708,7 @@ mod tests {
 
         assert_eq!(
             close_url_for_state(&config, &state),
-            "/nixpkgs?q=git&ref=nixos-25.11&page=3"
+            "/?q=git&page=3"
         );
     }
 

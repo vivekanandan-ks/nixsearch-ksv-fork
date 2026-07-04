@@ -620,12 +620,7 @@
     const parsed = new URL(url, window.location.href);
     const params = new URLSearchParams(parsed.search);
     const parts = parsed.pathname.split("/").filter(Boolean);
-    const sourceAll = params.get("source") === "__SOURCE_ALL_VALUE__";
-    const sourceId = sourceAll
-      ? ""
-      : parts[0]
-        ? decodeURIComponent(parts[0])
-        : "";
+    const sourceId = parts[0] ? decodeURIComponent(parts[0]) : "";
     const source = sourceMetadata(sourceId);
     const requestedRefSet = (params.get("ref_set") || "").trim();
 
@@ -870,27 +865,42 @@
     }
     const contextActiveRefSet = context.activeRefSet || "";
     const contextActiveRefSetExplicit = !!context.activeRefSetExplicit;
-    const activeSourceTab = getActiveSourceTab();
-    const sourceId = activeSourceTab
-      ? activeSourceTab.dataset.nixsearchSource || ""
-      : context.sourceId || "";
-    const path = sourcePath(sourceId);
+    
+    // Get all checked source checkboxes
+    const checkboxes = Array.from(document.querySelectorAll('input[data-nixsearch-source-checkbox]:checked'));
+    const sourceIds = checkboxes.map(cb => cb.value);
+
+    // If exactly one checkbox is checked, we behave like a specific source page.
+    // If multiple (or zero) are checked, we behave like the "All" page, but include source= parameters.
+    const isSingleSource = sourceIds.length === 1;
+    const primarySourceId = isSingleSource ? sourceIds[0] : "";
+    
+    // Always use home path for multiple sources, otherwise use source path
+    const path = sourcePath(primarySourceId);
     const params = new URLSearchParams();
 
     const q = document.querySelector('[data-nixsearch-input="q"]');
     if (q && q.value.trim()) params.set("q", q.value.trim());
 
-    if (sourceId) {
+    if (!isSingleSource) {
+      sourceIds.forEach(id => {
+        if (id) {
+            params.append("source", id);
+        }
+      });
+    }
+
+    if (primarySourceId) {
       const refValue = currentRefFromRadios();
-      const source = sourceMetadata(sourceId);
+      const source = sourceMetadata(primarySourceId);
       const refSetRefs = contextActiveRefSetExplicit
-        ? refsForRefSetSource(contextActiveRefSet, sourceId)
+        ? refsForRefSetSource(contextActiveRefSet, primarySourceId)
         : [];
       const shouldUseRefSet = refSetRefs.length > 0;
       const shouldSetRef =
         !shouldUseRefSet ||
         refSetRefs.length > 1;
-      const sourceMatchesContext = context.sourceId === sourceId;
+      const sourceMatchesContext = context.sourceId === primarySourceId;
 
       if (
         shouldSetRef &&
@@ -923,6 +933,7 @@
         params.set("ref_set", activeRefSet);
       }
     }
+
 
     const qs = params.toString();
     return qs ? path + "?" + qs : path;
@@ -1258,7 +1269,17 @@
     const state = normalizedStateFromUrl();
     const effectiveSource = state.sourceId;
 
-    setActiveSourceTab(effectiveSource);
+    // Update source checkboxes
+    const sourcesFromUrl = params.getAll("source");
+    const checkboxes = document.querySelectorAll('input[data-nixsearch-source-checkbox]');
+    checkboxes.forEach(cb => {
+        if (effectiveSource) {
+            cb.checked = cb.value === effectiveSource;
+        } else {
+            cb.checked = sourcesFromUrl.includes(cb.value);
+        }
+    });
+
     populateRefRadios(
       effectiveSource,
       state.activeRefSetExplicit ? state.activeRefSet : "",
@@ -1333,6 +1354,14 @@
 
   document.addEventListener("change", (evt) => {
     const el = evt.target;
+    
+    if (el.matches && el.matches('[data-nixsearch-source-checkbox]')) {
+      resetQueryHistoryGrouping();
+      resetSourceKeyboardHistoryGrouping();
+      navigate(buildSearchUrlFromInputs());
+      return;
+    }
+
     if (!el.matches || !el.matches('[data-nixsearch-input="ref"]')) return;
     resetQueryHistoryGrouping();
     resetSourceKeyboardHistoryGrouping();

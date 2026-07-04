@@ -7,7 +7,6 @@ use crate::urls::{all_tab_url_from_state, source_tab_url_from_state};
 
 use super::source_tag::color_for_source;
 
-const ALL_TAB_COLOR: &str = "#d4d4d8";
 
 pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: &str) -> Markup {
     let has_multiple_sources = config
@@ -27,7 +26,7 @@ pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: 
         form.search-form action=(form_action) method="get"
             style=[source_color.as_ref().map(|color| format!("--search-focus-color: {color};"))] {
             @if has_multiple_sources {
-                (render_source_tabs(config, state))
+                (render_source_checkboxes(config, state))
             }
 
             div.search-bar-row {
@@ -52,26 +51,16 @@ pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: 
     }
 }
 
-fn render_source_tabs(config: &AppConfig, state: &PageState) -> Markup {
+fn render_source_checkboxes(config: &AppConfig, state: &PageState) -> Markup {
     html! {
-        div.source-tabs-container {
-            nav.source-tabs {
-                a.source-tab href=(all_tab_url_from_state(config, state))
-                    data-nixsearch-source=""
-                    data-active[state.source_filter == SourceFilter::All]
-                    style=(format!("--tab-color: {ALL_TAB_COLOR};")) {
-                    "All"
-                }
-                @for (id, source) in config.sources.iter().filter(|(_, source)| source.has_searchable_refs()) {
-                    @let name = source.name.as_deref().unwrap_or(id);
-                    @let is_selected = matches!(&state.source_filter, SourceFilter::Named(s) if s == id);
-                    @let color = color_for_source(config, id);
-                    a.source-tab href=(source_tab_url_from_state(config, state, id))
-                        data-nixsearch-source=(id)
-                        data-active[is_selected]
-                        style=(format!("--tab-color: {color};")) {
-                        (name)
-                    }
+        div.source-checkboxes-container {
+            @for (id, source) in config.sources.iter().filter(|(_, source)| source.has_searchable_refs()) {
+                @let name = source.name.as_deref().unwrap_or(id);
+                @let is_selected = state.active_sources.contains(id) || (matches!(&state.source_filter, SourceFilter::Named(s) if s == id));
+                @let color = color_for_source(config, id);
+                label.source-checkbox style=(format!("--checkbox-color: {color};")) {
+                    input type="checkbox" name="source" value=(id) checked[is_selected] data-nixsearch-source-checkbox="";
+                    span { (name) }
                 }
             }
         }
@@ -79,7 +68,13 @@ fn render_source_tabs(config: &AppConfig, state: &PageState) -> Markup {
 }
 
 fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<&str>) -> Markup {
-    if matches!(state.source_filter, SourceFilter::All) {
+    let single_source_id = match &state.source_filter {
+        SourceFilter::Named(source_id) => Some(source_id.as_str()),
+        SourceFilter::All if state.active_sources.len() == 1 => Some(state.active_sources[0].as_str()),
+        _ => None,
+    };
+
+    if single_source_id.is_none() {
         return html! {
             div.ref-radios.noscript-ref-radios {
                 @for ref_set in config.ref_sets.keys() {
@@ -99,11 +94,8 @@ fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<
         };
     }
 
-    let SourceFilter::Named(source_id) = &state.source_filter else {
-        return html! {};
-    };
-
-    let Some(source) = config.sources.get(source_id.as_str()) else {
+    let source_id = single_source_id.unwrap();
+    let Some(source) = config.sources.get(source_id) else {
         return html! {};
     };
 
@@ -130,13 +122,19 @@ fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<
 }
 
 fn render_ref_radios(config: &AppConfig, state: &PageState) -> Markup {
-    let (refs, current, input_name): (Vec<&str>, Option<&str>, &str) = match &state.source_filter {
-        SourceFilter::All => (
+    let single_source_id = match &state.source_filter {
+        SourceFilter::Named(source_id) => Some(source_id.as_str()),
+        SourceFilter::All if state.active_sources.len() == 1 => Some(state.active_sources[0].as_str()),
+        _ => None,
+    };
+
+    let (refs, current, input_name): (Vec<&str>, Option<&str>, &str) = match single_source_id {
+        None => (
             config.ref_sets.keys().map(String::as_str).collect(),
             state.active_ref_set(),
             "ref_set",
         ),
-        SourceFilter::Named(source_id) => match config.sources.get(source_id.as_str()) {
+        Some(source_id) => match config.sources.get(source_id) {
             Some(source) => (
                 source.searchable_refs().map(|r| r.id.as_str()).collect(),
                 state.source_ref.as_deref(),

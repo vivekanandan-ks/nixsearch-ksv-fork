@@ -1,6 +1,6 @@
 use nixsearch_config::app::AppConfig;
 
-use super::{PageRequest, PublicRoute, QuerySource, non_empty, normalized_query};
+use super::{PageRequest, PublicRoute, non_empty, normalized_query};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageState {
@@ -10,6 +10,7 @@ pub struct PageState {
     pub ref_scope: RefScope,
     pub source_ref: Option<String>,
     pub detail: Option<DetailState>,
+    pub active_sources: Vec<String>,
 }
 
 impl PageState {
@@ -60,7 +61,7 @@ impl SourceFilter {
             PublicRoute::Home => Self::All,
             PublicRoute::Source { source } => Self::Named(source.clone()),
             PublicRoute::Entry { source, .. } => {
-                if request.query.source == Some(QuerySource::All) {
+                if request.has_search_return_context() {
                     Self::All
                 } else {
                     Self::Named(source.clone())
@@ -90,6 +91,7 @@ pub fn page_state(config: &AppConfig, request: &PageRequest) -> PageState {
                 ref_scope,
                 source_ref: None,
                 detail,
+                active_sources: request.query.sources.clone(),
             }
         }
         SourceFilter::Named(source) => {
@@ -120,6 +122,7 @@ pub fn page_state(config: &AppConfig, request: &PageRequest) -> PageState {
                 ref_scope,
                 source_ref,
                 detail,
+                active_sources: request.query.sources.clone(),
             }
         }
     }

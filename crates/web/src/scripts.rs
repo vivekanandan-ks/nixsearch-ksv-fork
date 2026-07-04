@@ -1,6 +1,6 @@
 use crate::DEFAULT_LIMIT;
 use crate::RESULTS_SLICE_URL;
-use crate::request::QuerySource;
+
 
 const DEFAULT_LIMIT_PLACEHOLDER: &str = "__DEFAULT_LIMIT__";
 const RESULTS_SLICE_URL_PLACEHOLDER: &str = "__RESULTS_SLICE_URL__";
@@ -22,14 +22,14 @@ pub fn navigation_script() -> String {
     include_str!("scripts/navigation.js")
         .replace(RESULTS_SLICE_URL_PLACEHOLDER, RESULTS_SLICE_URL)
         .replace(DEFAULT_LIMIT_PLACEHOLDER, &DEFAULT_LIMIT.to_string())
-        .replace(SOURCE_ALL_VALUE_PLACEHOLDER, QuerySource::All.as_str())
+        .replace(SOURCE_ALL_VALUE_PLACEHOLDER, "all")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LIMIT_PLACEHOLDER, RESULTS_SLICE_URL_PLACEHOLDER, SOURCE_ALL_VALUE_PLACEHOLDER,
-        dialog_reconcile_script, navigation_script,
+        DEFAULT_LIMIT_PLACEHOLDER, RESULTS_SLICE_URL_PLACEHOLDER, dialog_reconcile_script,
+        navigation_script,
     };
 
     #[test]
@@ -38,7 +38,6 @@ mod tests {
 
         assert!(!script.contains(DEFAULT_LIMIT_PLACEHOLDER));
         assert!(!script.contains(RESULTS_SLICE_URL_PLACEHOLDER));
-        assert!(!script.contains(SOURCE_ALL_VALUE_PLACEHOLDER));
         assert!(script.contains("const PAGE_SIZE = 50;"));
         assert!(script.contains(r#"const RESULTS_SLICE_URL = "/-/results/slice";"#));
     }

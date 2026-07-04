@@ -241,12 +241,6 @@ fn rejects_public_kind_query_param() {
     }
 }
 
-#[test]
-fn rejects_invalid_source_query_param() {
-    let error = page_request_from_public_url("/?source=fixtures").unwrap_err();
-
-    assert!(error.contains("source must be all"));
-}
 
 #[test]
 fn rejects_page_without_query_and_out_of_bounds_page() {
@@ -312,7 +306,7 @@ fn rejects_bad_percent_encoding_and_utf8() {
 
 #[test]
 fn parses_source_query_param() {
-    let request = page_request_from_public_url("/nixpkgs/git?q=git&source=all").unwrap();
+    let request = page_request_from_public_url("/nixpkgs/git?q=git&source=nixpkgs").unwrap();
     assert_eq!(
         request.route,
         PublicRoute::Entry {
@@ -321,7 +315,7 @@ fn parses_source_query_param() {
         }
     );
     assert_eq!(request.query.q.as_deref(), Some("git"));
-    assert_eq!(request.query.source, Some(QuerySource::All));
+    assert_eq!(request.query.sources, vec!["nixpkgs".to_string()]);
 }
 
 #[test]

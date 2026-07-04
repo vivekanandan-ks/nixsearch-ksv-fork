@@ -294,7 +294,7 @@ pub enum RequestResolutionError {
 #[derive(Debug, Clone, Default)]
 pub struct SearchRequest {
     pub query: String,
-    pub source: Option<String>,
+    pub sources: Vec<String>,
     pub ref_id: Option<String>,
     pub ref_set: Option<String>,
     pub offset: usize,
@@ -514,12 +514,26 @@ impl SearchService {
         snapshot: &ServedGenerationSnapshot,
         request: SearchRequest,
     ) -> ServiceResult<SearchResult> {
-        let scopes = self.search_scopes_for_snapshot(
-            snapshot,
-            request.source.as_deref(),
-            request.ref_id.as_deref(),
-            request.ref_set.as_deref(),
-        )?;
+        let mut scopes = Vec::new();
+        if request.sources.is_empty() {
+            let s = self.search_scopes_for_snapshot(
+                snapshot,
+                None,
+                request.ref_id.as_deref(),
+                request.ref_set.as_deref(),
+            )?;
+            scopes.extend(s);
+        } else {
+            for source in &request.sources {
+                let s = self.search_scopes_for_snapshot(
+                    snapshot,
+                    Some(source),
+                    request.ref_id.as_deref(),
+                    request.ref_set.as_deref(),
+                )?;
+                scopes.extend(s);
+            }
+        }
 
         snapshot
             .index
@@ -1418,7 +1432,7 @@ mod tests {
         let result = service
             .search_current(SearchRequest {
                 query: "programs.git.enable".to_owned(),
-                source: Some(SOURCE_FIXTURES.to_owned()),
+                sources: vec![SOURCE_FIXTURES.to_owned()],
                 ref_id: Some(REF_SMALL.to_owned()),
                 limit: 10,
                 ..SearchRequest::default()
@@ -1466,7 +1480,7 @@ mod tests {
         let error = service
             .search_current(SearchRequest {
                 query: "git".to_owned(),
-                source: Some(SOURCE_FIXTURES.to_owned()),
+                sources: vec![SOURCE_FIXTURES.to_owned()],
                 ref_id: Some(REF_SMALL.to_owned()),
                 limit: 10,
                 ..SearchRequest::default()
@@ -1599,7 +1613,7 @@ mod tests {
         let error = service
             .search_current(SearchRequest {
                 query: "git".to_owned(),
-                source: Some(SOURCE_FIXTURES.to_owned()),
+                sources: vec![SOURCE_FIXTURES.to_owned()],
                 ref_id: Some(REF_SMALL.to_owned()),
                 limit: 10,
                 ..SearchRequest::default()
@@ -1646,7 +1660,7 @@ mod tests {
         let error = service
             .search_current(SearchRequest {
                 query: "git".to_owned(),
-                source: Some(SOURCE_FIXTURES.to_owned()),
+                sources: vec![SOURCE_FIXTURES.to_owned()],
                 ref_id: Some(REF_SMALL.to_owned()),
                 limit: 10,
                 ..SearchRequest::default()

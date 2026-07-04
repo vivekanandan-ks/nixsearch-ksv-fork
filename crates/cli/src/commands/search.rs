@@ -15,7 +15,7 @@ pub(super) fn search(args: SearchArgs) -> Result<()> {
 
     let hits = service.search_current(SearchRequest {
         query: args.query,
-        source: args.source,
+        sources: args.source.into_iter().collect(),
         ref_id: args.ref_id,
         ref_set: args.ref_set,
         limit: args.limit,
