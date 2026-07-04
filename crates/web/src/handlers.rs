@@ -11,7 +11,7 @@ use futures_util::stream;
 use nixsearch_index::search::{EntryFactsStatus, EntryLookupResult, SearchResult};
 use nixsearch_service::{
     EntryRequest, RequestResolutionError, SearchRequest, ServedGenerationSnapshot, ServiceError,
-    ServiceResult,
+    ServiceResult, SortBy,
 };
 
 use crate::AppState;
@@ -568,6 +568,8 @@ fn state_events_navigation(
                 || previous_state.page != next_state.page
                 || previous_state.source_filter != next_state.source_filter
                 || previous_state.source_ref != next_state.source_ref
+                || previous_state.categories != next_state.categories
+                || previous_state.sort != next_state.sort
                 || previous_state.active_ref_set() != next_state.active_ref_set();
 
             StateEventsNavigation { patch_results }
@@ -1259,8 +1261,14 @@ fn search_request_for_page_state(
     };
 
     SearchRequest {
-        query: query.to_owned(),
+        query: page_state.q.clone().unwrap_or_default(),
         sources,
+        categories: page_state.categories.clone(),
+        sort: match page_state.sort.as_deref() {
+            Some("alphabetical") => SortBy::Alphabetical,
+            Some("source") => SortBy::Source,
+            _ => SortBy::Relevance,
+        },
         ref_id,
         ref_set,
         offset,
@@ -1286,6 +1294,8 @@ mod tests {
                 ref_id: None,
             }),
             active_sources: Vec::new(),
+            categories: Vec::new(),
+            sort: None,
         }
     }
 

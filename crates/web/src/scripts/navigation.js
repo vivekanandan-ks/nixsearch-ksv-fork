@@ -423,11 +423,44 @@
   function applyResultsPatch(html, targetUrl) {
     if (targetUrl && publicUrlKey(targetUrl) !== publicUrlKey()) return false;
 
-    const results = parsedElementFromHtml(html, "#results");
-    if (!results) return false;
+    const nextResults = parsedElementFromHtml(html, "#results");
+    if (!nextResults) return false;
+
+    const currentResults = document.getElementById("results");
+    if (currentResults) {
+      try {
+        const prevUrl = new URL(window.nixsearchPreviousUrl || window.location.href, window.location.origin);
+        const currUrl = new URL(window.location.href);
+        const prevQ = prevUrl.searchParams.get("q") || "";
+        const currQ = currUrl.searchParams.get("q") || "";
+        const prevSource = prevUrl.pathname + prevUrl.searchParams.getAll("source").join(",");
+        const currSource = currUrl.pathname + currUrl.searchParams.getAll("source").join(",");
+        const prevRef = prevUrl.searchParams.get("ref") || "";
+        const currRef = currUrl.searchParams.get("ref") || "";
+        const prevRefSet = prevUrl.searchParams.get("ref_set") || "";
+        const currRefSet = currUrl.searchParams.get("ref_set") || "";
+        
+        if (prevQ === currQ && prevSource === currSource && prevRef === currRef && prevRefSet === currRefSet) {
+          const currentSidebarBoxes = currentResults.querySelector(".category-checkboxes");
+          const nextSidebarBoxes = nextResults.querySelector(".category-checkboxes");
+          if (currentSidebarBoxes && nextSidebarBoxes) {
+             // Copy all checkboxes from current to next to preserve the full list
+             nextSidebarBoxes.innerHTML = currentSidebarBoxes.innerHTML;
+             
+             // Sync the checked state with the new URL
+             const currCategories = currUrl.searchParams.getAll("category");
+             nextSidebarBoxes.querySelectorAll("input[data-nixsearch-category-checkbox]").forEach(cb => {
+                cb.checked = currCategories.includes(cb.value);
+             });
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
 
     resetVirtualStateForPatch();
-    if (!replaceResultsElement(results)) return false;
+    if (!replaceResultsElement(nextResults)) return false;
     finishResultsPatch();
     return true;
   }
@@ -462,6 +495,7 @@
   }
 
   function shouldLoadResults(previousUrl, nextUrl) {
+    if (urlHasEntryDetail(previousUrl) !== urlHasEntryDetail(nextUrl)) return false;
     return resultsContextForUrl(previousUrl) !== resultsContextForUrl(nextUrl);
   }
 
@@ -530,11 +564,20 @@
     return document.querySelector("[data-nixsearch-ref-container]");
   }
 
-  function currentRefFromRadios() {
-    const checked = document.querySelector(
-      '[data-nixsearch-input="ref"]:checked',
-    );
-    return checked ? checked.value : "";
+  function currentRefFromRadios(expectedName = "") {
+    const el = document.querySelector('[data-nixsearch-input="ref"]');
+    if (!el) return "";
+    if (el.tagName === 'SELECT') return el.value;
+    if (el.type === 'hidden') {
+      if (expectedName && el.name !== expectedName) return "";
+      return el.value;
+    }
+    const checked = document.querySelector('[data-nixsearch-input="ref"]:checked');
+    if (checked) {
+      if (expectedName && checked.name !== expectedName) return "";
+      return checked.value;
+    }
+    return "";
   }
 
   function sourceMetadata(sourceId) {
@@ -716,25 +759,19 @@
   }
 
   function replaceRefRadios(container, refs, selectedRef, inputName) {
-    container.replaceChildren(
-      ...refs.map((refId) => {
-        const label = document.createElement("label");
-        label.className = "ref-radio-label";
-
-        const input = document.createElement("input");
-        input.type = "radio";
-        input.name = inputName;
-        input.value = refId;
-        input.checked = refId === selectedRef;
-        input.dataset.nixsearchInput = "ref";
-
-        const span = document.createElement("span");
-        span.textContent = refId;
-
-        label.append(input, span);
-        return label;
-      }),
-    );
+    const select = document.createElement("select");
+    select.className = "ref-select";
+    select.name = inputName;
+    select.dataset.nixsearchInput = "ref";
+    
+    container.replaceChildren(select);
+    select.append(...refs.map((refId) => {
+      const option = document.createElement("option");
+      option.value = refId;
+      option.textContent = refId;
+      option.selected = refId === selectedRef;
+      return option;
+    }));
   }
 
   function syncHeaderHeight() {
@@ -891,7 +928,7 @@
     }
 
     if (primarySourceId) {
-      const refValue = currentRefFromRadios();
+      const refValue = currentRefFromRadios("ref");
       const source = sourceMetadata(primarySourceId);
       const refSetRefs = contextActiveRefSetExplicit
         ? refsForRefSetSource(contextActiveRefSet, primarySourceId)
@@ -905,6 +942,7 @@
       if (
         shouldSetRef &&
         refValue &&
+        sourceMatchesContext &&
         (!source || shouldUseRefSet || refValue !== source.defaultRef)
       ) {
         params.set("ref", refValue);
@@ -923,7 +961,7 @@
         params.set("ref_set", contextActiveRefSet);
       }
     } else {
-      const refSetValue = currentRefFromRadios();
+      const refSetValue = currentRefFromRadios("ref_set");
       const activeRefSet = refSetValue
         ? normalizeAllRefSet(refSetValue)
         : contextActiveRefSetExplicit
@@ -934,6 +972,16 @@
       }
     }
 
+    const currentParams = new URLSearchParams(window.location.search);
+    if (currentParams.has("sort")) {
+      params.set("sort", currentParams.get("sort"));
+    }
+    
+    // Read categories from checked checkboxes in the DOM
+    const categoryCheckboxes = Array.from(document.querySelectorAll('input[data-nixsearch-category-checkbox]:checked'));
+    categoryCheckboxes.forEach(cb => {
+      params.append("category", cb.value);
+    });
 
     const qs = params.toString();
     return qs ? path + "?" + qs : path;
@@ -1288,10 +1336,17 @@
 
     const refParam = effectiveSource ? state.refId : state.activeRefSet;
     if (refParam) {
-      const radio = document.querySelector(
-        `[data-nixsearch-input="ref"][value="${CSS.escape(refParam)}"]`,
-      );
-      if (radio) radio.checked = true;
+      const input = document.querySelector('[data-nixsearch-input="ref"]');
+      if (input) {
+        if (input.tagName === 'SELECT') {
+          input.value = refParam;
+        } else {
+          const radio = document.querySelector(
+            `[data-nixsearch-input="ref"][value="${CSS.escape(refParam)}"]`,
+          );
+          if (radio) radio.checked = true;
+        }
+      }
     }
 
     const q = document.querySelector('[data-nixsearch-input="q"]');
@@ -1355,7 +1410,7 @@
   document.addEventListener("change", (evt) => {
     const el = evt.target;
     
-    if (el.matches && el.matches('[data-nixsearch-source-checkbox]')) {
+    if (el.matches && (el.matches('[data-nixsearch-source-checkbox]') || el.matches('[data-nixsearch-category-checkbox]'))) {
       resetQueryHistoryGrouping();
       resetSourceKeyboardHistoryGrouping();
       navigate(buildSearchUrlFromInputs());
@@ -1563,6 +1618,12 @@
   document.addEventListener("input", (evt) => {
     const el = evt.target;
     if (!el.matches || !el.matches('[data-nixsearch-input="q"]')) return;
+    
+    // Clear category selections on new search
+    document.querySelectorAll('[data-nixsearch-category-checkbox]').forEach(cb => {
+      cb.checked = false;
+    });
+
     clearPendingQueryNavigation();
     resetSourceKeyboardHistoryGrouping();
     scheduleQueryHistoryBoundary();

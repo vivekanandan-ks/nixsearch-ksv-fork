@@ -13,10 +13,30 @@ impl SearchIndex {
         &self,
         query_text: &str,
         scopes: &[SearchScope],
+        categories: &[String],
     ) -> Result<Box<dyn Query>> {
         let text_query = self.build_text_query(query_text)?;
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
+
+        if !categories.is_empty() {
+            let mut cat_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(categories.len());
+            for cat in categories {
+                let cat_query: Box<dyn Query> = if cat == "No Category" {
+                    match tantivy::query::RegexQuery::from_pattern("^[^.]+$", self.fields.name_exact) {
+                        Ok(q) => Box::new(q),
+                        Err(_) => Box::new(tantivy::query::EmptyQuery),
+                    }
+                } else {
+                    Box::new(tantivy::query::TermQuery::new(
+                        Term::from_field_text(self.fields.name_groups, cat),
+                        tantivy::schema::IndexRecordOption::Basic,
+                    ))
+                };
+                cat_clauses.push((Occur::Should, cat_query));
+            }
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(cat_clauses))));
+        }
 
         if !scopes.is_empty() {
             let mut scope_clauses = Vec::with_capacity(scopes.len());

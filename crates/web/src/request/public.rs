@@ -57,6 +57,10 @@ pub struct PageQuery {
 
     pub sources: Vec<String>,
 
+    pub categories: Vec<String>,
+
+    pub sort: Option<String>,
+
     pub page: Option<usize>,
 }
 
@@ -129,11 +133,13 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
     let mut ref_id = None;
     let mut ref_set = None;
     let mut sources = Vec::new();
+    let mut categories = Vec::new();
+    let mut sort = None;
     let mut page = None;
     let mut seen = HashSet::new();
 
     for (key, value) in strict_query_pairs(raw_query)? {
-        if key != "source" {
+        if key != "source" && key != "category" {
             mark_seen(&mut seen, &key)?;
         }
 
@@ -146,6 +152,12 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
                 if val != "all" {
                     sources.push(val);
                 }
+            }
+            "category" => {
+                categories.push(required_value(&key, value)?);
+            }
+            "sort" => {
+                sort = Some(required_value(&key, value)?);
             }
             "page" => {
                 page = Some(parse_bounded_usize(&value, "page", 1, MAX_PAGE)?);
@@ -169,6 +181,8 @@ pub(crate) fn page_request_from_public_uri(uri: &Uri) -> ParseResult<PageRequest
             ref_id,
             ref_set,
             sources,
+            categories,
+            sort,
             page,
         },
     })

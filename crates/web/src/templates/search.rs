@@ -35,15 +35,23 @@ pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: 
                     autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" autofocus
                     data-nixsearch-input="q";
 
-                div.ref-radios.js-ref-radios
-                    data-nixsearch-ref-container=""
-                    style=[source_color.as_ref().map(|color| format!("--source-color: {color};"))] {
-                    (render_ref_radios(config, state))
+                @if q.is_empty() {
+                    div.ref-radios.js-ref-radios
+                        data-nixsearch-ref-container=""
+                        style=[source_color.as_ref().map(|color| format!("--source-color: {color};"))] {
+                        (render_ref_radios(config, state, false))
+                    }
+
+                    noscript {
+                        (render_ref_links(config, state, source_color.as_deref()))
+                    }
+                } @else {
+                    div style="display: none;" {
+                        (render_ref_radios(config, state, true))
+                    }
                 }
 
-                noscript {
-                    (render_ref_links(config, state, source_color.as_deref()))
-                }
+
             }
 
             button.search-submit type="submit" { "Search" }
@@ -52,15 +60,29 @@ pub fn render_form(config: &AppConfig, state: &PageState, form_action: &str, q: 
 }
 
 fn render_source_checkboxes(config: &AppConfig, state: &PageState) -> Markup {
+    let searchable_sources: Vec<_> = config
+        .sources
+        .iter()
+        .filter(|(_, source)| source.has_searchable_refs())
+        .collect();
+        
+    let all_selected = searchable_sources.iter().all(|(id, _)| {
+        state.active_sources.contains(*id)
+            || (matches!(&state.source_filter, SourceFilter::Named(s) if s == *id))
+            || matches!(&state.source_filter, SourceFilter::All)
+    });
+
     html! {
         div.source-checkboxes-container {
-            @for (id, source) in config.sources.iter().filter(|(_, source)| source.has_searchable_refs()) {
+            @for (id, source) in searchable_sources {
                 @let name = source.name.as_deref().unwrap_or(id);
-                @let is_selected = state.active_sources.contains(id) || (matches!(&state.source_filter, SourceFilter::Named(s) if s == id));
+                @let is_selected = state.active_sources.contains(id) 
+                    || (matches!(&state.source_filter, SourceFilter::Named(s) if s == id));
                 @let color = color_for_source(config, id);
                 label.source-checkbox style=(format!("--checkbox-color: {color};")) {
                     input type="checkbox" name="source" value=(id) checked[is_selected] data-nixsearch-source-checkbox="";
                     span { (name) }
+                    span.source-checkbox-close { "×" }
                 }
             }
         }
@@ -121,7 +143,7 @@ fn render_ref_links(config: &AppConfig, state: &PageState, source_color: Option<
     }
 }
 
-fn render_ref_radios(config: &AppConfig, state: &PageState) -> Markup {
+fn render_ref_radios(config: &AppConfig, state: &PageState, is_hidden: bool) -> Markup {
     let single_source_id = match &state.source_filter {
         SourceFilter::Named(source_id) => Some(source_id.as_str()),
         SourceFilter::All if state.active_sources.len() == 1 => Some(state.active_sources[0].as_str()),
@@ -147,11 +169,15 @@ fn render_ref_radios(config: &AppConfig, state: &PageState) -> Markup {
     html! {
         @for ref_id in &refs {
             @let is_selected = current == Some(*ref_id);
-            label.ref-radio-label {
-                input type="radio" name=(input_name) value=(ref_id)
-                    checked[is_selected]
-                    data-nixsearch-input="ref";
-                span { (ref_id) }
+            @if is_hidden {
+                @if is_selected {
+                    input type="hidden" name=(input_name) value=(ref_id) data-nixsearch-input="ref";
+                }
+            } @else {
+                label.ref-radio-label {
+                    input type="radio" name=(input_name) value=(ref_id) checked[is_selected] data-nixsearch-input="ref";
+                    span { (ref_id) }
+                }
             }
         }
     }

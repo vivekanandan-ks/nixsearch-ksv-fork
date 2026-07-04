@@ -291,14 +291,24 @@ pub enum RequestResolutionError {
     NoServedSearchScopes,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SortBy {
+    #[default]
+    Relevance,
+    Alphabetical,
+    Source,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchRequest {
     pub query: String,
     pub sources: Vec<String>,
+    pub categories: Vec<String>,
     pub ref_id: Option<String>,
     pub ref_set: Option<String>,
     pub offset: usize,
     pub limit: usize,
+    pub sort: SortBy,
 }
 
 #[derive(Debug, Clone)]
@@ -538,10 +548,16 @@ impl SearchService {
         snapshot
             .index
             .search(SearchOptions {
-                query: request.query,
+                query: request.query.clone(),
+                scopes,
                 limit: request.limit,
                 offset: request.offset,
-                scopes,
+                categories: request.categories.clone(),
+                sort: match request.sort {
+                    SortBy::Alphabetical => nixsearch_index::search::IndexSortBy::Alphabetical,
+                    SortBy::Source => nixsearch_index::search::IndexSortBy::Source,
+                    SortBy::Relevance => nixsearch_index::search::IndexSortBy::Relevance,
+                },
             })
             .map_err(ServiceError::Search)
     }

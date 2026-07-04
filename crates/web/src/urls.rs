@@ -138,6 +138,8 @@ pub fn all_url_from_state(config: &AppConfig, state: &PageState) -> String {
                 .active_ref_set()
                 .and_then(|ref_set| ref_set_for_link(config, ref_set)),
             page: state.page,
+            sort: state.sort.clone(),
+            categories: state.categories.clone(),
             ..PageQuery::default()
         },
     )
@@ -197,6 +199,8 @@ pub fn source_url_from_state(config: &AppConfig, state: &PageState, source: &str
             ref_id,
             ref_set,
             page: state.page,
+            sort: state.sort.clone(),
+            categories: state.categories.clone(),
             ..PageQuery::default()
         },
     )
@@ -281,7 +285,9 @@ pub fn entry_url_for_document(
             ref_id,
             ref_set: ref_set.as_deref().and_then(|ref_set| ref_set_for_link(config, ref_set)),
             sources,
-            page,
+            categories: state.categories.clone(),
+            sort: state.sort.clone(),
+            page: page,
         },
     )
 }

@@ -11,6 +11,8 @@ pub struct PageState {
     pub source_ref: Option<String>,
     pub detail: Option<DetailState>,
     pub active_sources: Vec<String>,
+    pub categories: Vec<String>,
+    pub sort: Option<String>,
 }
 
 impl PageState {
@@ -92,6 +94,8 @@ pub fn page_state(config: &AppConfig, request: &PageRequest) -> PageState {
                 source_ref: None,
                 detail,
                 active_sources: request.query.sources.clone(),
+                categories: request.query.categories.clone(),
+                sort: request.query.sort.clone(),
             }
         }
         SourceFilter::Named(source) => {
@@ -123,6 +127,8 @@ pub fn page_state(config: &AppConfig, request: &PageRequest) -> PageState {
                 source_ref,
                 detail,
                 active_sources: request.query.sources.clone(),
+                categories: request.query.categories.clone(),
+                sort: request.query.sort.clone(),
             }
         }
     }

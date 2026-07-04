@@ -56,12 +56,22 @@ pub struct SearchScope {
     pub entry_kind: IndexedEntryKind,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum IndexSortBy {
+    #[default]
+    Relevance,
+    Alphabetical,
+    Source,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
     pub query: String,
     pub limit: usize,
     pub offset: usize,
     pub scopes: Vec<SearchScope>,
+    pub sort: IndexSortBy,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +240,7 @@ impl SearchIndex {
             for scope in &options.scopes {
                 let (mut scope_candidates, scope_total) = self.search_candidates(
                     &searcher,
-                    &options.query,
+                    &options,
                     std::slice::from_ref(scope),
                     candidate_limit,
                 )?;
@@ -240,7 +250,7 @@ impl SearchIndex {
 
             (candidates, total)
         } else {
-            self.search_candidates(&searcher, &options.query, &options.scopes, candidate_limit)?
+            self.search_candidates(&searcher, &options, &options.scopes, candidate_limit)?
         };
         let candidate_window_len = candidates.len();
         let candidate_ids = candidates
@@ -270,7 +280,7 @@ impl SearchIndex {
             } else {
                 self.search_native_hits(
                     &searcher,
-                    &options.query,
+                    &options,
                     &options.scopes,
                     options.offset.max(candidate_window_len),
                     remaining,
@@ -286,11 +296,11 @@ impl SearchIndex {
     fn search_candidates(
         &self,
         searcher: &Searcher,
-        query_text: &str,
+        options: &SearchOptions,
         scopes: &[SearchScope],
         limit: usize,
     ) -> Result<(Vec<SearchCandidate>, usize)> {
-        let query = self.build_query(query_text, scopes)?;
+        let query = self.build_query(&options.query, scopes, &options.categories)?;
 
         let (total, top_docs) = searcher
             .search(
@@ -316,7 +326,7 @@ impl SearchIndex {
     fn search_native_hits(
         &self,
         searcher: &Searcher,
-        query_text: &str,
+        options: &SearchOptions,
         scopes: &[SearchScope],
         offset: usize,
         limit: usize,
@@ -325,7 +335,7 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
 
-        let query = self.build_query(query_text, scopes)?;
+        let query = self.build_query(&options.query, scopes, &options.categories)?;
         let top_docs = searcher
             .search(
                 &*query,
@@ -362,7 +372,7 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
 
-        let query = self.build_query(&options.query, &options.scopes)?;
+        let query = self.build_query(&options.query, &options.scopes, &options.categories)?;
         let mut hits = Vec::with_capacity(limit);
         let mut skipped = 0;
         let mut native_offset = 0;

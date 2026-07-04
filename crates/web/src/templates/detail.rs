@@ -44,6 +44,19 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                         }
                     }))
                 }
+                @let parts: Vec<&str> = option.common.name.split('.').collect();
+                @if parts.len() > 1 {
+                    (section("Explore Categories", html! {
+                        div.category-links {
+                            @for i in 1..parts.len() {
+                                @let prefix = parts[0..i].join(".");
+                                a.category-link href=(format!("/?q={}.", prefix)) {
+                                    (prefix) ".*"
+                                }
+                            }
+                        }
+                    }))
+                }
             }
         }
 
@@ -122,6 +135,19 @@ pub fn render(document: &SearchDocument, config: &AppConfig) -> Markup {
                 }
                 @if !package.maintainers.is_empty() {
                     (maintainers_section(&package.maintainers))
+                }
+                @let parts: Vec<&str> = package.common.name.split('.').collect();
+                @if parts.len() > 1 {
+                    (section("Explore Categories", html! {
+                        div.category-links {
+                            @for i in 1..parts.len() {
+                                @let prefix = parts[0..i].join(".");
+                                a.category-link href=(format!("/?q={}.", prefix)) {
+                                    (prefix) ".*"
+                                }
+                            }
+                        }
+                    }))
                 }
             }
         }

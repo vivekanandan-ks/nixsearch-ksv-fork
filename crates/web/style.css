@@ -156,6 +156,61 @@ html.modal-open {
   color: color-mix(in srgb, var(--logo-text-accent) 35%, white);
 }
 
+/* ─── Source Checkboxes (Pills) ─── */
+
+.source-checkboxes-container {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.source-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.source-checkbox input[type="checkbox"] {
+  display: none;
+}
+
+.source-checkbox-close {
+  display: none;
+  font-size: 0.8rem;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.source-checkbox:has(input:checked) .source-checkbox-close {
+  display: inline;
+}
+
+.source-checkbox:not(:has(input:checked)):hover {
+  border-color: var(--checkbox-color, var(--text));
+  color: var(--checkbox-color, var(--text));
+}
+
+.source-checkbox:has(input:checked) {
+  background: var(--checkbox-color, white);
+  border-color: var(--checkbox-color, white);
+  color: var(--bg);
+}
+
+.source-checkbox:has(input:checked):hover .source-checkbox-close {
+  opacity: 1;
+}
+
 /* ─── Search form layout ─── */
 
 .search-form {
@@ -202,6 +257,28 @@ html.modal-open {
   gap: 0.5rem;
   min-height: 1.4rem;
   flex-wrap: wrap;
+}
+
+.ref-select {
+  background: var(--bg);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ref-select:hover, .ref-select:focus {
+  border-color: var(--source-color, var(--text-bright));
+  color: var(--source-color, var(--text-bright));
+}
+
+.ref-select option {
+  background: var(--bg);
+  color: var(--text);
 }
 
 .ref-radio-label {
@@ -1184,4 +1261,81 @@ a:hover {
 .channel-select:focus {
   outline: none;
   border-color: var(--accent);
+}
+.category-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.category-link {
+  background-color: var(--card-bg-color);
+  color: var(--text-color);
+  border: 1px solid var(--border-color);
+  padding: 0.25rem 0.5rem;
+  border-radius: 1rem;
+  text-decoration: none;
+  font-size: 0.85rem;
+  transition: all 0.2s ease-in-out;
+}
+
+.category-link:hover {
+  background-color: var(--primary-color);
+  color: #fff;
+  border-color: var(--primary-color);
+}
+
+.search-container {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+}
+
+.sidebar {
+  width: 250px;
+  flex-shrink: 0;
+}
+
+.sidebar h3 {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+  color: var(--text);
+}
+
+.category-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.category-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  transition: all 0.2s ease;
+  width: fit-content;
+}
+
+.category-checkbox:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.category-checkbox:has(input:checked) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.category-checkbox input {
+  display: none;
 }

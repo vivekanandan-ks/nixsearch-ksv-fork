@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use tantivy::schema::{Field, STORED, STRING, Schema, TEXT};
+use tantivy::schema::{Field, FAST, STORED, STRING, Schema, TEXT};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 5;
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IndexFields {
@@ -94,12 +94,12 @@ pub(crate) fn build_schema() -> Schema {
     let mut builder = Schema::builder();
 
     builder.add_text_field("id", STRING | STORED);
-    builder.add_text_field("source", STRING | STORED);
+    builder.add_text_field("source", STRING | STORED | FAST);
     builder.add_text_field("ref", STRING | STORED);
     builder.add_text_field("kind", STRING | STORED);
     builder.add_bool_field("entry_unique_within_kind", STORED);
 
-    builder.add_text_field("name_exact", STRING | STORED);
+    builder.add_text_field("name_exact", STRING | STORED | FAST);
     builder.add_text_field("name_text", TEXT | STORED);
     builder.add_text_field("name_root", STRING | STORED);
     builder.add_text_field("name_groups", STRING | STORED);

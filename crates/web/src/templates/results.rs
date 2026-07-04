@@ -18,18 +18,41 @@ pub fn render(state: &PageState, hits: &[SearchHit], total: usize, config: &AppC
         return render_empty();
     };
 
+    let mut unique_categories = std::collections::BTreeSet::new();
+    let mut has_no_category = false;
+    for hit in hits {
+        let name = match &hit.document {
+            SearchDocument::Option(o) => &o.common.name,
+            SearchDocument::Package(p) => &p.common.name,
+        };
+        let mut parts = name.split('.');
+        if let Some(first) = parts.next() {
+            if parts.next().is_some() {
+                unique_categories.insert(first.to_owned());
+            } else {
+                has_no_category = true;
+            }
+        }
+    }
+
     if hits.is_empty() && total == 0 {
         return html! {
-            div #results.results-status {
-                "No results for " strong { (q) } "."
+            div #results.search-container {
+                (render_sidebar(&unique_categories, has_no_category, state, config))
+                div.results-main.results-status {
+                    "No results for " strong { (q) } "."
+                }
             }
         };
     }
 
     if hits.is_empty() {
         return html! {
-            div #results.results-status {
-                "No results on this page for " strong { (q) } "."
+            div #results.search-container {
+                (render_sidebar(&unique_categories, has_no_category, state, config))
+                div.results-main.results-status {
+                    "No results on this page for " strong { (q) } "."
+                }
             }
         };
     }
@@ -39,9 +62,12 @@ pub fn render(state: &PageState, hits: &[SearchHit], total: usize, config: &AppC
     let offset = (page - 1) * DEFAULT_LIMIT;
 
     html! {
-        div #results aria-live="polite"
+        div #results.search-container
+            aria-live="polite"
             data-total=(total)
             data-start-offset=(offset) {
+            (render_sidebar(&unique_categories, has_no_category, state, config))
+            div.results-main {
             div.results-status {
                 strong { (total) }
                 " result" @if total != 1 { "s" }
@@ -75,6 +101,46 @@ pub fn render(state: &PageState, hits: &[SearchHit], total: usize, config: &AppC
                             @let _ = next_state.page.replace(page + 1);
                             a.pagination-link href=(search_url_for_state(config, &next_state)) { "Next →" }
                         }
+                    }
+                }
+            }
+        }
+        }
+    }
+}
+
+fn render_sidebar(
+    categories: &std::collections::BTreeSet<String>,
+    has_no_category: bool,
+    state: &PageState,
+    config: &AppConfig,
+) -> Markup {
+    if state.source_filter == SourceFilter::All {
+        return html! {};
+    }
+
+    html! {
+        div.sidebar {
+            h3 { "Categories" }
+            div.category-checkboxes {
+                @if has_no_category {
+                    @let is_selected = state.categories.contains(&"No Category".to_owned());
+                    label.category-checkbox {
+                        input type="checkbox"
+                            value="No Category"
+                            checked[is_selected]
+                            data-nixsearch-category-checkbox="";
+                        span { "No Category" }
+                    }
+                }
+                @for cat in categories {
+                    @let is_selected = state.categories.contains(cat);
+                    label.category-checkbox {
+                        input type="checkbox"
+                            value=(cat)
+                            checked[is_selected]
+                            data-nixsearch-category-checkbox="";
+                        span { (cat) }
                     }
                 }
             }
